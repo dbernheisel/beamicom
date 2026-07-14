@@ -21,6 +21,16 @@ defmodule Beamicom.NES.PPU do
 
   import Bitwise
 
+  # Bit-reversed byte lookup (input is always 0..255), computed at compile time:
+  # turns the 8-iteration reduce in horizontal sprite flips into one `elem/2`.
+  @rev 0..255
+       |> Enum.map(fn b ->
+         <<b7::1, b6::1, b5::1, b4::1, b3::1, b2::1, b1::1, b0::1>> = <<b>>
+         <<r>> = <<b0::1, b1::1, b2::1, b3::1, b4::1, b5::1, b6::1, b7::1>>
+         r
+       end)
+       |> List.to_tuple()
+
   @compile {:inline,
             sel: 2,
             bg_on?: 1,
@@ -288,7 +298,7 @@ defmodule Beamicom.NES.PPU do
     {bank ||| tile <<< 4, row}
   end
 
-  defp reverse_byte(b), do: Enum.reduce(0..7, 0, &(&2 ||| (b >>> &1 &&& 1) <<< (7 - &1)))
+  defp reverse_byte(b), do: elem(@rev, b)
 
   defp shift(ppu) do
     %{
