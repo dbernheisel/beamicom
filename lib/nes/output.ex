@@ -32,8 +32,18 @@ defmodule Beamicom.NES.Output do
   def publish_audio([]), do: :ok
   def publish_audio(samples), do: GenServer.cast(__MODULE__, {:audio, samples})
 
-  @doc "Subscribe the caller to `{:frame, number}` and `{:audio, samples}` messages."
-  def subscribe, do: GenServer.call(__MODULE__, :subscribe)
+  @doc """
+  Subscribe the caller to video `{:frame, number}` notifications only. A
+  video-only sink (the Scenic screen) never receives — and never has copied into
+  its mailbox — the audio sample chunks it would just ignore.
+  """
+  def subscribe_video, do: GenServer.call(__MODULE__, {:subscribe, :video})
+
+  @doc "Subscribe the caller to audio `{:audio, samples}` chunks only (the audio sink)."
+  def subscribe_audio, do: GenServer.call(__MODULE__, {:subscribe, :audio})
+
+  @doc "Subscribe the caller to both video and audio (e.g. a combined sink or test)."
+  def subscribe, do: GenServer.call(__MODULE__, {:subscribe, :both})
 
   @doc "The latest published frame, read straight from ETS (nil if none yet)."
   def latest do
@@ -46,29 +56,33 @@ defmodule Beamicom.NES.Output do
   @impl true
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    {:ok, %{subscribers: MapSet.new()}}
+    {:ok, %{video: MapSet.new(), audio: MapSet.new()}}
   end
 
   @impl true
-  def handle_call(:subscribe, {pid, _}, state) do
+  def handle_call({:subscribe, kind}, {pid, _}, state) do
     Process.monitor(pid)
-    {:reply, :ok, %{state | subscribers: MapSet.put(state.subscribers, pid)}}
+    video = if kind in [:video, :both], do: MapSet.put(state.video, pid), else: state.video
+    audio = if kind in [:audio, :both], do: MapSet.put(state.audio, pid), else: state.audio
+    {:reply, :ok, %{state | video: video, audio: audio}}
   end
 
   @impl true
   def handle_cast({:publish, frame}, state) do
     :ets.insert(@table, {:latest, frame})
-    Enum.each(state.subscribers, &send(&1, {:frame, frame.number}))
+    Enum.each(state.video, &send(&1, {:frame, frame.number}))
     {:noreply, state}
   end
 
   @impl true
   def handle_cast({:audio, samples}, state) do
-    Enum.each(state.subscribers, &send(&1, {:audio, samples}))
+    Enum.each(state.audio, &send(&1, {:audio, samples}))
     {:noreply, state}
   end
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state),
-    do: {:noreply, %{state | subscribers: MapSet.delete(state.subscribers, pid)}}
+    do:
+      {:noreply,
+       %{state | video: MapSet.delete(state.video, pid), audio: MapSet.delete(state.audio, pid)}}
 end

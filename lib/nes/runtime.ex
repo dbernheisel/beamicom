@@ -27,6 +27,11 @@ defmodule Beamicom.NES.Runtime do
 
   @impl true
   def init(opts) do
+    # The emulation loop is soft-real-time: it must finish each frame within the
+    # ~16.7ms budget or the audio sink starves. Run it above the video sink and
+    # Scenic driver so CPU contention can't push a frame past its deadline. Safe
+    # because paced play sleeps between frames (it never busy-holds the CPU).
+    Process.flag(:priority, :high)
     console = Console.load(Keyword.fetch!(opts, :rom))
     pace = Keyword.get(opts, :pace, true)
     # Playback speed multiplier (1.0 = real-time NTSC). Below 1.0 paces frames

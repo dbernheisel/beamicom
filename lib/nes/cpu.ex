@@ -166,6 +166,10 @@ defmodule Beamicom.NES.CPU do
 
   # Equivalent of `n` per-cycle polls when the line held steady at `line`: a rising
   # edge can only be the very first cycle, and it propagates to nmi_pending after.
+  # Steady line with no queued edge (the overwhelming common case): all three NMI
+  # fields would be rewritten with their current values — skip the struct rebuild.
+  defp bulk_poll(%{nmi_edge: false, nmi_prev: prev} = cpu, line, _n) when line == prev, do: cpu
+
   defp bulk_poll(cpu, line, 1), do: poll_nmi_line(cpu, line)
 
   defp bulk_poll(cpu, line, _n) do
