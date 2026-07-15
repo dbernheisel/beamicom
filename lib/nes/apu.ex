@@ -38,6 +38,21 @@ defmodule Beamicom.NES.APU do
             frame_irq: false,
             seq_cycle: 0,
             apu_tick: false,
+            # Hot per-segment channel state kept top-level (not in the channel maps)
+            # so advance/2 updates plain integer fields instead of copying six
+            # ~18-key maps every segment. Channel config stays in the maps.
+            p1_timer: 0,
+            p1_seq: 0,
+            p2_timer: 0,
+            p2_seq: 0,
+            tri_timer: 0,
+            tri_seq: 0,
+            noise_timer: 0,
+            noise_shift: 1,
+            m5p1_timer: 0,
+            m5p1_seq: 0,
+            m5p2_timer: 0,
+            m5p2_seq: 0,
             sample_acc: 0.0,
             samples: [],
             # RCA output filter chain state (see filter/2): prev in/out for the
@@ -59,8 +74,6 @@ defmodule Beamicom.NES.APU do
   defp pulse,
     do: %{
       duty: 0,
-      seq: 0,
-      timer: 0,
       period: 0,
       length: 0,
       halt: false,
@@ -81,9 +94,7 @@ defmodule Beamicom.NES.APU do
 
   defp tri,
     do: %{
-      timer: 0,
       period: 0,
-      seq: 0,
       length: 0,
       halt: false,
       control: false,
@@ -95,9 +106,7 @@ defmodule Beamicom.NES.APU do
 
   defp noise,
     do: %{
-      timer: 0,
       period: 0,
-      shift: 1,
       mode: false,
       length: 0,
       halt: false,
@@ -125,10 +134,12 @@ defmodule Beamicom.NES.APU do
 
     case addr do
       a when a in 0x5000..0x5003 ->
-        %{apu | m5p1: pulse_reg(apu.m5p1, a - 0x5000, val)}
+        apu = %{apu | m5p1: pulse_reg(apu.m5p1, a - 0x5000, val)}
+        if a == 0x5003, do: %{apu | m5p1_seq: 0}, else: apu
 
       a when a in 0x5004..0x5007 ->
-        %{apu | m5p2: pulse_reg(apu.m5p2, a - 0x5004, val)}
+        apu = %{apu | m5p2: pulse_reg(apu.m5p2, a - 0x5004, val)}
+        if a == 0x5007, do: %{apu | m5p2_seq: 0}, else: apu
 
       0x5011 ->
         %{apu | m5pcm: val}
@@ -158,11 +169,15 @@ defmodule Beamicom.NES.APU do
 
   def write(apu, addr, val), do: write_reg(flush(apu), addr, val)
 
-  defp write_reg(apu, addr, val) when addr in 0x4000..0x4003,
-    do: %{apu | pulse1: pulse_reg(apu.pulse1, addr - 0x4000, val)}
+  defp write_reg(apu, addr, val) when addr in 0x4000..0x4003 do
+    apu = %{apu | pulse1: pulse_reg(apu.pulse1, addr - 0x4000, val)}
+    if addr == 0x4003, do: %{apu | p1_seq: 0}, else: apu
+  end
 
-  defp write_reg(apu, addr, val) when addr in 0x4004..0x4007,
-    do: %{apu | pulse2: pulse_reg(apu.pulse2, addr - 0x4004, val)}
+  defp write_reg(apu, addr, val) when addr in 0x4004..0x4007 do
+    apu = %{apu | pulse2: pulse_reg(apu.pulse2, addr - 0x4004, val)}
+    if addr == 0x4007, do: %{apu | p2_seq: 0}, else: apu
+  end
 
   defp write_reg(apu, addr, val) when addr in 0x4008..0x400B,
     do: %{apu | triangle: tri_reg(apu.triangle, addr - 0x4008, val)}
@@ -207,7 +222,7 @@ defmodule Beamicom.NES.APU do
   defp pulse_reg(p, 3, v) do
     period = (p.period &&& 0xFF) ||| (v &&& 0x07) <<< 8
     length = if p.enabled, do: elem(@length, v >>> 3), else: p.length
-    %{p | period: period, length: length, seq: 0, env_start: true}
+    %{p | period: period, length: length, env_start: true}
   end
 
   defp tri_reg(t, 0, v),
@@ -332,13 +347,21 @@ defmodule Beamicom.NES.APU do
   # bump the sequencer/sample accumulators, then fire whatever landed at the end.
   defp advance(apu, dc) do
     clocks = div(dc + if(apu.apu_tick, do: 1, else: 0), 2)
+    {p1t, p1s} = adv_pulse(apu.p1_timer, apu.p1_seq, apu.pulse1.period, clocks)
+    {p2t, p2s} = adv_pulse(apu.p2_timer, apu.p2_seq, apu.pulse2.period, clocks)
+    {tt, ts} = adv_triangle(apu.tri_timer, apu.tri_seq, apu.triangle, dc)
+    {nt, ns} = adv_noise(apu.noise_timer, apu.noise_shift, apu.noise.period, apu.noise.mode, clocks)
 
     %{
       apu
-      | triangle: adv_triangle(apu.triangle, dc),
-        pulse1: adv_pulse(apu.pulse1, clocks),
-        pulse2: adv_pulse(apu.pulse2, clocks),
-        noise: adv_noise(apu.noise, clocks),
+      | p1_timer: p1t,
+        p1_seq: p1s,
+        p2_timer: p2t,
+        p2_seq: p2s,
+        tri_timer: tt,
+        tri_seq: ts,
+        noise_timer: nt,
+        noise_shift: ns,
         seq_cycle: apu.seq_cycle + dc,
         sample_acc: apu.sample_acc + dc * @rate_ratio,
         apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
@@ -352,12 +375,10 @@ defmodule Beamicom.NES.APU do
   defp advance_mmc5(%{m5_active: false} = apu, _clocks, _dc), do: apu
 
   defp advance_mmc5(apu, clocks, dc) do
-    %{
-      apu
-      | m5p1: adv_pulse(apu.m5p1, clocks),
-        m5p2: adv_pulse(apu.m5p2, clocks),
-        m5seq: apu.m5seq + dc
-    }
+    {m1t, m1s} = adv_pulse(apu.m5p1_timer, apu.m5p1_seq, apu.m5p1.period, clocks)
+    {m2t, m2s} = adv_pulse(apu.m5p2_timer, apu.m5p2_seq, apu.m5p2.period, clocks)
+
+    %{apu | m5p1_timer: m1t, m5p1_seq: m1s, m5p2_timer: m2t, m5p2_seq: m2s, m5seq: apu.m5seq + dc}
     |> mmc5_action()
   end
 
@@ -378,27 +399,26 @@ defmodule Beamicom.NES.APU do
   # alias down to an audible squeal (period 0 → 55930Hz → 11830Hz). Freeze the
   # sequencer there so the output holds steady and the DC-blocking high-pass
   # flattens it to silence, matching perceived hardware behaviour.
-  defp adv_triangle(t, e) do
-    {timer, steps} = advance_counter(t.timer, t.period, e)
+  defp adv_triangle(timer, seq, t, e) do
+    {timer2, steps} = advance_counter(timer, t.period, e)
     advancing = t.linear > 0 and t.length > 0 and t.period >= 2
-    seq = if advancing, do: t.seq + steps &&& 0x1F, else: t.seq
-    %{t | timer: timer, seq: seq}
+    {timer2, if(advancing, do: seq + steps &&& 0x1F, else: seq)}
   end
 
   # Pulse (2A03 and MMC5) clocks at CPU/2; `e` is already the CPU/2 clock count.
-  defp adv_pulse(p, 0), do: p
+  defp adv_pulse(timer, seq, _period, 0), do: {timer, seq}
 
-  defp adv_pulse(p, e) do
-    {timer, steps} = advance_counter(p.timer, p.period, e)
-    %{p | timer: timer, seq: p.seq + steps &&& 0x07}
+  defp adv_pulse(timer, seq, period, e) do
+    {timer2, steps} = advance_counter(timer, period, e)
+    {timer2, seq + steps &&& 0x07}
   end
 
   # Noise clocks at CPU/2; each timer wrap steps the 15-bit LFSR once.
-  defp adv_noise(n, 0), do: n
+  defp adv_noise(timer, shift, _period, _mode, 0), do: {timer, shift}
 
-  defp adv_noise(n, e) do
-    {timer, steps} = advance_counter(n.timer, n.period, e)
-    %{n | timer: timer, shift: lfsr(n.shift, n.mode, steps)}
+  defp adv_noise(timer, shift, period, mode, e) do
+    {timer2, steps} = advance_counter(timer, period, e)
+    {timer2, lfsr(shift, mode, steps)}
   end
 
   defp lfsr(shift, _mode, 0), do: shift
@@ -516,22 +536,22 @@ defmodule Beamicom.NES.APU do
 
   # --- output + mixing ---
 
-  defp pulse_level(p) do
+  defp pulse_level(p, seq) do
     cond do
       p.length == 0 -> 0
       sweep_mute?(p) -> 0
-      (elem(@duty, p.duty) >>> (7 - p.seq) &&& 1) == 0 -> 0
+      (elem(@duty, p.duty) >>> (7 - seq) &&& 1) == 0 -> 0
       p.const -> p.vol
       true -> p.env_decay
     end
   end
 
-  defp tri_level(t), do: elem(@tri_seq, t.seq)
+  defp tri_level(seq), do: elem(@tri_seq, seq)
 
-  defp noise_level(n) do
+  defp noise_level(n, shift) do
     cond do
       n.length == 0 -> 0
-      (n.shift &&& 1) == 1 -> 0
+      (shift &&& 1) == 1 -> 0
       n.const -> n.vol
       true -> n.env_decay
     end
@@ -551,8 +571,8 @@ defmodule Beamicom.NES.APU do
   # filters (filter/2) remove the DC offset and band-limit before scaling to PCM
   # in emit_sample/1.
   defp mix(apu) do
-    pulse_out = elem(@pulse_table, pulse_level(apu.pulse1) + pulse_level(apu.pulse2))
-    tnd_out = elem(@tnd_table, 3 * tri_level(apu.triangle) + 2 * noise_level(apu.noise))
+    pulse_out = elem(@pulse_table, pulse_level(apu.pulse1, apu.p1_seq) + pulse_level(apu.pulse2, apu.p2_seq))
+    tnd_out = elem(@tnd_table, 3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift))
     pulse_out + tnd_out + mmc5_out(apu)
   end
 
@@ -579,16 +599,16 @@ defmodule Beamicom.NES.APU do
   defp mmc5_out(%{m5_active: false}), do: 0.0
 
   defp mmc5_out(apu) do
-    m5 = m5_pulse_level(apu.m5p1) + m5_pulse_level(apu.m5p2)
+    m5 = m5_pulse_level(apu.m5p1, apu.m5p1_seq) + m5_pulse_level(apu.m5p2, apu.m5p2_seq)
     pulses = if m5 == 0, do: 0.0, else: 95.88 / (8128 / m5 + 100)
     pulses + apu.m5pcm / 255 * 0.25
   end
 
   # Like a 2A03 pulse but with no sweep unit (never muted for period < 8).
-  defp m5_pulse_level(p) do
+  defp m5_pulse_level(p, seq) do
     cond do
       p.length == 0 -> 0
-      (elem(@duty, p.duty) >>> (7 - p.seq) &&& 1) == 0 -> 0
+      (elem(@duty, p.duty) >>> (7 - seq) &&& 1) == 0 -> 0
       p.const -> p.vol
       true -> p.env_decay
     end

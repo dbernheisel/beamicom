@@ -113,8 +113,11 @@ defmodule Beamicom.NES.Bus do
   pending flag only drives /IRQ while its enable bit is set: disabling a scanline
   IRQ deasserts the line without clearing pending (MMC5, NESdev).
   """
-  def irq_pending?(%__MODULE__{irq_pending: p, irq_enabled: en, apu: apu}),
-    do: (p and en) or Beamicom.NES.APU.irq?(apu)
+  # Polled every instruction: pattern-match the flags in the heads (and read
+  # apu.frame_irq directly, not via a cross-module APU.irq?/1 call).
+  def irq_pending?(%__MODULE__{irq_pending: true, irq_enabled: true}), do: true
+  def irq_pending?(%__MODULE__{apu: %{frame_irq: true}}), do: true
+  def irq_pending?(%__MODULE__{}), do: false
 
   @doc "Current NMI line level (false when headless)."
   def nmi_line?(%__MODULE__{ppu: nil}), do: false
