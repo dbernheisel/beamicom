@@ -156,6 +156,29 @@ defmodule Beamicom.NES.MapperTest do
     assert {0xA9, _} = Bus.read(bus, 0x5C00)
   end
 
+  test "MMC5 scanline IRQ: pending latches on the frame-synced scanline matching $5203, $5203=0 never matches, enable only gates the line" do
+    # Enable IRQ ($5204 bit7) and target scanline 3 ($5203).
+    bus = bus_chr(5) |> Bus.write(0x5204, 0x80) |> Bus.write(0x5203, 3)
+
+    # A non-matching rendered scanline does not latch pending.
+    refute (put_in(bus.ppu.irq_scanline, 2) |> Mapper.clock_irq(1)).irq_pending
+
+    # The matching scanline latches pending and asserts /IRQ.
+    bus = put_in(bus.ppu.irq_scanline, 3) |> Mapper.clock_irq(1)
+    assert bus.irq_pending
+    assert Bus.irq_pending?(bus)
+
+    # Disabling the IRQ deasserts /IRQ but leaves the pending flag set (NESdev).
+    bus = Bus.write(bus, 0x5204, 0x00)
+    assert bus.irq_pending
+    refute Bus.irq_pending?(bus)
+
+    # $5203 = 0 is a special case: scanline 0 must never set pending.
+    bus = bus_chr(5) |> Bus.write(0x5204, 0x80) |> Bus.write(0x5203, 0)
+    bus = put_in(bus.ppu.irq_scanline, 0) |> Mapper.clock_irq(1)
+    refute bus.irq_pending
+  end
+
   test "MMC5 vertical split registers decode into PPU state" do
     bus =
       bus_chr(5)

@@ -29,7 +29,21 @@ defmodule Beamicom.NES.Runtime do
   def init(opts) do
     console = Console.load(Keyword.fetch!(opts, :rom))
     pace = Keyword.get(opts, :pace, true)
-    state = %{console: console, frame: -1, published: 0, epoch: now(), pace: pace, paused: false}
+    # Playback speed multiplier (1.0 = real-time NTSC). Below 1.0 paces frames
+    # further apart for glitch-free slow-motion on machines that can't sustain
+    # real-time; the audio sink must run at the matching rate to stay in sync.
+    speed = Keyword.get(opts, :speed, 1.0)
+
+    state = %{
+      console: console,
+      frame: -1,
+      published: 0,
+      epoch: now(),
+      pace: pace,
+      speed: speed,
+      paused: false
+    }
+
     {:ok, schedule(state)}
   end
 
@@ -78,7 +92,7 @@ defmodule Beamicom.NES.Runtime do
   end
 
   defp schedule(state) do
-    deadline = state.epoch + state.published * @period_ns
+    deadline = state.epoch + round(state.published * @period_ns / state.speed)
     Process.send_after(self(), :tick, max(0, div(deadline - now(), 1_000_000)))
     state
   end

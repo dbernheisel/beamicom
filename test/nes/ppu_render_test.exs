@@ -15,11 +15,19 @@ defmodule Beamicom.NES.PPURenderTest do
     <<0::128>> <> tile1 <> <<0::size((8192 - 32) * 8)>>
   end
 
+  # 2KB VRAM binary with the given {offset => byte} entries set.
+  defp nt(entries) do
+    Enum.reduce(entries, <<0::size(0x800 * 8)>>, fn {i, v}, bin ->
+      <<pre::binary-size(^i), _old, post::binary>> = bin
+      <<pre::binary, v, post::binary>>
+    end)
+  end
+
   test "renders a background tile into palette-address pixels" do
     # Background enabled; nametable entry (0,0) points at tile 1. v/t start at 0
     # so rendering scans from the top-left of nametable 0.
     # 0x0A = enable background + show it in the left 8px (no clip).
-    ppu = %{PPU.new(chr(), :horizontal) | mask: 0x0A, vram: %{0 => 1}}
+    ppu = %{PPU.new(chr(), :horizontal) | mask: 0x0A, vram: nt(%{0 => 1})}
 
     # Three frames: frame 1+ is correct (its first line was prefetched during
     # the prior pre-render scanline).
@@ -44,7 +52,7 @@ defmodule Beamicom.NES.PPURenderTest do
     ppu = %{
       PPU.new(chr(), :horizontal)
       | mask: 0x0A,
-        vram: %{0 => 1, 0x3C0 => 0x02}
+        vram: nt(%{0 => 1, 0x3C0 => 0x02})
     }
 
     ppu = PPU.run(ppu, 89_342 * 3)

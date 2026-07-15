@@ -20,7 +20,11 @@ defmodule Beamicom.NES.CPU do
   """
 
   import Bitwise
-  alias Beamicom.NES.Bus
+  alias Beamicom.NES.{Bus, PPU}
+
+  # nmi_line?/1 is a hot per-cycle check; keep a local inlinable copy so the
+  # driving loop doesn't pay a cross-module call for it.
+  @compile {:inline, nmi?: 1, poll_nmi_line: 2}
 
   defstruct a: 0,
             x: 0,
@@ -118,18 +122,61 @@ defmodule Beamicom.NES.CPU do
     {cpu, Bus.flush_ticks(bus, n)}
   end
 
-  defp tick_ppu_cycles(cpu, bus, 0), do: {cpu, bus}
+  # Thread the PPU (not the whole Bus) through the per-cycle loop so we rebuild
+  # the big Bus struct once per instruction instead of once per cycle. NMI is
+  # still polled every cycle for exact edge timing. Headless (no PPU): nothing to do.
+  defp tick_ppu_cycles(cpu, %{ppu: nil} = bus, _n), do: {cpu, bus}
 
   defp tick_ppu_cycles(cpu, bus, n) do
-    bus = Bus.tick_ppu(bus, 1)
-    tick_ppu_cycles(poll_nmi(cpu, bus), bus, n - 1)
+    {cpu, ppu} = ppu_cycles(cpu, bus.ppu, n)
+    {cpu, %{bus | ppu: ppu}}
+  end
+
+  # The NMI line flips at most once across one instruction's cycles (vblank
+  # set/clear; $2000 writes land in exec, not here). So when it reads the same
+  # before and after the whole span, advance the PPU once and fold the per-cycle
+  # NMI poll into one closed-form update. Only a span that actually flips the line
+  # replays cycle-by-cycle, for exact edge timing.
+  defp ppu_cycles(cpu, ppu, 0), do: {cpu, ppu}
+
+  defp ppu_cycles(cpu, ppu, n) do
+    before = nmi?(ppu)
+    advanced = PPU.run(ppu, n * 3)
+
+    if before == nmi?(advanced),
+      do: {bulk_poll(cpu, before, n), advanced},
+      else: ppu_cycles_slow(cpu, ppu, n)
+  end
+
+  defp ppu_cycles_slow(cpu, ppu, 0), do: {cpu, ppu}
+
+  defp ppu_cycles_slow(cpu, ppu, n) do
+    ppu = PPU.run(ppu, 3)
+    ppu_cycles_slow(poll_nmi_line(cpu, nmi?(ppu)), ppu, n - 1)
+  end
+
+  # NMI output line level: vblank flag (PPUSTATUS.7) AND NMI enable (PPUCTRL.7).
+  defp nmi?(ppu), do: (ppu.status &&& ppu.ctrl &&& 0x80) != 0
+
+  # Equivalent of `n` per-cycle polls when the line held steady at `line`: a rising
+  # edge can only be the very first cycle, and it propagates to nmi_pending after.
+  defp bulk_poll(cpu, line, 1), do: poll_nmi_line(cpu, line)
+
+  defp bulk_poll(cpu, line, _n) do
+    edge = line and not cpu.nmi_prev
+    %{cpu | nmi_pending: cpu.nmi_pending or cpu.nmi_edge or edge, nmi_edge: false, nmi_prev: line}
   end
 
   # Detect the asserting (rising) edge of the NMI line. The 6502's edge detector
   # adds a one-cycle delay before the interrupt is recognized, so an edge seen
   # this cycle only reaches nmi_pending on the next poll.
-  defp poll_nmi(cpu, bus) do
-    line = Bus.nmi_line?(bus)
+  defp poll_nmi(cpu, bus), do: poll_nmi_line(cpu, Bus.nmi_line?(bus))
+
+  # Common case (~every cycle): the line hasn't changed and no edge is queued, so
+  # all three fields would be rewritten with their current values — skip it.
+  defp poll_nmi_line(%{nmi_edge: false, nmi_prev: prev} = cpu, line) when line == prev, do: cpu
+
+  defp poll_nmi_line(cpu, line) do
     edge = line and not cpu.nmi_prev
     %{cpu | nmi_pending: cpu.nmi_pending or cpu.nmi_edge, nmi_edge: edge, nmi_prev: line}
   end

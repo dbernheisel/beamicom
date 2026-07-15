@@ -14,7 +14,7 @@ defmodule Beamicom.NES.APU do
 
   import Bitwise
 
-  @compile {:inline, bool: 2, clamp: 1, tri_level: 1, clock_length: 1, sweep_target: 1}
+  @compile {:inline, bool: 2, clamp: 1, tri_level: 1, clock_length: 1, sweep_target: 1, filter: 2}
 
   @sample_rate 44_100
   @cpu_hz 1_789_773
@@ -36,16 +36,25 @@ defmodule Beamicom.NES.APU do
             frame_mode: 4,
             irq_inhibit: false,
             frame_irq: false,
-            cycle: 0,
             seq_cycle: 0,
             apu_tick: false,
             sample_acc: 0.0,
             samples: [],
+            # RCA output filter chain state (see filter/2): prev in/out for the
+            # DC-blocking high-pass, prev out for the low-pass.
+            f_hp: 0.0,
+            f_hp_x: 0.0,
+            f_lp: 0.0,
             # MMC5 sound: two sweep-less pulses + raw PCM, own 240Hz sequencer.
+            # `m5_active` gates all of it — set once on the first MMC5 sound write
+            # so non-MMC5 games skip the extra channels/sequencer/mixer entirely.
+            m5_active: false,
             m5p1: nil,
             m5p2: nil,
             m5pcm: 0,
-            m5seq: 0
+            m5seq: 0,
+            # Un-run CPU cycles owed to the APU; run lazily in bulk (see tick/2).
+            pending: 0
 
   defp pulse,
     do: %{
@@ -112,6 +121,8 @@ defmodule Beamicom.NES.APU do
 
   @doc "MMC5 sound register write ($5000-$5015)."
   def mmc5_write(apu, addr, val) do
+    apu = %{flush(apu) | m5_active: true}
+
     case addr do
       a when a in 0x5000..0x5003 ->
         %{apu | m5p1: pulse_reg(apu.m5p1, a - 0x5000, val)}
@@ -137,28 +148,36 @@ defmodule Beamicom.NES.APU do
   def irq?(%__MODULE__{frame_irq: irq}), do: irq
 
   @doc "Drain the generated samples (oldest first)."
-  def take_samples(%__MODULE__{samples: s} = apu), do: {Enum.reverse(s), %{apu | samples: []}}
+  def take_samples(apu) do
+    apu = flush(apu)
+    {Enum.reverse(apu.samples), %{apu | samples: []}}
+  end
 
   # --- register writes ($4000-$4017) ---
+  # Run the backlog first so the write lands at the right point in time.
 
-  def write(apu, addr, val) when addr in 0x4000..0x4003,
+  def write(apu, addr, val), do: write_reg(flush(apu), addr, val)
+
+  defp write_reg(apu, addr, val) when addr in 0x4000..0x4003,
     do: %{apu | pulse1: pulse_reg(apu.pulse1, addr - 0x4000, val)}
 
-  def write(apu, addr, val) when addr in 0x4004..0x4007,
+  defp write_reg(apu, addr, val) when addr in 0x4004..0x4007,
     do: %{apu | pulse2: pulse_reg(apu.pulse2, addr - 0x4004, val)}
 
-  def write(apu, addr, val) when addr in 0x4008..0x400B,
+  defp write_reg(apu, addr, val) when addr in 0x4008..0x400B,
     do: %{apu | triangle: tri_reg(apu.triangle, addr - 0x4008, val)}
 
-  def write(apu, addr, val) when addr in 0x400C..0x400F,
+  defp write_reg(apu, addr, val) when addr in 0x400C..0x400F,
     do: %{apu | noise: noise_reg(apu.noise, addr - 0x400C, val)}
 
-  def write(apu, 0x4015, val), do: status_write(apu, val)
-  def write(apu, 0x4017, val), do: frame_write(apu, val)
-  def write(apu, _addr, _val), do: apu
+  defp write_reg(apu, 0x4015, val), do: status_write(apu, val)
+  defp write_reg(apu, 0x4017, val), do: frame_write(apu, val)
+  defp write_reg(apu, _addr, _val), do: apu
 
   @doc "Read $4015 status: length-counter-active flags + frame IRQ (clears the IRQ)."
   def read_status(apu) do
+    apu = flush(apu)
+
     b =
       bool(apu.pulse1.length > 0, 0x01) ||| bool(apu.pulse2.length > 0, 0x02) |||
         bool(apu.triangle.length > 0, 0x04) ||| bool(apu.noise.length > 0, 0x08) |||
@@ -239,97 +258,178 @@ defmodule Beamicom.NES.APU do
 
   # --- clocking ---
 
-  @doc "Advance the APU by `n` CPU cycles, emitting samples at 44.1kHz."
-  def tick(apu, 0), do: apu
-  def tick(apu, n), do: tick(cycle(apu), n - 1)
+  # Bulk-run only once ~a scanline of cycles has accrued; keeps frame-IRQ / status
+  # latency under a scanline while amortising the run over many CPU cycles.
+  @flush_threshold 100
 
-  defp cycle(apu) do
-    apu = clock_triangle_timer(apu)
-    tick? = apu.apu_tick
+  @doc """
+  Advance the APU by `n` CPU cycles, emitting samples at 44.1kHz.
 
-    apu =
-      if tick?,
-        do: %{clock_apu_timers(apu) | m5p1: clock_pulse(apu.m5p1), m5p2: clock_pulse(apu.m5p2)},
-        else: apu
+  Cycles are accrued and run in bulk. The bulk `run/2` splits the span into
+  segments that each end on the next event that can change the output — a
+  frame-sequencer step (240Hz), the MMC5 240Hz step, or a 44.1kHz sample point.
+  Between those only the channel timers move, so they advance in closed form
+  (`advance_counter/3`) while envelope/length/sweep stay constant. This turns
+  ~1.79M per-cycle struct passes/second into a few thousand, same output.
 
-    sc = apu.seq_cycle + 1
-    m5s = apu.m5seq
+  Anything that observes APU state (register writes, `$4015`, sample drain) runs
+  the backlog first via `flush/1`; `irq?/1` reads the (≤1 scanline stale) flag
+  directly so it stays cheap on the per-instruction interrupt poll.
+  """
+  def tick(apu, n) do
+    pending = apu.pending + n
 
-    # Common cycle: no frame-sequencer step and no MMC5 240Hz step. Bump the two
-    # counters + the toggle in a single struct pass and only fold in a sample.
-    if seq_step?(apu.frame_mode, sc) or m5s >= 7457 do
-      %{apu | apu_tick: not tick?}
-      |> frame_sequencer()
-      |> mmc5_sequencer()
-      |> sample()
-    else
-      acc = apu.sample_acc + @rate_ratio
+    if pending >= @flush_threshold,
+      do: run(%{apu | pending: 0}, pending),
+      else: %{apu | pending: pending}
+  end
 
-      apu = %{apu | apu_tick: not tick?, seq_cycle: sc, m5seq: m5s + 1, sample_acc: acc}
+  @doc "Run any accrued cycles so the APU state is current."
+  def flush(%__MODULE__{pending: 0} = apu), do: apu
+  def flush(%__MODULE__{pending: p} = apu), do: run(%{apu | pending: 0}, p)
 
-      if acc >= 1.0,
-        do: %{apu | sample_acc: acc - 1.0, samples: [mix(apu) | apu.samples]},
-        else: apu
+  defp run(apu, 0), do: apu
+
+  defp run(%{m5_active: true} = apu, n) do
+    dc = min(n, min(to_sample(apu), min(to_frame(apu), to_m5(apu))))
+    run(advance(apu, dc), n - dc)
+  end
+
+  # Non-MMC5 (the common case): no MMC5 sequencer boundary to segment on.
+  defp run(apu, n) do
+    dc = min(n, min(to_sample(apu), to_frame(apu)))
+    run(advance(apu, dc), n - dc)
+  end
+
+  # Cycles until the next 44.1kHz sample point (always ≥ 1).
+  defp to_sample(apu), do: max(1, ceil((1.0 - apu.sample_acc) / @rate_ratio))
+
+  # Cycles until the next frame-sequencer boundary (steps + the sequence wrap).
+  defp to_frame(%{frame_mode: 5, seq_cycle: sc}) do
+    cond do
+      sc < 7457 -> 7457 - sc
+      sc < 14913 -> 14913 - sc
+      sc < 22371 -> 22371 - sc
+      sc < 37281 -> 37281 - sc
+      true -> 37282 - sc
     end
   end
 
-  # Does CPU-cycle `sc` land on a 4-/5-step frame-sequencer boundary (or the wrap)?
-  defp seq_step?(5, sc), do: sc == 7457 or sc == 14913 or sc == 22371 or sc >= 37281
-  defp seq_step?(_mode, sc), do: sc == 7457 or sc == 14913 or sc == 22371 or sc >= 29829
-
-  # MMC5 sound has its own 240Hz sequencer (~7457 CPU cycles) clocking envelope
-  # and length every step (length runs at twice the 2A03 rate).
-  defp mmc5_sequencer(apu) do
-    if apu.m5seq >= 7457 do
-      %{apu | m5seq: 0, m5p1: mmc5_frame(apu.m5p1), m5p2: mmc5_frame(apu.m5p2)}
-    else
-      %{apu | m5seq: apu.m5seq + 1}
+  defp to_frame(%{seq_cycle: sc}) do
+    cond do
+      sc < 7457 -> 7457 - sc
+      sc < 14913 -> 14913 - sc
+      sc < 22371 -> 22371 - sc
+      sc < 29829 -> 29829 - sc
+      true -> 29830 - sc
     end
+  end
+
+  # Cycles until the MMC5 240Hz step.
+  defp to_m5(apu), do: 7457 - apu.m5seq
+
+  # Advance `dc` CPU cycles: move every channel's timer/sequence in closed form,
+  # bump the sequencer/sample accumulators, then fire whatever landed at the end.
+  defp advance(apu, dc) do
+    clocks = div(dc + if(apu.apu_tick, do: 1, else: 0), 2)
+
+    %{
+      apu
+      | triangle: adv_triangle(apu.triangle, dc),
+        pulse1: adv_pulse(apu.pulse1, clocks),
+        pulse2: adv_pulse(apu.pulse2, clocks),
+        noise: adv_noise(apu.noise, clocks),
+        seq_cycle: apu.seq_cycle + dc,
+        sample_acc: apu.sample_acc + dc * @rate_ratio,
+        apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
+    }
+    |> frame_action()
+    |> advance_mmc5(clocks, dc)
+    |> emit_sample()
+  end
+
+  # MMC5 sound channels + 240Hz sequencer — only for games that use them.
+  defp advance_mmc5(%{m5_active: false} = apu, _clocks, _dc), do: apu
+
+  defp advance_mmc5(apu, clocks, dc) do
+    %{
+      apu
+      | m5p1: adv_pulse(apu.m5p1, clocks),
+        m5p2: adv_pulse(apu.m5p2, clocks),
+        m5seq: apu.m5seq + dc
+    }
+    |> mmc5_action()
+  end
+
+  # Down-counter over `e` clocks: returns {remaining timer, sequence steps}. The
+  # counter runs period..0 then reloads period, so a full cycle is period+1 clocks.
+  defp advance_counter(timer, _period, e) when e <= timer, do: {timer - e, 0}
+
+  defp advance_counter(timer, period, e) do
+    r = e - timer - 1
+    {period - rem(r, period + 1), 1 + div(r, period + 1)}
+  end
+
+  # Triangle clocks at the full CPU rate; its sequence only advances while the
+  # linear and length counters are non-zero (the timer reloads either way).
+  #
+  # A period below 2 means an ultrasonic frequency (>27kHz) games use to silence
+  # the triangle; it's inaudible on hardware but, point-sampled at 44.1kHz, would
+  # alias down to an audible squeal (period 0 → 55930Hz → 11830Hz). Freeze the
+  # sequencer there so the output holds steady and the DC-blocking high-pass
+  # flattens it to silence, matching perceived hardware behaviour.
+  defp adv_triangle(t, e) do
+    {timer, steps} = advance_counter(t.timer, t.period, e)
+    advancing = t.linear > 0 and t.length > 0 and t.period >= 2
+    seq = if advancing, do: t.seq + steps &&& 0x1F, else: t.seq
+    %{t | timer: timer, seq: seq}
+  end
+
+  # Pulse (2A03 and MMC5) clocks at CPU/2; `e` is already the CPU/2 clock count.
+  defp adv_pulse(p, 0), do: p
+
+  defp adv_pulse(p, e) do
+    {timer, steps} = advance_counter(p.timer, p.period, e)
+    %{p | timer: timer, seq: p.seq + steps &&& 0x07}
+  end
+
+  # Noise clocks at CPU/2; each timer wrap steps the 15-bit LFSR once.
+  defp adv_noise(n, 0), do: n
+
+  defp adv_noise(n, e) do
+    {timer, steps} = advance_counter(n.timer, n.period, e)
+    %{n | timer: timer, shift: lfsr(n.shift, n.mode, steps)}
+  end
+
+  defp lfsr(shift, _mode, 0), do: shift
+
+  defp lfsr(shift, mode, steps) do
+    fb = bxor(shift, shift >>> if(mode, do: 6, else: 1)) &&& 1
+    lfsr(shift >>> 1 ||| fb <<< 14, mode, steps - 1)
   end
 
   defp mmc5_frame(ch), do: ch |> clock_env() |> clock_length()
 
-  # Triangle timer runs at the full CPU rate; the others at CPU/2.
-  defp clock_triangle_timer(apu), do: %{apu | triangle: clock_triangle(apu.triangle)}
+  # MMC5 240Hz step (envelope + length on both MMC5 pulses; length at 2x rate).
+  defp mmc5_action(%{m5seq: m} = apu) when m >= 7457,
+    do: %{apu | m5seq: 0, m5p1: mmc5_frame(apu.m5p1), m5p2: mmc5_frame(apu.m5p2)}
 
-  defp clock_triangle(%{timer: timer} = t) when timer > 0, do: %{t | timer: timer - 1}
+  defp mmc5_action(apu), do: apu
 
-  defp clock_triangle(%{linear: linear, length: length} = t) when linear > 0 and length > 0,
-    do: %{t | timer: t.period, seq: t.seq + 1 &&& 0x1F}
-
-  defp clock_triangle(t), do: %{t | timer: t.period}
-
-  defp clock_apu_timers(apu),
-    do: %{
-      apu
-      | pulse1: clock_pulse(apu.pulse1),
-        pulse2: clock_pulse(apu.pulse2),
-        noise: clock_noise(apu.noise)
-    }
-
-  defp clock_pulse(p) do
-    if p.timer > 0,
-      do: %{p | timer: p.timer - 1},
-      else: %{p | timer: p.period, seq: p.seq + 1 &&& 0x07}
+  defp emit_sample(%{sample_acc: acc} = apu) when acc >= 1.0 do
+    {apu, y} = filter(apu, mix(apu))
+    %{apu | sample_acc: acc - 1.0, samples: [clamp(round(y * 32767)) | apu.samples]}
   end
 
-  defp clock_noise(n) do
-    if n.timer > 0 do
-      %{n | timer: n.timer - 1}
-    else
-      fb = bxor(n.shift, n.shift >>> if(n.mode, do: 6, else: 1)) &&& 1
-      %{n | timer: n.period, shift: n.shift >>> 1 ||| fb <<< 14}
-    end
-  end
+  defp emit_sample(apu), do: apu
 
-  # Frame sequencer: steps at ~240Hz drive envelopes/linear (quarter) and
-  # length/sweep (half), with an IRQ at the end of a 4-step sequence.
-  defp frame_sequencer(apu) do
-    steps = if apu.frame_mode == 5, do: @frame5, else: @frame4
-    wrap = if apu.frame_mode == 5, do: 37282, else: 29830
-    sc = apu.seq_cycle + 1
-    apu = %{apu | seq_cycle: sc}
+  # Frame sequencer: ~240Hz steps drive envelopes/linear (quarter) and
+  # length/sweep (half), with an IRQ at the end of a 4-step sequence. Called once
+  # `seq_cycle` has been advanced onto a boundary; a no-op otherwise.
+  defp frame_action(%{frame_mode: 5, seq_cycle: sc} = apu), do: frame_at(apu, sc, @frame5, 37282)
+  defp frame_action(%{seq_cycle: sc} = apu), do: frame_at(apu, sc, @frame4, 29830)
 
+  defp frame_at(apu, sc, steps, wrap) do
     cond do
       sc == elem(steps, 0) -> quarter_frame(apu)
       sc == elem(steps, 1) -> half_frame(quarter_frame(apu))
@@ -416,16 +516,6 @@ defmodule Beamicom.NES.APU do
 
   # --- output + mixing ---
 
-  defp sample(apu) do
-    acc = apu.sample_acc + @sample_rate / @cpu_hz
-
-    if acc >= 1.0 do
-      %{apu | sample_acc: acc - 1.0, samples: [mix(apu) | apu.samples]}
-    else
-      %{apu | sample_acc: acc}
-    end
-  end
-
   defp pulse_level(p) do
     cond do
       p.length == 0 -> 0
@@ -447,18 +537,47 @@ defmodule Beamicom.NES.APU do
     end
   end
 
-  # Nonlinear mixer → signed 16-bit PCM.
+  # Precomputed nonlinear mixer tables (NESdev "Lookup Table"): pulse index is
+  # pulse1+pulse2 (0..30); tnd index is 3*triangle + 2*noise + dmc (0..202).
+  # Numerators are the range-preserving approximations for the combined index.
+  @pulse_table List.to_tuple(
+                 for n <- 0..30, do: if(n == 0, do: 0.0, else: 95.52 / (8128.0 / n + 100))
+               )
+  @tnd_table List.to_tuple(
+               for n <- 0..202, do: if(n == 0, do: 0.0, else: 163.67 / (24329.0 / n + 100))
+             )
+
+  # Nonlinear mixer → unipolar 0..~1.0 float via table lookup. The RCA output
+  # filters (filter/2) remove the DC offset and band-limit before scaling to PCM
+  # in emit_sample/1.
   defp mix(apu) do
-    p = pulse_level(apu.pulse1) + pulse_level(apu.pulse2)
-    pulse_out = if p == 0, do: 0.0, else: 95.88 / (8128 / p + 100)
-    tnd = tri_level(apu.triangle) / 8227 + noise_level(apu.noise) / 12241
-    tnd_out = if tnd == 0, do: 0.0, else: 159.79 / (1 / tnd + 100)
-    # NES output is unipolar 0..~1.0; scale to positive 16-bit PCM.
-    clamp(round((pulse_out + tnd_out + mmc5_out(apu)) * 32767))
+    pulse_out = elem(@pulse_table, pulse_level(apu.pulse1) + pulse_level(apu.pulse2))
+    tnd_out = elem(@tnd_table, 3 * tri_level(apu.triangle) + 2 * noise_level(apu.noise))
+    pulse_out + tnd_out + mmc5_out(apu)
+  end
+
+  # NES RCA output circuit: a DC-blocking first-order high-pass (90Hz) then a
+  # first-order low-pass, applied per 44.1kHz sample. The low-pass sits at 8kHz
+  # rather than the hardware's ~14kHz to attenuate the triangle's 32-step DAC
+  # "zipper" (32x the note pitch, 6-12kHz), which is authentic but reads as a
+  # squeal without the analog slew-limiting real hardware applies. The 440Hz
+  # high-pass the wiki lists is omitted: it guts the bass fundamental and makes
+  # that zipper dominate. Coefficients: a = RC/(RC+dt) for the high-pass,
+  # alpha = dt/(RC+dt) for the low-pass, with dt = 1/44100 and RC = 1/(2*pi*fc).
+  @hp90 0.987340
+  @lp8k 0.532680
+
+  defp filter(apu, x) do
+    hp = @hp90 * (apu.f_hp + x - apu.f_hp_x)
+    lp = apu.f_lp + @lp8k * (hp - apu.f_lp)
+
+    {%{apu | f_hp: hp, f_hp_x: x, f_lp: lp}, lp}
   end
 
   # MMC5 sound sums with the 2A03 output (exact blend unspecified; approximated
   # with the pulse curve + linear PCM).
+  defp mmc5_out(%{m5_active: false}), do: 0.0
+
   defp mmc5_out(apu) do
     m5 = m5_pulse_level(apu.m5p1) + m5_pulse_level(apu.m5p2)
     pulses = if m5 == 0, do: 0.0, else: 95.88 / (8128 / m5 + 100)
@@ -476,6 +595,6 @@ defmodule Beamicom.NES.APU do
   end
 
   defp clamp(v) when v > 32767, do: 32767
-  defp clamp(v) when v < 0, do: 0
+  defp clamp(v) when v < -32768, do: -32768
   defp clamp(v), do: v
 end

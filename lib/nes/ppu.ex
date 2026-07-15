@@ -42,8 +42,10 @@ defmodule Beamicom.NES.PPU do
             table_key: 1,
             vram_step: 1,
             split_region?: 3,
+            split_active?: 1,
             bg_banks: 1,
-            advance: 4}
+            next_stop: 1,
+            scanline_len: 1}
 
   defstruct ctrl: 0,
             mask: 0,
@@ -54,9 +56,9 @@ defmodule Beamicom.NES.PPU do
             x: 0,
             w: 0,
             buffer: 0,
-            vram: %{},
+            vram: <<0::size(0x800 * 8)>>,
             palette: %{},
-            oam: %{},
+            oam: <<0::size(256 * 8)>>,
             chr: <<>>,
             chr_ram: %{},
             chr_banks: {0, 0x400, 0x800, 0xC00, 0x1000, 0x1400, 0x1800, 0x1C00},
@@ -96,6 +98,9 @@ defmodule Beamicom.NES.PPU do
             at_hi: 0,
             line_sprites: [],
             irq_ticks: 0,
+            # Frame-synced rendered-scanline number captured at the per-scanline
+            # IRQ tick, for the MMC5 scanline IRQ (reset to 0 at the pre-render line).
+            irq_scanline: 0,
             fb: [],
             frame_ready: nil
 
@@ -107,146 +112,276 @@ defmodule Beamicom.NES.PPU do
   # vblank + sprite-0 + overflow. The NMI line is the level (vblank AND
   # PPUCTRL bit 7); the CPU polls it per cycle and detects the edge.
 
-  @doc "Advance the PPU by `dots`."
+  @doc """
+  Advance the PPU by `dots`.
+
+  Rather than touch the struct on every one of the ~341 dots per scanline, we
+  jump straight to the next dot where something actually happens — VBL set/clear,
+  the once-per-line render, the scroll-register copies, the MMC IRQ clock — and
+  only bump the dot counter in between. The (scanline, dot, frame, VBL) state
+  after any `run/2` is identical to a dot-by-dot walk, so CPU/PPU alignment and
+  NMI timing are unchanged; it's just far fewer struct updates.
+  """
   def run(ppu, 0), do: ppu
-  def run(ppu, dots), do: run(tick(ppu), dots - 1)
+
+  def run(ppu, dots) do
+    d = ppu.dot
+    stop = min(next_stop(d), scanline_len(ppu))
+
+    # Common case: the whole span stays before the next event — just move the dot.
+    if d + dots < stop do
+      %{ppu | dot: d + dots}
+    else
+      run(commit(ppu, stop), dots - (stop - d))
+    end
+  end
 
   @doc "Current NMI output line level: vblank flag set AND NMI enabled."
   def nmi_line?(ppu), do: (ppu.status &&& 0x80) != 0 and (ppu.ctrl &&& 0x80) != 0
 
-  defp tick(ppu) do
+  # Next dot (this scanline) where an event fires; landing on the scanline length
+  # means "run off the end and wrap to the next scanline".
+  defp next_stop(dot) when dot < 1, do: 1
+  defp next_stop(dot) when dot < 257, do: 257
+  defp next_stop(dot) when dot < 260, do: 260
+  defp next_stop(dot) when dot < 280, do: 280
+  defp next_stop(_dot), do: 341
+
+  # 341 dots/scanline, except the pre-render line on odd frames with rendering on
+  # is one short (the (261,339)→(0,0) dot skip, spec §5.2 item 5).
+  defp scanline_len(%{scanline: 261, frame: f, mask: m})
+       when (f &&& 1) == 1 and (m &&& 0x18) != 0,
+       do: 340
+
+  defp scanline_len(_ppu), do: 341
+
+  # Land exactly on `stop` and fire its event; `stop` at the scanline length wraps
+  # to dot 0 of the next scanline (pre-render → next frame).
+  defp commit(%{scanline: 261, frame: f} = ppu, 340),
+    do: fire_event(%{ppu | scanline: 0, dot: 0, frame: f + 1})
+
+  defp commit(%{scanline: 261, frame: f} = ppu, 341),
+    do: fire_event(%{ppu | scanline: 0, dot: 0, frame: f + 1})
+
+  defp commit(%{scanline: s} = ppu, 341), do: fire_event(%{ppu | scanline: s + 1, dot: 0})
+  defp commit(ppu, stop), do: fire_event(%{ppu | dot: stop})
+
+  # Handle whatever is due at the PPU's current (scanline, dot). Event dots are
+  # disjoint, so at most one fires.
+  defp fire_event(%{scanline: s, dot: d} = ppu) do
     rendering = (ppu.mask &&& 0x18) != 0
-    {scanline, dot, frame} = advance(ppu.scanline, ppu.dot, ppu.frame, rendering)
-    ppu = %{ppu | scanline: scanline, dot: dot, frame: frame}
-
-    # Run the fetch/scroll pipeline on visible + pre-render lines while rendering
-    # is enabled; emit one pixel per visible dot regardless (backdrop when off).
-    ppu =
-      if rendering and (scanline <= 239 or scanline == 261) do
-        ppu = pipeline(ppu, scanline, dot)
-
-        # Evaluate sprites for the visible scanline at its start (secondary-OAM fill).
-        ppu = if scanline <= 239 and dot == 0, do: eval_sprites(ppu), else: ppu
-
-        # Flag a scanline-IRQ clock for MMC3 (approximation of the A12 rise).
-        if dot == 260, do: %{ppu | irq_ticks: ppu.irq_ticks + 1}, else: ppu
-      else
-        ppu
-      end
-
-    ppu = if scanline <= 239 and dot in 1..256, do: emit_pixel(ppu), else: ppu
 
     cond do
-      scanline == 240 and dot == 0 -> finish_frame(ppu)
-      scanline == 241 and dot == 1 -> %{ppu | status: ppu.status ||| 0x80}
-      scanline == 261 and dot == 1 -> %{ppu | status: ppu.status &&& bxor(0xFF, 0xE0)}
-      true -> ppu
+      d == 257 and s <= 239 ->
+        render_scanline(ppu)
+
+      d == 257 and s == 261 and rendering ->
+        copy_hori(ppu)
+
+      d == 280 and s == 261 and rendering ->
+        copy_vert(ppu)
+
+      # Per-scanline IRQ tick. MMC3 counts these; MMC5 uses the frame-synced
+      # scanline number (visible line s → counter s+1; pre-render resets to 0).
+      d == 260 and rendering and s <= 239 ->
+        %{ppu | irq_ticks: ppu.irq_ticks + 1, irq_scanline: s + 1}
+
+      d == 260 and rendering and s == 261 ->
+        %{ppu | irq_ticks: ppu.irq_ticks + 1, irq_scanline: 0}
+
+      d == 0 and s == 240 ->
+        finish_frame(ppu)
+
+      d == 1 and s == 241 ->
+        %{ppu | status: ppu.status ||| 0x80}
+
+      d == 1 and s == 261 ->
+        %{ppu | status: ppu.status &&& bxor(0xFF, 0xE0)}
+
+      true ->
+        ppu
     end
   end
 
-  # --- background render pipeline (spec §5.2 item 1) ---
-  # Runs on visible (0-239) and pre-render (261) scanlines. Each dot in the fetch
-  # window shifts the two 16-bit pattern registers and the two attribute
-  # registers; every 8 dots a tile's nametable/attribute/pattern bytes are
-  # fetched and reloaded. Fine-x selects the output bit; the pixel is the 4-bit
-  # palette RAM address (backdrop 0 when the pattern bits are 0).
+  # --- background render (spec §5.2 item 1, line-by-line timing) ---
+  # A whole visible scanline is produced in one pass: fetch its background tiles
+  # through the same MMC5-aware fetch path the per-dot pipeline used (so split /
+  # extended-attribute / MMC2-4 CHR-latch behaviour is unchanged), composite
+  # sprites over them, then advance the scroll registers (dots 256/257).
 
-  defp pipeline(ppu, s, d) do
-    ppu = if d in 1..256 or d in 321..336, do: fetch_shift(ppu, d), else: ppu
-    ppu = if d == 256, do: inc_vert(ppu), else: ppu
-    ppu = if d == 257, do: copy_hori(ppu), else: ppu
-    if s == 261 and d in 280..304, do: copy_vert(ppu), else: ppu
-  end
-
-  defp fetch_shift(ppu, d) do
-    ppu = shift(ppu)
-
-    case rem(d - 1, 8) do
-      0 -> ppu |> reload() |> fetch_nt()
-      2 -> fetch_at(ppu)
-      4 -> fetch_bg(ppu, :lo)
-      6 -> fetch_bg(ppu, :hi)
-      7 -> inc_hori(ppu)
-      _ -> ppu
+  defp render_scanline(ppu) do
+    if (ppu.mask &&& 0x18) == 0 do
+      # Rendering off: the line is the backdrop and the scroll registers freeze.
+      %{ppu | fb: [<<0::size(256 * 8)>> | ppu.fb]}
+    else
+      line_v = ppu.v
+      {tiles, blank?, ppu} = fetch_line_tiles(ppu, line_v)
+      ppu = eval_sprites(ppu)
+      {line, ppu} = compose_line(ppu, tiles, ppu.x, blank?)
+      ppu = %{ppu | fb: [line | ppu.fb], v: line_v}
+      copy_hori(inc_vert(ppu))
     end
   end
 
-  # Emit one pixel: composite background and sprites with priority, detecting
-  # sprite-0 hit (spec §5.2 item 4). Background/sprite enable and the left-8px
-  # clip come from PPUMASK.
-  defp emit_pixel(ppu) do
-    x = ppu.dot - 1
-    {bg_pat, bg_addr} = bg_pixel(ppu, x)
-    {sp_pat, sp_addr, sp_front?, sp_zero?} = sprite_pixel(ppu, x)
+  # Fetch the 33 background tiles that cover the 256 visible pixels plus the fine-x
+  # slack, walking coarse X with inc_hori. Each entry is {pattern-lo, pattern-hi,
+  # 2-bit palette}; `blank?` is true when every tile's pattern is empty (so the
+  # whole background reduces to the backdrop). The working `v` is discarded by the
+  # caller (restored to line_v).
+  defp fetch_line_tiles(ppu, line_v) do
+    {acc, blank?, ppu} = fetch_tiles(0, %{ppu | v: line_v}, [], true)
+    {acc |> Enum.reverse() |> List.to_tuple(), blank?, ppu}
+  end
 
-    bg_op = bg_pat != 0
-    sp_op = sp_pat != 0
+  defp fetch_tiles(33, ppu, acc, blank?), do: {acc, blank?, ppu}
 
-    ppu =
-      if sp_zero? and sp_op and bg_op and x != 255 and not clipped?(ppu, x) and
-           bg_on?(ppu) and sprites_on?(ppu),
-         do: %{ppu | status: ppu.status ||| 0x40},
-         else: ppu
+  defp fetch_tiles(i, ppu, acc, blank?) do
+    ppu = ppu |> fetch_nt() |> fetch_at() |> fetch_bg_planes()
+    tile = {ppu.bg_lo_latch, ppu.bg_hi_latch, ppu.at_latch}
+    blank? = blank? and ppu.bg_lo_latch == 0 and ppu.bg_hi_latch == 0
+    fetch_tiles(i + 1, inc_hori(ppu), [tile | acc], blank?)
+  end
 
-    addr =
+  # Composite one scanline's 256 pixels (background + sprite priority) into a
+  # 256-byte binary of palette-RAM addresses. Sprites are rasterised once into a
+  # per-column buffer (front-most opaque pixel wins), so compositing is an O(1)
+  # lookup per pixel; sprite-0 hit is checked over just the ≤8 columns sprite 0
+  # covers.
+  defp compose_line(ppu, tiles, fine_x, blank?) do
+    bg_on = bg_on?(ppu)
+    buf = if sprites_on?(ppu), do: sprite_buffer(ppu.line_sprites), else: %{}
+
+    clip? = (ppu.mask &&& 0x04) == 0
+
+    line =
       cond do
-        sp_op and (not bg_op or sp_front?) -> sp_addr
-        bg_op -> bg_addr
-        true -> 0
+        # No sprites and the background is entirely backdrop → 256 backdrop bytes.
+        map_size(buf) == 0 and (blank? or not bg_on) ->
+          <<0::size(256 * 8)>>
+
+        # Sprite-less line: compose the whole background at once, tile-batched
+        # (decode 8 px per tile instead of per-pixel). This is the dominant cost
+        # in background-heavy games (SMB3 overworld) where most lines have no
+        # sprites; the ≤8 px/tile decode replaces 256 per-pixel `bg_at` calls.
+        map_size(buf) == 0 ->
+          bg_line(tiles, fine_x, ppu.mask)
+
+        # Sprite line: keep the per-pixel path. Precomputing the background here
+        # would be pure overhead for sprite-bound games with mostly-blank
+        # backgrounds (CV3's intro), where `bg_at` already short-circuits to 0.
+        true ->
+          sprite_pixels(0, tiles, fine_x, bg_on, ppu.mask, buf, clip?, <<>>)
       end
 
-    %{ppu | fb: [addr | ppu.fb]}
+    {line, sprite0_hit(ppu, buf, tiles, fine_x, bg_on)}
+  end
+
+  # Background + sprite-priority pixel run.
+  defp sprite_pixels(256, _tiles, _fine_x, _bg_on, _mask, _buf, _clip?, acc), do: acc
+
+  defp sprite_pixels(c, tiles, fine_x, bg_on, mask, buf, clip?, acc) do
+    bg_addr = bg_at(tiles, fine_x, c, bg_on, mask)
+
+    addr =
+      case if(clip? and c < 8, do: nil, else: Map.get(buf, c)) do
+        nil -> bg_addr
+        {sp_addr, front?, _z} -> if bg_addr != 0 and not front?, do: bg_addr, else: sp_addr
+      end
+
+    sprite_pixels(c + 1, tiles, fine_x, bg_on, mask, buf, clip?, <<acc::binary, addr>>)
+  end
+
+  # Per-pixel background palette-address (0 = transparent backdrop), used on sprite
+  # lines and for the sprite-0-hit check. fine-x scrolls the source; left-8px clip.
+  defp bg_at(_tiles, _fine_x, _c, false, _mask), do: 0
+
+  defp bg_at(tiles, fine_x, c, true, mask) do
+    if c < 8 and (mask &&& 0x02) == 0 do
+      0
+    else
+      e = fine_x + c
+      {lo, hi, attr} = elem(tiles, e >>> 3)
+      bit = 7 - (e &&& 7)
+      pattern = sel(hi, bit) <<< 1 ||| sel(lo, bit)
+      if pattern == 0, do: 0, else: attr <<< 2 ||| pattern
+    end
+  end
+
+  # Background line as 256 palette-address bytes. Decodes each of the 33 fetched
+  # tiles into 8 bytes at once (blank tiles → 8 zero bytes, the common case), then
+  # slices out the fine-x window and applies the left-8px background clip.
+  defp bg_line(tiles, fine_x, mask) do
+    line = binary_part(bg_full(tiles, 0, <<>>), fine_x, 256)
+
+    if (mask &&& 0x02) == 0,
+      do: <<0::size(8 * 8), binary_part(line, 8, 248)::binary>>,
+      else: line
+  end
+
+  defp bg_full(_tiles, 33, acc), do: acc
+
+  defp bg_full(tiles, i, acc) do
+    {lo, hi, attr} = elem(tiles, i)
+    bg_full(tiles, i + 1, <<acc::binary, tile_bytes(lo, hi, attr)::binary>>)
+  end
+
+  # One tile → its 8 palette-address bytes (leftmost pixel first = bit 7). Blank
+  # patterns are by far the most common tile, so short-circuit them.
+  defp tile_bytes(0, 0, _attr), do: <<0, 0, 0, 0, 0, 0, 0, 0>>
+
+  defp tile_bytes(lo, hi, attr) do
+    ab = attr <<< 2
+
+    <<px(lo, hi, ab, 7), px(lo, hi, ab, 6), px(lo, hi, ab, 5), px(lo, hi, ab, 4),
+      px(lo, hi, ab, 3), px(lo, hi, ab, 2), px(lo, hi, ab, 1), px(lo, hi, ab, 0)>>
+  end
+
+  defp px(lo, hi, ab, b) do
+    pattern = (hi >>> b &&& 1) <<< 1 ||| (lo >>> b &&& 1)
+    if pattern == 0, do: 0, else: ab ||| pattern
+  end
+
+  # Sprite-0 hit: sprite 0's front-most opaque pixel (buffer zero? flag) over an
+  # opaque background pixel, outside the clips and not at column 255.
+  defp sprite0_hit(ppu, buf, tiles, fine_x, bg_on) do
+    hit? =
+      Enum.any?(buf, fn
+        {c, {_addr, _front?, true}} ->
+          c != 255 and not clipped?(ppu, c) and bg_at(tiles, fine_x, c, bg_on, ppu.mask) != 0
+
+        _ ->
+          false
+      end)
+
+    if hit?, do: %{ppu | status: ppu.status ||| 0x40}, else: ppu
+  end
+
+  # Rasterise the (≤8) line sprites into a column => {addr, front?, sprite-0?} map.
+  # Sprites are in OAM order (front-most first), so the first writer of a column
+  # wins — matching the front-most-opaque-pixel priority of a per-pixel scan.
+  defp sprite_buffer(sprites) do
+    Enum.reduce(sprites, %{}, fn sp, buf ->
+      Enum.reduce(0..7, buf, fn col, buf ->
+        x = sp.x + col
+        bit = 7 - col
+        pat = sel(sp.hi, bit) <<< 1 ||| sel(sp.lo, bit)
+
+        if x <= 255 and pat != 0 and not Map.has_key?(buf, x) do
+          addr = 0x10 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
+          Map.put(buf, x, {addr, (sp.attr &&& 0x20) == 0, sp.index == 0})
+        else
+          buf
+        end
+      end)
+    end)
   end
 
   defp bg_on?(ppu), do: (ppu.mask &&& 0x08) != 0
   defp sprites_on?(ppu), do: (ppu.mask &&& 0x10) != 0
 
-  # Left-8px clip suppresses sprite-0 hit (and rendering) when either the
-  # background (bit 1) or sprite (bit 2) clip is active.
+  # Left-8px clip suppresses sprite-0 hit when either the background (bit 1) or
+  # sprite (bit 2) clip is active.
   defp clipped?(ppu, x), do: x < 8 and ((ppu.mask &&& 0x02) == 0 or (ppu.mask &&& 0x04) == 0)
-
-  defp bg_pixel(ppu, x) do
-    cond do
-      not bg_on?(ppu) ->
-        {0, 0}
-
-      x < 8 and (ppu.mask &&& 0x02) == 0 ->
-        {0, 0}
-
-      true ->
-        bit = 15 - ppu.x
-        pattern = sel(ppu.bg_hi, bit) <<< 1 ||| sel(ppu.bg_lo, bit)
-        attr = sel(ppu.at_hi, bit) <<< 1 ||| sel(ppu.at_lo, bit)
-        {pattern, if(pattern == 0, do: 0, else: attr <<< 2 ||| pattern)}
-    end
-  end
-
-  # First (front-most in OAM order) opaque sprite pixel covering column x.
-  defp sprite_pixel(ppu, x) do
-    if sprites_on?(ppu) and not (x < 8 and (ppu.mask &&& 0x04) == 0),
-      do: scan_sprites(ppu.line_sprites, x),
-      else: {0, 0, false, false}
-  end
-
-  defp scan_sprites([], _x), do: {0, 0, false, false}
-
-  defp scan_sprites([sp | rest], x) do
-    col = x - sp.x
-
-    if col >= 0 and col <= 7 do
-      bit = 7 - col
-      pat = sel(sp.hi, bit) <<< 1 ||| sel(sp.lo, bit)
-
-      if pat != 0 do
-        addr = 0x10 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
-        {pat, addr, (sp.attr &&& 0x20) == 0, sp.index == 0}
-      else
-        scan_sprites(rest, x)
-      end
-    else
-      scan_sprites(rest, x)
-    end
-  end
 
   defp sel(reg, bit), do: reg >>> bit &&& 1
 
@@ -257,27 +392,32 @@ defmodule Beamicom.NES.PPU do
 
   defp eval_sprites(ppu) do
     height = if (ppu.ctrl &&& 0x20) != 0, do: 16, else: 8
-
-    {sprites, count} =
-      Enum.reduce(0..63, {[], 0}, fn i, {acc, count} ->
-        row = ppu.scanline - Map.get(ppu.oam, i * 4, 0) - 1
-
-        cond do
-          row < 0 or row >= height -> {acc, count}
-          count < 8 -> {[build_sprite(ppu, i, row, height) | acc], count + 1}
-          true -> {acc, count + 1}
-        end
-      end)
-
+    {sprites, count} = scan_oam(ppu.oam, 0, ppu, height, [], 0)
     status = if count > 8, do: ppu.status ||| 0x20, else: ppu.status
     %{ppu | line_sprites: Enum.reverse(sprites), status: status}
   end
 
-  defp build_sprite(ppu, i, row, height) do
-    base = i * 4
-    tile = Map.get(ppu.oam, base + 1, 0)
-    attr = Map.get(ppu.oam, base + 2, 0)
-    x = Map.get(ppu.oam, base + 3, 0)
+  # Walk the 256-byte OAM binary four bytes (one sprite) at a time, keeping the
+  # first 8 that fall on this scanline (OAM order = priority); a 9th sets overflow.
+  defp scan_oam(<<>>, _i, _ppu, _height, acc, count), do: {acc, count}
+
+  defp scan_oam(<<y, tile, attr, x, rest::binary>>, i, ppu, height, acc, count) do
+    row = ppu.scanline - y - 1
+
+    cond do
+      row < 0 or row >= height ->
+        scan_oam(rest, i + 1, ppu, height, acc, count)
+
+      count < 8 ->
+        sprite = build_sprite(ppu, i, tile, attr, x, row, height)
+        scan_oam(rest, i + 1, ppu, height, [sprite | acc], count + 1)
+
+      true ->
+        scan_oam(rest, i + 1, ppu, height, acc, count + 1)
+    end
+  end
+
+  defp build_sprite(ppu, i, tile, attr, x, row, height) do
     row = if (attr &&& 0x80) != 0, do: height - 1 - row, else: row
     {addr, row} = sprite_pattern_addr(ppu, tile, row, height)
     lo = read(ppu, addr ||| row)
@@ -300,26 +440,6 @@ defmodule Beamicom.NES.PPU do
 
   defp reverse_byte(b), do: elem(@rev, b)
 
-  defp shift(ppu) do
-    %{
-      ppu
-      | bg_lo: ppu.bg_lo <<< 1 &&& 0xFFFF,
-        bg_hi: ppu.bg_hi <<< 1 &&& 0xFFFF,
-        at_lo: ppu.at_lo <<< 1 &&& 0xFFFF,
-        at_hi: ppu.at_hi <<< 1 &&& 0xFFFF
-    }
-  end
-
-  defp reload(ppu) do
-    %{
-      ppu
-      | bg_lo: (ppu.bg_lo &&& 0xFF00) ||| ppu.bg_lo_latch,
-        bg_hi: (ppu.bg_hi &&& 0xFF00) ||| ppu.bg_hi_latch,
-        at_lo: (ppu.at_lo &&& 0xFF00) ||| if((ppu.at_latch &&& 1) != 0, do: 0xFF, else: 0),
-        at_hi: (ppu.at_hi &&& 0xFF00) ||| if((ppu.at_latch &&& 2) != 0, do: 0xFF, else: 0)
-    }
-  end
-
   defp fetch_nt(ppu) do
     cond do
       # Vertical split: tiles come from ExRAM at the split's own vertical position.
@@ -339,8 +459,12 @@ defmodule Beamicom.NES.PPU do
   end
 
   # The vertical split replaces a contiguous column range with ExRAM-sourced tiles.
+  # Fast-out on the common case (split disabled) via a guard, so the per-tile
+  # fetch path never evaluates the region check when there's no vertical split.
+  defp split_active?(%{split_en: false}), do: false
+
   defp split_active?(ppu),
-    do: ppu.split_en and split_region?(ppu.split_side, ppu.split_tile, ppu.v &&& 0x1F)
+    do: split_region?(ppu.split_side, ppu.split_tile, ppu.v &&& 0x1F)
 
   defp split_region?(0, tile, col), do: col < tile
   defp split_region?(_side, tile, col), do: col >= tile
@@ -369,37 +493,41 @@ defmodule Beamicom.NES.PPU do
     end
   end
 
-  defp fetch_bg(ppu, half) do
+  # Fetch both pattern planes (lo/hi) of the current bg tile in one pass: the plane
+  # addresses differ only by 8 and live in the same 1KB CHR bank, so the bank
+  # offset is computed once instead of per-plane. The MMC2/4 CHR latch is still
+  # applied for both fetched addresses (no-op when there's no latch).
+  defp fetch_bg_planes(ppu) do
     fine_y = ppu.v >>> 12 &&& 0x07
-    {addr, byte} = bg_pattern(ppu, fine_y, if(half == :hi, do: 8, else: 0))
 
-    ppu =
-      case half do
-        :lo -> %{ppu | bg_lo_latch: byte}
-        :hi -> %{ppu | bg_hi_latch: byte}
+    {lo_addr, lo, hi_addr, hi} =
+      cond do
+        split_active?(ppu) ->
+          {_, fy} = split_yc(ppu)
+          base = ppu.split_chr * 0x1000 + (ppu.nt_latch <<< 4) + fy
+          {base, chr_flat(ppu, base), base + 8, chr_flat(ppu, base + 8)}
+
+        ppu.exram_mode == 1 ->
+          bank = (ppu.ext_latch &&& 0x3F) ||| ppu.ext_chr_hi <<< 6
+          base = bank * 0x1000 + (ppu.nt_latch <<< 4) + fine_y
+          {base, chr_flat(ppu, base), base + 8, chr_flat(ppu, base + 8)}
+
+        true ->
+          addr = (ppu.ctrl &&& 0x10) <<< 8 ||| ppu.nt_latch <<< 4 ||| fine_y
+          banks = bg_banks(ppu)
+          off = elem(banks, addr >>> 10) + (addr &&& 0x03FF)
+
+          {lo, hi} =
+            if byte_size(ppu.chr) > 0,
+              do: {:binary.at(ppu.chr, off), :binary.at(ppu.chr, off + 8)},
+              else: {Map.get(ppu.chr_ram, off, 0), Map.get(ppu.chr_ram, off + 8, 0)}
+
+          {addr, lo, addr + 8, hi}
       end
 
-    apply_chr_latch(ppu, addr)
-  end
-
-  # In extended-attribute mode the tile's CHR comes from a flat per-tile 4KB bank
-  # (ExRAM); otherwise from the PPU pattern address through the bg bank set.
-  defp bg_pattern(ppu, fine_y, plane) do
-    cond do
-      split_active?(ppu) ->
-        {_, fy} = split_yc(ppu)
-        off = ppu.split_chr * 0x1000 + (ppu.nt_latch <<< 4) + fy + plane
-        {off, chr_flat(ppu, off)}
-
-      ppu.exram_mode == 1 ->
-        bank = (ppu.ext_latch &&& 0x3F) ||| ppu.ext_chr_hi <<< 6
-        off = bank * 0x1000 + (ppu.nt_latch <<< 4) + fine_y + plane
-        {off, chr_flat(ppu, off)}
-
-      true ->
-        addr = (ppu.ctrl &&& 0x10) <<< 8 ||| ppu.nt_latch <<< 4 ||| fine_y
-        {addr + plane, chr_at(ppu, addr + plane, bg_banks(ppu))}
-    end
+    %{ppu | bg_lo_latch: lo, bg_hi_latch: hi}
+    |> apply_chr_latch(lo_addr)
+    |> apply_chr_latch(hi_addr)
   end
 
   # Read a CHR byte at a flat byte offset (extended-attribute mode).
@@ -478,11 +606,19 @@ defmodule Beamicom.NES.PPU do
     %{ppu | v: v &&& 0x7FFF}
   end
 
-  defp copy_hori(ppu), do: %{ppu | v: (ppu.v &&& bxor(0x7FFF, 0x041F)) ||| (ppu.t &&& 0x041F)}
-  defp copy_vert(ppu), do: %{ppu | v: (ppu.v &&& bxor(0x7FFF, 0x7BE0)) ||| (ppu.t &&& 0x7BE0)}
+  # Reload horizontal (dot 257) / vertical (dots 280-304) scroll bits from t. With
+  # no mid-frame scroll change v already matches, so skip the rebuild (once/line).
+  defp copy_hori(ppu), do: copy_bits(ppu, 0x041F)
+  defp copy_vert(ppu), do: copy_bits(ppu, 0x7BE0)
+
+  defp copy_bits(%{v: v, t: t} = ppu, mask) do
+    nv = (v &&& bxor(0x7FFF, mask)) ||| (t &&& mask)
+    if nv == v, do: ppu, else: %{ppu | v: nv}
+  end
 
   defp finish_frame(ppu) do
-    pixels = ppu.fb |> Enum.reverse() |> :binary.list_to_bin()
+    # fb accumulates one 256-byte binary per visible scanline, newest first.
+    pixels = ppu.fb |> Enum.reverse() |> IO.iodata_to_binary()
     palette = for i <- 0..31, into: <<>>, do: <<Map.get(ppu.palette, i, 0)>>
 
     frame = %Beamicom.NES.Framebuffer{
@@ -495,13 +631,6 @@ defmodule Beamicom.NES.PPU do
 
     %{ppu | frame_ready: frame, fb: []}
   end
-
-  # Odd-frame dot skip (spec §5.2 item 5): with rendering enabled, the pre-render
-  # line jumps from (261,339) straight to (0,0), one dot short.
-  defp advance(261, 339, frame, true) when (frame &&& 1) == 1, do: {0, 0, frame + 1}
-  defp advance(261, 340, frame, _), do: {0, 0, frame + 1}
-  defp advance(scanline, 340, frame, _), do: {scanline + 1, 0, frame}
-  defp advance(scanline, dot, frame, _), do: {scanline, dot + 1, frame}
 
   # --- CPU-facing register interface ($2000-$2007, mirrored every 8) ---
 
@@ -588,14 +717,14 @@ defmodule Beamicom.NES.PPU do
 
   # Standard mirroring maps into CIRAM. MMC5's $5105 instead sources each of the
   # four nametables independently: CIRAM page 0/1, ExRAM, or fill mode.
-  defp nt_read(%{nt_source: nil} = ppu, addr), do: Map.get(ppu.vram, nametable(ppu, addr), 0)
+  defp nt_read(%{nt_source: nil} = ppu, addr), do: :binary.at(ppu.vram, nametable(ppu, addr))
 
   defp nt_read(ppu, addr) do
     off = addr &&& 0x03FF
 
     case elem(ppu.nt_source, addr >>> 10 &&& 3) do
-      0 -> Map.get(ppu.vram, off, 0)
-      1 -> Map.get(ppu.vram, 0x400 + off, 0)
+      0 -> :binary.at(ppu.vram, off)
+      1 -> :binary.at(ppu.vram, 0x400 + off)
       2 -> Map.get(ppu.exram, off, 0)
       3 -> if off < 0x3C0, do: ppu.fill_tile, else: ppu.fill_attr * 0x55
     end
@@ -616,11 +745,33 @@ defmodule Beamicom.NES.PPU do
     if byte_size(ppu.chr) > 0, do: ppu, else: %{ppu | chr_ram: Map.put(ppu.chr_ram, off, v)}
   end
 
-  defp write(ppu, addr, v) when addr in 0x2000..0x3EFF,
-    do: %{ppu | vram: Map.put(ppu.vram, nametable(ppu, addr), v)}
+  defp write(ppu, addr, v) when addr in 0x2000..0x3EFF, do: nt_write(ppu, addr, v)
 
   defp write(ppu, addr, v) when addr in 0x3F00..0x3FFF,
     do: %{ppu | palette: Map.put(ppu.palette, palette_addr(addr), v)}
+
+  # Writes must land in the same place reads source from (see `nt_read/2`):
+  # standard mirroring into CIRAM, or MMC5's $5105 per-nametable target. A slot
+  # mapped to fill mode is read-only, so the write is dropped.
+  defp nt_write(%{nt_source: nil} = ppu, addr, v),
+    do: %{ppu | vram: put_byte(ppu.vram, nametable(ppu, addr), v)}
+
+  defp nt_write(ppu, addr, v) do
+    off = addr &&& 0x03FF
+
+    case elem(ppu.nt_source, addr >>> 10 &&& 3) do
+      0 -> %{ppu | vram: put_byte(ppu.vram, off, v)}
+      1 -> %{ppu | vram: put_byte(ppu.vram, 0x400 + off, v)}
+      2 -> %{ppu | exram: Map.put(ppu.exram, off, v)}
+      3 -> ppu
+    end
+  end
+
+  # Replace one byte of a fixed-size binary (VRAM/OAM are read-heavy, write-light).
+  defp put_byte(bin, idx, v) do
+    <<pre::binary-size(^idx), _old, post::binary>> = bin
+    <<pre::binary, v, post::binary>>
+  end
 
   # Map a nametable address into the 2KB physical VRAM per the mirroring wiring.
   defp nametable(ppu, addr) do
@@ -645,9 +796,21 @@ defmodule Beamicom.NES.PPU do
   # --- OAM ($2004) — sprite attribute byte (index rem 4 == 2) reads masked $E3 ---
 
   defp oam_read(ppu, addr) do
-    byte = Map.get(ppu.oam, addr, 0)
+    byte = :binary.at(ppu.oam, addr)
     if rem(addr, 4) == 2, do: byte &&& 0xE3, else: byte
   end
 
-  defp oam_write(ppu, addr, v), do: %{ppu | oam: Map.put(ppu.oam, addr, v)}
+  defp oam_write(ppu, addr, v), do: %{ppu | oam: put_byte(ppu.oam, addr, v)}
+
+  @doc """
+  Load all 256 OAM bytes at once (OAMDMA). The copy starts at the current OAMADDR
+  and wraps, but OAMADDR is unchanged afterwards (256 increments wrap to itself).
+  """
+  def oam_dma(ppu, <<_::size(256 * 8)>> = bytes) when ppu.oam_addr == 0,
+    do: %{ppu | oam: bytes}
+
+  def oam_dma(ppu, <<_::size(256 * 8)>> = bytes) do
+    k = ppu.oam_addr
+    %{ppu | oam: binary_part(bytes, 256 - k, k) <> binary_part(bytes, 0, 256 - k)}
+  end
 end

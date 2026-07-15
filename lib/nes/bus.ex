@@ -63,7 +63,7 @@ defmodule Beamicom.NES.Bus do
 
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
     bus = %__MODULE__{
-      ram: %{},
+      ram: <<0::size(0x800 * 8)>>,
       wram: %{},
       prg: cart.prg_rom,
       ppu: ppu,
@@ -97,13 +97,24 @@ defmodule Beamicom.NES.Bus do
 
   def flush_ticks(%__MODULE__{ppu: ppu} = bus, cycles) do
     # MMC3's scanline IRQ is clocked per rendered scanline; FME-7's per CPU cycle.
-    bus = Mapper.clock_irq(%{bus | ppu: %{ppu | irq_ticks: 0}}, ppu.irq_ticks)
-    bus = Mapper.clock_cpu_irq(bus, cycles)
+    # Only touch the PPU struct on the rare instructions that saw an A12 tick.
+    bus =
+      if ppu.irq_ticks == 0,
+        do: bus,
+        else: Mapper.clock_irq(%{bus | ppu: %{ppu | irq_ticks: 0}}, ppu.irq_ticks)
+
+    # Only FME-7 (69) has a CPU-cycle IRQ; skip the call entirely otherwise.
+    bus = if bus.mapper == 69, do: Mapper.clock_cpu_irq(bus, cycles), else: bus
     %{bus | apu: Beamicom.NES.APU.tick(bus.apu, cycles)}
   end
 
-  @doc "Whether an IRQ line is asserted (mapper or APU frame counter)."
-  def irq_pending?(%__MODULE__{irq_pending: p, apu: apu}), do: p or Beamicom.NES.APU.irq?(apu)
+  @doc """
+  Whether an IRQ line is asserted (mapper or APU frame counter). A mapper's
+  pending flag only drives /IRQ while its enable bit is set: disabling a scanline
+  IRQ deasserts the line without clearing pending (MMC5, NESdev).
+  """
+  def irq_pending?(%__MODULE__{irq_pending: p, irq_enabled: en, apu: apu}),
+    do: (p and en) or Beamicom.NES.APU.irq?(apu)
 
   @doc "Current NMI line level (false when headless)."
   def nmi_line?(%__MODULE__{ppu: nil}), do: false
@@ -112,12 +123,19 @@ defmodule Beamicom.NES.Bus do
   @doc "Consume the PPU's $2002-read NMI-suppress signal, returning {suppress?, bus}."
   def take_nmi_suppress(%__MODULE__{ppu: nil} = bus), do: {false, bus}
 
+  # Common case (almost every instruction): nothing to consume, so don't rebuild.
+  def take_nmi_suppress(%__MODULE__{ppu: %{nmi_suppress: false}} = bus), do: {false, bus}
+
   def take_nmi_suppress(%__MODULE__{ppu: ppu} = bus),
-    do: {ppu.nmi_suppress, %{bus | ppu: %{ppu | nmi_suppress: false}}}
+    do: {true, %{bus | ppu: %{ppu | nmi_suppress: false}}}
 
   @doc "Pure read for instruction/stack/vector fetches (never register space)."
+  # PRG-ROM first: code/operand fetches are by far the most common read.
+  def peek(%__MODULE__{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
+    do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
+
   def peek(%__MODULE__{} = bus, addr) when addr in 0x0000..0x1FFF,
-    do: Map.get(bus.ram, addr &&& 0x07FF, 0)
+    do: :binary.at(bus.ram, addr &&& 0x07FF)
 
   def peek(%__MODULE__{} = bus, addr) when addr in 0x6000..0x7FFF,
     do: Map.get(bus.wram, addr, 0)
@@ -126,9 +144,6 @@ defmodule Beamicom.NES.Bus do
   def peek(%__MODULE__{mapper: 5, ppu: %{exram_mode: m, exram: ex}}, addr)
       when addr in 0x5C00..0x5FFF and m >= 2,
       do: Map.get(ex, addr - 0x5C00, 0)
-
-  def peek(%__MODULE__{prg: prg, prg_banks: banks}, addr) when addr in 0x8000..0xFFFF,
-    do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
 
   def peek(%__MODULE__{}, _addr), do: 0
 
@@ -179,8 +194,11 @@ defmodule Beamicom.NES.Bus do
   defp strobe_pad(pad, true), do: %{pad | strobe: true, index: 0}
   defp strobe_pad(pad, false), do: %{pad | strobe: false}
 
-  def write(%__MODULE__{} = bus, addr, val) when addr in 0x0000..0x1FFF,
-    do: %{bus | ram: Map.put(bus.ram, addr &&& 0x07FF, val &&& 0xFF)}
+  def write(%__MODULE__{} = bus, addr, val) when addr in 0x0000..0x1FFF do
+    i = addr &&& 0x07FF
+    <<pre::binary-size(^i), _old, post::binary>> = bus.ram
+    %{bus | ram: <<pre::binary, val &&& 0xFF, post::binary>>}
+  end
 
   def write(%__MODULE__{ppu: ppu} = bus, addr, val) when addr in 0x2000..0x3FFF and ppu != nil,
     do: %{bus | ppu: PPU.write_register(ppu, addr, val)}
@@ -189,8 +207,8 @@ defmodule Beamicom.NES.Bus do
   # oam_addr, wraps). Flags the CPU stall (513/+1 cycles); the CPU ticks it.
   def write(%__MODULE__{ppu: ppu} = bus, 0x4014, val) when ppu != nil do
     base = (val &&& 0xFF) <<< 8
-    ppu = Enum.reduce(0..255, ppu, &PPU.write_register(&2, 0x2004, peek(bus, base + &1)))
-    %{bus | ppu: ppu, dma: true}
+    bytes = for i <- 0..255, into: <<>>, do: <<peek(bus, base + i)>>
+    %{bus | ppu: PPU.oam_dma(ppu, bytes), dma: true}
   end
 
   # $4016 bit 0 = strobe: high holds the shift register loaded (reads return A);

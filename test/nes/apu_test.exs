@@ -23,9 +23,29 @@ defmodule Beamicom.NES.APUTest do
     assert Enum.max(samples) > 0
   end
 
-  test "a disabled/silent APU produces a flat (constant) signal" do
+  test "a disabled/silent APU settles to silence (DC blocked by the output filter)" do
     {samples, _} = APU.new() |> APU.tick(50_000) |> APU.take_samples()
-    assert length(Enum.uniq(samples)) == 1
+    # The triangle DAC holds a DC level even when silenced; the RCA high-pass
+    # filter removes it, so the signal decays to a flat zero rather than sitting
+    # at a constant offset.
+    assert Enum.uniq(Enum.take(samples, -100)) == [0]
+  end
+
+  test "a playing triangle at an ultrasonic period (<2) stays silent, not squealing" do
+    # Games write period 0 to silence the triangle: the frequency is ultrasonic
+    # (>27kHz) and inaudible on hardware. Naively spinning the sequencer would
+    # alias it down to an audible ~11.8kHz squeal, so it must be muted at source.
+    apu =
+      APU.new()
+      # enable triangle, load a non-zero linear counter + length, period 0.
+      |> APU.write(0x4015, 0x04)
+      |> APU.write(0x4008, 0x7F)
+      |> APU.write(0x400A, 0x00)
+      |> APU.write(0x400B, 0x08)
+
+    {samples, _} = apu |> APU.tick(50_000) |> APU.take_samples()
+    # Sequencer frozen → constant output → high-pass decays it to flat silence.
+    assert Enum.uniq(Enum.take(samples, -100)) == [0]
   end
 
   test "MMC5 sound: an enabled pulse mixes an oscillating wave into the output" do

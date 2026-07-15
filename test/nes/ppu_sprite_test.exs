@@ -17,7 +17,12 @@ defmodule Beamicom.NES.PPUSpriteTest do
   end
 
   # Background: whole nametable = tile 1 (opaque everywhere, address 1).
-  defp full_bg, do: for(i <- 0..959, into: %{}, do: {i, 1})
+  # 2KB VRAM: page-0 tiles (offsets 0..959) all = tile 1; rest blank.
+  defp full_bg, do: :binary.copy(<<1>>, 960) <> <<0::size((0x800 - 960) * 8)>>
+
+  # 256-byte OAM with only sprite 0 set; the rest are Y=0 (off-screen for the
+  # scanlines these tests inspect).
+  defp oam(y, tile, attr, x), do: <<y, tile, attr, x, 0::size(252 * 8)>>
 
   # Run until we reach post-render of a rendered frame (hit flag not yet cleared).
   defp run_to_post_render(ppu) do
@@ -30,7 +35,7 @@ defmodule Beamicom.NES.PPUSpriteTest do
   test "sprite 0 over opaque background sets the hit flag and draws in front" do
     # Sprite 0: OAM Y=30 (renders scanlines 31..38), tile 1, attr 0 (front,
     # palette 0), X=40. bg+sprites enabled, no left clip.
-    oam = %{0 => 30, 1 => 1, 2 => 0x00, 3 => 40}
+    oam = oam(30, 1, 0x00, 40)
     ppu = %{PPU.new(chr(), :horizontal) | mask: 0x1E, vram: full_bg(), oam: oam}
 
     ppu = run_to_post_render(ppu)
@@ -47,7 +52,7 @@ defmodule Beamicom.NES.PPUSpriteTest do
 
   test "behind-priority sprite is hidden by opaque background" do
     # attr bit 5 set → sprite behind background.
-    oam = %{0 => 30, 1 => 1, 2 => 0x20, 3 => 40}
+    oam = oam(30, 1, 0x20, 40)
     ppu = %{PPU.new(chr(), :horizontal) | mask: 0x1E, vram: full_bg(), oam: oam}
     ppu = run_to_post_render(ppu)
 
@@ -57,7 +62,7 @@ defmodule Beamicom.NES.PPUSpriteTest do
   end
 
   test "sprite shows over a transparent (disabled) background" do
-    oam = %{0 => 30, 1 => 1, 2 => 0x00, 3 => 40}
+    oam = oam(30, 1, 0x00, 40)
     # Sprites only (bit 4), background off (bit 3 clear).
     ppu = %{PPU.new(chr(), :horizontal) | mask: 0x14, vram: full_bg(), oam: oam}
     ppu = run_to_post_render(ppu)

@@ -183,16 +183,22 @@ defmodule Beamicom.NES.Mapper do
 
   defp put_ppu(bus, key, value), do: %{bus | ppu: Map.put(bus.ppu, key, value)}
 
-  # MMC5 scanline counter: increments per rendered scanline, IRQ when it hits the
-  # $5203 target. Approximated from the PPU's per-scanline tick (exact A12-derived
-  # detection is deferred).
+  # MMC5 scanline counter (NESdev "MMC5#Scanline Detection and Scanline IRQ"):
+  # the counter is the in-frame rendered-scanline number, reset to 0 every frame,
+  # NOT a free-running tick count — so the IRQ fires at the same scanline each
+  # frame (while the CPU sits in its idle loop), matching hardware. We take the
+  # frame-synced scanline the PPU captured at the tick (`ppu.irq_scanline`).
+  #
+  # The pending flag latches whenever the counter matches $5203, regardless of the
+  # enable bit (NESdev). $5203 = 0 is a special case that never matches. The enable
+  # bit only gates whether /IRQ is actually asserted — see `Bus.irq_pending?/1`.
   defp mmc5_scanline(bus) do
-    sl = if bus.irq_counter >= 241, do: 0, else: bus.irq_counter + 1
+    sl = bus.ppu.irq_scanline
 
     %{
       bus
       | irq_counter: sl,
-        irq_pending: bus.irq_pending or (sl == bus.irq_latch and bus.irq_enabled)
+        irq_pending: bus.irq_pending or (sl == bus.irq_latch and bus.irq_latch != 0)
     }
   end
 
@@ -291,8 +297,7 @@ defmodule Beamicom.NES.Mapper do
   def clock_irq(%{mapper: 4} = bus, n) when n > 0,
     do: Enum.reduce(1..n, bus, fn _, b -> tick_mmc3_irq(b) end)
 
-  def clock_irq(%{mapper: 5} = bus, n) when n > 0,
-    do: Enum.reduce(1..n, bus, fn _, b -> mmc5_scanline(b) end)
+  def clock_irq(%{mapper: 5} = bus, n) when n > 0, do: mmc5_scanline(bus)
 
   def clock_irq(bus, _n), do: bus
 
