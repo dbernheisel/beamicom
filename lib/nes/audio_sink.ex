@@ -33,7 +33,7 @@ defmodule Beamicom.NES.AudioSink do
 
       path ->
         port = Port.open({:spawn_executable, path}, [:binary, :exit_status, args: args])
-        Beamicom.NES.Output.subscribe()
+        Beamicom.NES.Output.subscribe_audio()
         {:ok, %{port: port}}
     end
   end

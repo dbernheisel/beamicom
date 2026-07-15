@@ -42,7 +42,7 @@ defmodule Beamicom.NES.Scenic.Screen do
 
     Stream.start_link(nil)
     Stream.put(@stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
-    Output.subscribe()
+    Output.subscribe_video()
 
     graph = Graph.build() |> rect({w, h}, fill: {:stream, @stream})
 
