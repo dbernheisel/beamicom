@@ -84,7 +84,12 @@ defmodule Beamicom.NES.CPU do
     {op, mode, cyc} = decode(opcode)
     {addr, crossed, cpu, bus} = resolve(mode, cpu, bus)
     penalty = if crossed and op in @read_ops and mode in @penalty_modes, do: 1, else: 0
-    {cpu, bus} = tick_cycles(cpu, bus, cyc + penalty - 1)
+    # Only the PPU advance is split around the memory access (for exact NMI /
+    # register-read dot timing). The APU + mapper-IRQ flush is batched/lazy and the
+    # CPU only samples IRQ at instruction boundaries, so it runs ONCE for the whole
+    # instruction, halving the per-instruction flush overhead. tick_ppu_cycles still
+    # polls NMI every cycle, so NMI timing is unchanged.
+    {cpu, bus} = tick_ppu_cycles(cpu, bus, cyc + penalty - 1)
     # The 6502 polls interrupts before the final cycle: an NMI asserted only on
     # the last cycle waits for the next instruction (spec §5.2 item 3).
     poll = cpu.nmi_pending
@@ -94,7 +99,8 @@ defmodule Beamicom.NES.CPU do
     cpu = poll_nmi(cpu, bus)
     {suppress, bus} = Bus.take_nmi_suppress(bus)
     cpu = if suppress, do: %{cpu | nmi_pending: false}, else: cpu
-    {cpu, bus} = tick_cycles(cpu, bus, 1 + extra)
+    {cpu, bus} = tick_ppu_cycles(cpu, bus, 1 + extra)
+    bus = Bus.flush_ticks(bus, cyc + penalty + extra)
     cpu = %{cpu | cycles: cpu.cycles + cyc + penalty + extra}
     {cpu, bus} = if bus.dma, do: dma_stall(cpu, bus), else: {cpu, bus}
 
