@@ -350,7 +350,9 @@ defmodule Beamicom.NES.APU do
     {p1t, p1s} = adv_pulse(apu.p1_timer, apu.p1_seq, apu.pulse1.period, clocks)
     {p2t, p2s} = adv_pulse(apu.p2_timer, apu.p2_seq, apu.pulse2.period, clocks)
     {tt, ts} = adv_triangle(apu.tri_timer, apu.tri_seq, apu.triangle, dc)
-    {nt, ns} = adv_noise(apu.noise_timer, apu.noise_shift, apu.noise.period, apu.noise.mode, clocks)
+
+    {nt, ns} =
+      adv_noise(apu.noise_timer, apu.noise_shift, apu.noise.period, apu.noise.mode, clocks)
 
     %{
       apu
@@ -566,13 +568,28 @@ defmodule Beamicom.NES.APU do
   @tnd_table List.to_tuple(
                for n <- 0..202, do: if(n == 0, do: 0.0, else: 163.67 / (24329.0 / n + 100))
              )
+  # MMC5 mixer contributions, precomputed to avoid a per-sample float division +
+  # scale (CV3 uses MMC5 audio, so mmc5_out/1 runs ~744x/frame). Same values as
+  # the inline formulas → byte-identical output. Pulse pair index 0..30; raw PCM
+  # ($5011) index 0..255.
+  @m5_pulse_table List.to_tuple(
+                    for n <- 0..30, do: if(n == 0, do: 0.0, else: 95.88 / (8128 / n + 100))
+                  )
+  @m5pcm_table List.to_tuple(for n <- 0..255, do: n / 255 * 0.25)
 
   # Nonlinear mixer → unipolar 0..~1.0 float via table lookup. The RCA output
   # filters (filter/2) remove the DC offset and band-limit before scaling to PCM
   # in emit_sample/1.
   defp mix(apu) do
-    pulse_out = elem(@pulse_table, pulse_level(apu.pulse1, apu.p1_seq) + pulse_level(apu.pulse2, apu.p2_seq))
-    tnd_out = elem(@tnd_table, 3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift))
+    pulse_out =
+      elem(
+        @pulse_table,
+        pulse_level(apu.pulse1, apu.p1_seq) + pulse_level(apu.pulse2, apu.p2_seq)
+      )
+
+    tnd_out =
+      elem(@tnd_table, 3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift))
+
     pulse_out + tnd_out + mmc5_out(apu)
   end
 
@@ -600,8 +617,7 @@ defmodule Beamicom.NES.APU do
 
   defp mmc5_out(apu) do
     m5 = m5_pulse_level(apu.m5p1, apu.m5p1_seq) + m5_pulse_level(apu.m5p2, apu.m5p2_seq)
-    pulses = if m5 == 0, do: 0.0, else: 95.88 / (8128 / m5 + 100)
-    pulses + apu.m5pcm / 255 * 0.25
+    elem(@m5_pulse_table, m5) + elem(@m5pcm_table, apu.m5pcm)
   end
 
   # Like a 2A03 pulse but with no sweep unit (never muted for period < 8).
