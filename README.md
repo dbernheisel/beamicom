@@ -1,9 +1,13 @@
 # BeamicomScenic
 
-Local-verification client for the [`beamicom`](../beamicom) NES emulator: a
+Local-verification client for the
+[`beamicom`](https://github.com/dbernheisel/beamicom) NES emulator: a
 [Scenic](https://hexdocs.pm/scenic) window that renders frames from
-`NES.FrameHub` and plays audio through `NES.AudioSink` (ffplay). Keeping it in a
-separate project means the core emulator has no Scenic / OpenGL dependencies.
+`Beamicom.NES.Output` and plays audio through `Beamicom.NES.AudioSink` (ffplay).
+Keeping it in a separate project means the core emulator has no Scenic / OpenGL
+dependencies.
+
+![Screenshot](./assets/screenshot.jpg)
 
 ## Installation
 
@@ -59,8 +63,9 @@ mix compile
 iex -S mix
 ```
 ```elixir
-NES.Scenic.play("../beamicom/roms/game.nes")
-NES.Scenic.play("../beamicom/roms/game.nes", scale: 4)   # integer scale, default 3
+Beamicom.NES.Scenic.play("../beamicom/roms/game.nes")
+Beamicom.NES.Scenic.play("../beamicom/roms/game.nes", scale: 4)   # integer scale, default 3
+Beamicom.NES.Scenic.play("../beamicom/roms/game.nes", speed: 0.5) # glitch-free slow motion, default 1.0
 ```
 
 ### Controls (player 1)
