@@ -102,6 +102,15 @@ defmodule Beamicom.NES.PPU do
             # IRQ tick, for the MMC5 scanline IRQ (reset to 0 at the pre-render line).
             irq_scanline: 0,
             fb: [],
+            # Tile-row cache: the 33 fetched {nametable, attribute} pairs plus the
+            # {v & $0FFF, nt_source} key they were fetched for. The 8 scanlines of a
+            # tile row read the same nametable/attribute bytes (only the fine-Y
+            # pattern differs), so a matching key lets a scanline reuse them and
+            # refetch just the pattern. The key changes whenever v/scroll/nametable
+            # ($2000/$2005/$2006/$2007) or mirroring ($5105) changes, so it is
+            # self-invalidating; only used on the common path (no split / ext-attr).
+            tile_key: nil,
+            tile_nt_at: nil,
             frame_ready: nil
 
   @doc "Build a PPU over the cartridge's CHR data and nametable mirroring."
@@ -229,17 +238,50 @@ defmodule Beamicom.NES.PPU do
   # whole background reduces to the backdrop). The working `v` is discarded by the
   # caller (restored to line_v).
   defp fetch_line_tiles(ppu, line_v) do
-    {acc, blank?, ppu} = fetch_tiles(0, %{ppu | v: line_v}, [], true)
-    {acc |> Enum.reverse() |> List.to_tuple(), blank?, ppu}
+    key = {line_v &&& 0x0FFF, ppu.nt_source}
+    ppu = %{ppu | v: line_v}
+
+    # Reuse the tile row's nametable/attribute fetches when the key matches and
+    # we're on the common path (no vertical split, no extended-attribute mode);
+    # only the fine-Y-dependent pattern is re-fetched below.
+    if ppu.tile_nt_at != nil and ppu.tile_key == key and not ppu.split_en and
+         ppu.exram_mode != 1 do
+      {acc, blank?, ppu} = fetch_cached(0, ppu, ppu.tile_nt_at, [], true)
+      {acc |> Enum.reverse() |> List.to_tuple(), blank?, ppu}
+    else
+      {acc, ntat, blank?, ppu} = fetch_full(0, ppu, [], [], true)
+      tiles = acc |> Enum.reverse() |> List.to_tuple()
+
+      ppu =
+        if not ppu.split_en and ppu.exram_mode != 1,
+          do: %{ppu | tile_key: key, tile_nt_at: ntat |> Enum.reverse() |> List.to_tuple()},
+          else: %{ppu | tile_key: nil}
+
+      {tiles, blank?, ppu}
+    end
   end
 
-  defp fetch_tiles(33, ppu, acc, blank?), do: {acc, blank?, ppu}
+  # Full fetch: nametable + attribute + pattern per tile, walking coarse X. Also
+  # collects the {nt, at} pairs so the rest of the tile row can reuse them.
+  defp fetch_full(33, ppu, acc, ntat, blank?), do: {acc, ntat, blank?, ppu}
 
-  defp fetch_tiles(i, ppu, acc, blank?) do
+  defp fetch_full(i, ppu, acc, ntat, blank?) do
     ppu = ppu |> fetch_nt() |> fetch_at() |> fetch_bg_planes()
     tile = {ppu.bg_lo_latch, ppu.bg_hi_latch, ppu.at_latch}
     blank? = blank? and ppu.bg_lo_latch == 0 and ppu.bg_hi_latch == 0
-    fetch_tiles(i + 1, inc_hori(ppu), [tile | acc], blank?)
+    fetch_full(i + 1, inc_hori(ppu), [tile | acc], [{ppu.nt_latch, ppu.at_latch} | ntat], blank?)
+  end
+
+  # Cached fetch: reuse the row's {nt, at} and re-fetch only the pattern for this
+  # scanline's fine Y (no nametable/attribute read, no coarse-X walk).
+  defp fetch_cached(33, ppu, _ntat, acc, blank?), do: {acc, blank?, ppu}
+
+  defp fetch_cached(i, ppu, ntat, acc, blank?) do
+    {nt, at} = elem(ntat, i)
+    ppu = %{ppu | nt_latch: nt, at_latch: at} |> fetch_bg_planes()
+    tile = {ppu.bg_lo_latch, ppu.bg_hi_latch, at}
+    blank? = blank? and ppu.bg_lo_latch == 0 and ppu.bg_hi_latch == 0
+    fetch_cached(i + 1, ppu, ntat, [tile | acc], blank?)
   end
 
   # Composite one scanline's 256 pixels (background + sprite priority) into a
@@ -252,11 +294,12 @@ defmodule Beamicom.NES.PPU do
     buf = if sprites_on?(ppu), do: sprite_buffer(ppu.line_sprites), else: %{}
 
     clip? = (ppu.mask &&& 0x04) == 0
+    bg_blank? = blank? or not bg_on
 
     line =
       cond do
         # No sprites and the background is entirely backdrop → 256 backdrop bytes.
-        map_size(buf) == 0 and (blank? or not bg_on) ->
+        map_size(buf) == 0 and bg_blank? ->
           <<0::size(256 * 8)>>
 
         # Sprite-less line: compose the whole background at once, tile-batched
@@ -266,14 +309,38 @@ defmodule Beamicom.NES.PPU do
         map_size(buf) == 0 ->
           bg_line(tiles, fine_x, ppu.mask)
 
-        # Sprite line: keep the per-pixel path. Precomputing the background here
-        # would be pure overhead for sprite-bound games with mostly-blank
-        # backgrounds (CV3's intro), where `bg_at` already short-circuits to 0.
+        # Sprite line over a blank background (CV3's intro): the background is all
+        # backdrop, so skip `bg_at` entirely — every sprite pixel wins over 0.
+        bg_blank? ->
+          sprite_over_blank(0, buf, clip?, <<>>)
+
+        # Sprite line over real background: per-pixel bg + priority.
         true ->
           sprite_pixels(0, tiles, fine_x, bg_on, ppu.mask, buf, clip?, <<>>)
       end
 
-    {line, sprite0_hit(ppu, buf, tiles, fine_x, bg_on)}
+    # Sprite-0 hit needs sprite 0 over an opaque background pixel — impossible with
+    # no sprites or a blank background, so skip the scan in those cases.
+    ppu =
+      if bg_blank? or map_size(buf) == 0,
+        do: ppu,
+        else: sprite0_hit(ppu, buf, tiles, fine_x, bg_on)
+
+    {line, ppu}
+  end
+
+  # Sprite-priority pixel run over a blank (all-backdrop) background: the sprite
+  # always wins where it's opaque, so no bg fetch or priority compare is needed.
+  defp sprite_over_blank(256, _buf, _clip?, acc), do: acc
+
+  defp sprite_over_blank(c, buf, clip?, acc) do
+    addr =
+      case if(clip? and c < 8, do: nil, else: Map.get(buf, c)) do
+        nil -> 0
+        {sp_addr, _front?, _z} -> sp_addr
+      end
+
+    sprite_over_blank(c + 1, buf, clip?, <<acc::binary, addr>>)
   end
 
   # Background + sprite-priority pixel run.
@@ -450,11 +517,11 @@ defmodule Beamicom.NES.PPU do
       # Extended-attribute mode ($5104=1): this tile's ExRAM byte gives its CHR
       # bank (bits 0-5) and palette (bits 6-7).
       ppu.exram_mode == 1 ->
-        nt = read(ppu, 0x2000 ||| (ppu.v &&& 0x0FFF))
+        nt = nt_read(ppu, 0x2000 ||| (ppu.v &&& 0x0FFF))
         %{ppu | nt_latch: nt, ext_latch: Map.get(ppu.exram, ppu.v &&& 0x03FF, 0)}
 
       true ->
-        %{ppu | nt_latch: read(ppu, 0x2000 ||| (ppu.v &&& 0x0FFF)), ext_latch: 0}
+        %{ppu | nt_latch: nt_read(ppu, 0x2000 ||| (ppu.v &&& 0x0FFF)), ext_latch: 0}
     end
   end
 
@@ -489,7 +556,7 @@ defmodule Beamicom.NES.PPU do
         v = ppu.v
         addr = 0x23C0 ||| (v &&& 0x0C00) ||| (v >>> 4 &&& 0x38) ||| (v >>> 2 &&& 0x07)
         quadrant = (v >>> 4 &&& 0x04) ||| (v &&& 0x02)
-        %{ppu | at_latch: read(ppu, addr) >>> quadrant &&& 0x03}
+        %{ppu | at_latch: nt_read(ppu, addr) >>> quadrant &&& 0x03}
     end
   end
 

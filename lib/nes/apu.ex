@@ -71,8 +71,8 @@ defmodule Beamicom.NES.APU do
             # Un-run CPU cycles owed to the APU; run lazily in bulk (see tick/2).
             pending: 0
 
-  defp pulse,
-    do: %{
+  defp pulse do
+    %{
       duty: 0,
       period: 0,
       length: 0,
@@ -91,9 +91,10 @@ defmodule Beamicom.NES.APU do
       ones: false,
       enabled: false
     }
+  end
 
-  defp tri,
-    do: %{
+  defp tri do
+    %{
       period: 0,
       length: 0,
       halt: false,
@@ -103,9 +104,10 @@ defmodule Beamicom.NES.APU do
       reload_flag: false,
       enabled: false
     }
+  end
 
-  defp noise,
-    do: %{
+  defp noise do
+    %{
       period: 0,
       mode: false,
       length: 0,
@@ -117,9 +119,10 @@ defmodule Beamicom.NES.APU do
       env_decay: 0,
       enabled: false
     }
+  end
 
-  def new,
-    do: %__MODULE__{
+  def new do
+    %__MODULE__{
       pulse1: pulse(),
       pulse2: %{pulse() | ones: true},
       triangle: tri(),
@@ -127,6 +130,7 @@ defmodule Beamicom.NES.APU do
       m5p1: pulse(),
       m5p2: pulse()
     }
+  end
 
   @doc "MMC5 sound register write ($5000-$5015)."
   def mmc5_write(apu, addr, val) do
@@ -179,11 +183,13 @@ defmodule Beamicom.NES.APU do
     if addr == 0x4007, do: %{apu | p2_seq: 0}, else: apu
   end
 
-  defp write_reg(apu, addr, val) when addr in 0x4008..0x400B,
-    do: %{apu | triangle: tri_reg(apu.triangle, addr - 0x4008, val)}
+  defp write_reg(apu, addr, val) when addr in 0x4008..0x400B do
+    %{apu | triangle: tri_reg(apu.triangle, addr - 0x4008, val)}
+  end
 
-  defp write_reg(apu, addr, val) when addr in 0x400C..0x400F,
-    do: %{apu | noise: noise_reg(apu.noise, addr - 0x400C, val)}
+  defp write_reg(apu, addr, val) when addr in 0x400C..0x400F do
+    %{apu | noise: noise_reg(apu.noise, addr - 0x400C, val)}
+  end
 
   defp write_reg(apu, 0x4015, val), do: status_write(apu, val)
   defp write_reg(apu, 0x4017, val), do: frame_write(apu, val)
@@ -204,11 +210,12 @@ defmodule Beamicom.NES.APU do
   defp bool(true, mask), do: mask
   defp bool(false, _mask), do: 0
 
-  defp pulse_reg(p, 0, v),
-    do: %{p | duty: v >>> 6, halt: (v &&& 0x20) != 0, const: (v &&& 0x10) != 0, vol: v &&& 0x0F}
+  defp pulse_reg(p, 0, v) do
+    %{p | duty: v >>> 6, halt: (v &&& 0x20) != 0, const: (v &&& 0x10) != 0, vol: v &&& 0x0F}
+  end
 
-  defp pulse_reg(p, 1, v),
-    do: %{
+  defp pulse_reg(p, 1, v) do
+    %{
       p
       | sweep_en: (v &&& 0x80) != 0,
         sweep_period: v >>> 4 &&& 0x07,
@@ -216,6 +223,7 @@ defmodule Beamicom.NES.APU do
         sweep_shift: v &&& 0x07,
         sweep_reload: true
     }
+  end
 
   defp pulse_reg(p, 2, v), do: %{p | period: (p.period &&& 0x700) ||| v}
 
@@ -225,8 +233,9 @@ defmodule Beamicom.NES.APU do
     %{p | period: period, length: length, env_start: true}
   end
 
-  defp tri_reg(t, 0, v),
-    do: %{t | control: (v &&& 0x80) != 0, halt: (v &&& 0x80) != 0, linear_reload: v &&& 0x7F}
+  defp tri_reg(t, 0, v) do
+    %{t | control: (v &&& 0x80) != 0, halt: (v &&& 0x80) != 0, linear_reload: v &&& 0x7F}
+  end
 
   defp tri_reg(t, 2, v), do: %{t | period: (t.period &&& 0x700) ||| v}
 
@@ -237,11 +246,13 @@ defmodule Beamicom.NES.APU do
 
   defp tri_reg(t, _, _), do: t
 
-  defp noise_reg(n, 0, v),
-    do: %{n | halt: (v &&& 0x20) != 0, const: (v &&& 0x10) != 0, vol: v &&& 0x0F}
+  defp noise_reg(n, 0, v) do
+    %{n | halt: (v &&& 0x20) != 0, const: (v &&& 0x10) != 0, vol: v &&& 0x0F}
+  end
 
-  defp noise_reg(n, 2, v),
-    do: %{n | mode: (v &&& 0x80) != 0, period: elem(@noise_periods, v &&& 0x0F)}
+  defp noise_reg(n, 2, v) do
+    %{n | mode: (v &&& 0x80) != 0, period: elem(@noise_periods, v &&& 0x0F)}
+  end
 
   defp noise_reg(n, 3, v) do
     length = if n.enabled, do: elem(@length, v >>> 3), else: n.length
@@ -271,8 +282,6 @@ defmodule Beamicom.NES.APU do
     if mode == 5, do: half_frame(quarter_frame(apu)), else: apu
   end
 
-  # --- clocking ---
-
   # Bulk-run only once ~a scanline of cycles has accrued; keeps frame-IRQ / status
   # latency under a scanline while amortising the run over many CPU cycles.
   @flush_threshold 100
@@ -291,13 +300,11 @@ defmodule Beamicom.NES.APU do
   the backlog first via `flush/1`; `irq?/1` reads the (≤1 scanline stale) flag
   directly so it stays cheap on the per-instruction interrupt poll.
   """
-  def tick(apu, n) do
-    pending = apu.pending + n
-
-    if pending >= @flush_threshold,
-      do: run(%{apu | pending: 0}, pending),
-      else: %{apu | pending: pending}
+  def tick(apu, n) when apu.pending + n >= @flush_threshold do
+    run(%{apu | pending: 0}, apu.pending + n)
   end
+
+  def tick(apu, n), do: %{apu | pending: apu.pending + n}
 
   @doc "Run any accrued cycles so the APU state is current."
   def flush(%__MODULE__{pending: 0} = apu), do: apu
@@ -320,25 +327,13 @@ defmodule Beamicom.NES.APU do
   defp to_sample(apu), do: max(1, ceil((1.0 - apu.sample_acc) / @rate_ratio))
 
   # Cycles until the next frame-sequencer boundary (steps + the sequence wrap).
-  defp to_frame(%{frame_mode: 5, seq_cycle: sc}) do
-    cond do
-      sc < 7457 -> 7457 - sc
-      sc < 14913 -> 14913 - sc
-      sc < 22371 -> 22371 - sc
-      sc < 37281 -> 37281 - sc
-      true -> 37282 - sc
-    end
-  end
-
-  defp to_frame(%{seq_cycle: sc}) do
-    cond do
-      sc < 7457 -> 7457 - sc
-      sc < 14913 -> 14913 - sc
-      sc < 22371 -> 22371 - sc
-      sc < 29829 -> 29829 - sc
-      true -> 29830 - sc
-    end
-  end
+  defp to_frame(%{seq_cycle: sc}) when sc < 7457, do: 7457 - sc
+  defp to_frame(%{seq_cycle: sc}) when sc < 14913, do: 14913 - sc
+  defp to_frame(%{seq_cycle: sc}) when sc < 22371, do: 22371 - sc
+  defp to_frame(%{frame_mode: 5, seq_cycle: sc}) when sc < 37281, do: 37281 - sc
+  defp to_frame(%{frame_mode: 5, seq_cycle: sc}), do: 37282 - sc
+  defp to_frame(%{seq_cycle: sc}) when sc < 29829, do: 29829 - sc
+  defp to_frame(%{seq_cycle: sc}), do: 29830 - sc
 
   # Cycles until the MMC5 240Hz step.
   defp to_m5(apu), do: 7457 - apu.m5seq
@@ -433,8 +428,9 @@ defmodule Beamicom.NES.APU do
   defp mmc5_frame(ch), do: ch |> clock_env() |> clock_length()
 
   # MMC5 240Hz step (envelope + length on both MMC5 pulses; length at 2x rate).
-  defp mmc5_action(%{m5seq: m} = apu) when m >= 7457,
-    do: %{apu | m5seq: 0, m5p1: mmc5_frame(apu.m5p1), m5p2: mmc5_frame(apu.m5p2)}
+  defp mmc5_action(%{m5seq: m} = apu) when m >= 7457 do
+    %{apu | m5seq: 0, m5p1: mmc5_frame(apu.m5p1), m5p2: mmc5_frame(apu.m5p2)}
+  end
 
   defp mmc5_action(apu), do: apu
 
@@ -451,17 +447,28 @@ defmodule Beamicom.NES.APU do
   defp frame_action(%{frame_mode: 5, seq_cycle: sc} = apu), do: frame_at(apu, sc, @frame5, 37282)
   defp frame_action(%{seq_cycle: sc} = apu), do: frame_at(apu, sc, @frame4, 29830)
 
-  defp frame_at(apu, sc, steps, wrap) do
-    cond do
-      sc == elem(steps, 0) -> quarter_frame(apu)
-      sc == elem(steps, 1) -> half_frame(quarter_frame(apu))
-      sc == elem(steps, 2) -> quarter_frame(apu)
-      sc == elem(steps, 3) and apu.frame_mode == 5 -> half_frame(quarter_frame(apu))
-      sc == elem(steps, 3) -> %{half_frame(quarter_frame(apu)) | frame_irq: not apu.irq_inhibit}
-      sc >= wrap -> %{apu | seq_cycle: 0}
-      true -> apu
-    end
+  defp frame_at(apu, sc, steps, _wrap) when sc == elem(steps, 0) do
+    quarter_frame(apu)
   end
+
+  defp frame_at(apu, sc, steps, _wrap) when sc == elem(steps, 1) do
+    half_frame(quarter_frame(apu))
+  end
+
+  defp frame_at(apu, sc, steps, _wrap) when sc == elem(steps, 2) do
+    quarter_frame(apu)
+  end
+
+  defp frame_at(%{frame_mode: 5} = apu, sc, steps, _wrap) when sc == elem(steps, 3) do
+    half_frame(quarter_frame(apu))
+  end
+
+  defp frame_at(apu, sc, steps, _wrap) when sc == elem(steps, 3) do
+    %{half_frame(quarter_frame(apu)) | frame_irq: not apu.irq_inhibit}
+  end
+
+  defp frame_at(apu, sc, _steps, wrap) when sc >= wrap, do: %{apu | seq_cycle: 0}
+  defp frame_at(apu, _sc, _steps, _wrap), do: apu
 
   defp quarter_frame(apu) do
     %{
@@ -483,8 +490,9 @@ defmodule Beamicom.NES.APU do
     }
   end
 
-  defp clock_env(%{env_start: true} = ch),
-    do: %{ch | env_start: false, env_decay: 15, env_div: ch.vol}
+  defp clock_env(%{env_start: true} = ch) do
+    %{ch | env_start: false, env_decay: 15, env_div: ch.vol}
+  end
 
   defp clock_env(%{env_div: 0} = ch) do
     decay =
@@ -538,9 +546,10 @@ defmodule Beamicom.NES.APU do
 
   # --- output + mixing ---
 
+  defp pulse_level(%{length: 0}, _seq), do: 0
+
   defp pulse_level(p, seq) do
     cond do
-      p.length == 0 -> 0
       sweep_mute?(p) -> 0
       (elem(@duty, p.duty) >>> (7 - seq) &&& 1) == 0 -> 0
       p.const -> p.vol
@@ -550,14 +559,10 @@ defmodule Beamicom.NES.APU do
 
   defp tri_level(seq), do: elem(@tri_seq, seq)
 
-  defp noise_level(n, shift) do
-    cond do
-      n.length == 0 -> 0
-      (shift &&& 1) == 1 -> 0
-      n.const -> n.vol
-      true -> n.env_decay
-    end
-  end
+  defp noise_level(%{length: 0}, _shift), do: 0
+  defp noise_level(_, shift) when (shift &&& 1) == 1, do: 0
+  defp noise_level(%{vol: vol, const: const}, _shift) when not is_nil(const), do: vol
+  defp noise_level(%{env_decay: decay}, _shift), do: decay
 
   # Precomputed nonlinear mixer tables (NESdev "Lookup Table"): pulse index is
   # pulse1+pulse2 (0..30); tnd index is 3*triangle + 2*noise + dmc (0..202).
@@ -621,14 +626,10 @@ defmodule Beamicom.NES.APU do
   end
 
   # Like a 2A03 pulse but with no sweep unit (never muted for period < 8).
-  defp m5_pulse_level(p, seq) do
-    cond do
-      p.length == 0 -> 0
-      (elem(@duty, p.duty) >>> (7 - seq) &&& 1) == 0 -> 0
-      p.const -> p.vol
-      true -> p.env_decay
-    end
-  end
+  defp m5_pulse_level(%{length: 0}, _seq), do: 0
+  defp m5_pulse_level(%{duty: duty}, seq) when (elem(@duty, duty) >>> (7 - seq) &&& 1) == 0, do: 0
+  defp m5_pulse_level(%{const: const, vol: vol}, _seq) when not is_nil(const), do: vol
+  defp m5_pulse_level(%{env_decay: decay}, _seq), do: decay
 
   defp clamp(v) when v > 32767, do: 32767
   defp clamp(v) when v < -32768, do: -32768
