@@ -24,7 +24,7 @@ defmodule Beamicom.NES.AudioSink do
 
   @impl true
   def init(opts) do
-    [exe | args] = Keyword.get(opts, :command, cmd_for(Keyword.get(opts, :rate, @rate)))
+    [exe | args] = Keyword.get(opts, :command, cmd_for(Keyword.get(opts, :speed, 1.0)))
 
     case System.find_executable(exe) do
       nil ->
@@ -38,8 +38,21 @@ defmodule Beamicom.NES.AudioSink do
     end
   end
 
-  defp cmd_for(rate),
-    do: ~w(ffplay -nodisp -autoexit -loglevel quiet -f s16le -ar #{rate} -ch_layout mono -i -)
+  # Feed ffplay the full-rate 44.1kHz stream but time-stretch by `speed` with
+  # `atempo` (pitch-preserving): at speed 0.5 the filter consumes 22050 input
+  # samples/sec — exactly what the `Runtime` produces when paced to 0.5× — so
+  # playback stays fed (glitch-free) and in tune while running in slow motion.
+  # `atempo` accepts 0.5..100.0; slower than 0.5 would need chained filters.
+  defp cmd_for(speed) do
+    base = ~w(ffplay -nodisp -autoexit -loglevel quiet -f s16le -ar #{@rate} -ch_layout mono)
+    base ++ atempo(speed) ++ ["-i", "-"]
+  end
+
+  # `atempo` only accepts 0.5..100.0, so factors below 0.5 must be chained
+  # (0.5 * (speed/0.5) = speed). Handles down to 0.25 with two stages.
+  defp atempo(speed) when speed >= 1.0, do: []
+  defp atempo(speed) when speed >= 0.5, do: ["-af", "atempo=#{speed}"]
+  defp atempo(speed), do: ["-af", "atempo=0.5,atempo=#{speed / 0.5}"]
 
   @impl true
   def handle_info({:audio, samples}, state) do

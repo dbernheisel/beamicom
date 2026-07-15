@@ -13,16 +13,26 @@ defmodule Beamicom.NES.Scenic do
       iex> Beamicom.NES.Scenic.play("roms/game.nes", scale: 4)
   """
 
-  @doc "Load a ROM and open the Scenic window + audio (integer `:scale`, default 3)."
+  @doc """
+  Load a ROM and open the Scenic window + audio.
+
+  Options: integer `:scale` (default 3); `:speed` (default 1.0) — a playback
+  multiplier below 1.0 runs the whole machine in glitch-free slow motion (audio
+  and video stay in sync) for hosts that can't sustain real-time. The emulator
+  and the audio sink are paced to the same `:speed`, so `0.5` = half-speed with
+  pitch preserved.
+  """
   def play(rom, opts \\ []) do
     scale = Keyword.get(opts, :scale, 3)
+    speed = Keyword.get(opts, :speed, 1.0)
     # Audio is best-effort: the sink declines (`:ignore`) if ffplay is missing.
-    case Beamicom.NES.AudioSink.start_link([]) do
+    case Beamicom.NES.AudioSink.start_link(speed: speed) do
       {:ok, _pid} -> :ok
       :ignore -> :ok
       error -> raise(inspect(error))
     end
-    {:ok, _} = Beamicom.NES.Runtime.start_link(rom: rom)
+
+    {:ok, _} = Beamicom.NES.Runtime.start_link(rom: rom, speed: speed)
 
     config =
       Application.get_env(:beamicom_scenic, :viewport)
