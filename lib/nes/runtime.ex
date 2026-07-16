@@ -34,7 +34,13 @@ defmodule Beamicom.NES.Runtime do
     # Scenic driver so CPU contention can't push a frame past its deadline. Safe
     # because paced play sleeps between frames (it never busy-holds the CPU).
     Process.flag(:priority, :high)
-    console = Console.load(Keyword.fetch!(opts, :rom))
+
+    console =
+      case Keyword.fetch(opts, :console) do
+        {:ok, console} -> console
+        :error -> Console.load(Keyword.fetch!(opts, :rom))
+      end
+
     pace = Keyword.get(opts, :pace, true)
     # Playback speed multiplier (1.0 = real-time NTSC). Below 1.0 paces frames
     # further apart for glitch-free slow-motion on machines that can't sustain
