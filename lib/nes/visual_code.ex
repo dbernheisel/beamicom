@@ -25,9 +25,6 @@ defmodule Beamicom.NES.VisualCode do
   @header_magic "BMIC"
   @header_version 1
   @header_size 13
-  # NES palette indexes for the "1" dot color: the bright, saturated row (all
-  # non-black, so decode's black-vs-not test stays unambiguous).
-  @dot_color_indexes 0x21..0x2C
 
   @doc """
   Encode `payload` into a share image framing `screenshot_rgb` (NES native 256×240).
@@ -46,11 +43,10 @@ defmodule Beamicom.NES.VisualCode do
 
     cell_bits = border_cells(grid_w, grid_h, t) |> Enum.zip(bits) |> Map.new()
 
-    # "1" dots take a random bright NES-palette color (per image), "0" dots stay
-    # black — softer than harsh B/W. Decode only tests black-vs-not, so the color
-    # is purely cosmetic.
-    {cr, cg, cb} = Beamicom.NES.Palette.rgb(Enum.random(@dot_color_indexes))
-    on = <<cr, cg, cb>>
+    # "1" dots take the screenshot's most common non-black color so the border
+    # harmonizes with the frame; "0" dots stay black. Decode only tests
+    # black-vs-not, so the exact color is cosmetic.
+    on = dominant_color(screenshot_rgb)
 
     rgb =
       for py <- 0..(img_h - 1), px <- 0..(img_w - 1), into: <<>> do
@@ -102,6 +98,22 @@ defmodule Beamicom.NES.VisualCode do
   defp build_header(payload) do
     @header_magic <>
       <<@header_version::8, byte_size(payload)::32, :erlang.crc32(payload)::32>>
+  end
+
+  # Most common non-black color in the screenshot (its dominant accent), so the
+  # dot border matches the frame. White fallback if the screenshot is all black.
+  defp dominant_color(screenshot_rgb) do
+    counts =
+      for <<r, g, b <- screenshot_rgb>>, {r, g, b} != {0, 0, 0}, reduce: %{} do
+        acc -> Map.update(acc, {r, g, b}, 1, &(&1 + 1))
+      end
+
+    if counts == %{} do
+      <<255, 255, 255>>
+    else
+      {{r, g, b}, _} = Enum.max_by(counts, fn {_color, n} -> n end)
+      <<r, g, b>>
+    end
   end
 
   # 3 RGB bytes for pixel (px, py): screenshot pixel inside the frame, dot color outside.
