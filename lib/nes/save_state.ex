@@ -13,6 +13,9 @@ defmodule Beamicom.NES.SaveState do
       console
       |> put_in([Access.key!(:bus), Access.key!(:prg)], <<>>)
       |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:chr)], <<>>)
+      # Drop the last rendered frame: it's transient output, re-rendered on resume,
+      # and the biggest chunk of the payload.
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
 
     state_bin =
       :zlib.compress(:erlang.term_to_binary(%{v: 1, rom_crc: rom_crc, console: stripped}))
@@ -23,6 +26,12 @@ defmodule Beamicom.NES.SaveState do
 
   @doc "Reconstruct a %Console{} from state_bin + rom_blob, verifying CRC."
   def merge(state_bin, rom_blob) do
+    # The saved console holds atoms (module/field names, :ntsc, ...). `binary_to_term`
+    # with [:safe] refuses atoms not already in the table, so a fresh process (e.g.
+    # `mix nes.load`) that never ran the emulator would reject them. Load the app's
+    # modules first to register their atoms while keeping [:safe]'s DoS guard.
+    ensure_atoms_loaded()
+
     try do
       %{v: 1, rom_crc: saved_crc, console: console} =
         :erlang.binary_to_term(:zlib.uncompress(state_bin), [:safe])
@@ -48,5 +57,11 @@ defmodule Beamicom.NES.SaveState do
   def rom_crc(nes_path) do
     {:ok, cart} = Cart.parse(File.read!(nes_path))
     :erlang.crc32(cart.prg_rom <> cart.chr_rom)
+  end
+
+  defp ensure_atoms_loaded do
+    Application.load(:beamicom)
+    for mod <- Application.spec(:beamicom, :modules) || [], do: Code.ensure_loaded(mod)
+    :ok
   end
 end

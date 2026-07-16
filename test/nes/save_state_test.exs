@@ -10,19 +10,22 @@ defmodule Beamicom.NES.SaveStateTest do
     Enum.reduce(1..100_000, c, fn _, acc -> Console.step(acc) end)
   end
 
-  test "split/merge round-trips to byte-identical console" do
+  test "split/merge round-trips the console (except the transient last frame)" do
     c = loaded_console()
     {state_bin, rom_blob} = SaveState.split(c)
     assert {:ok, c2} = SaveState.merge(state_bin, rom_blob)
-    assert :erlang.term_to_binary(c) == :erlang.term_to_binary(c2)
+    # frame_ready is dropped on split (re-rendered on resume), so clear it to compare.
+    expected = put_in(c.bus.ppu.frame_ready, nil)
+    assert :erlang.term_to_binary(expected) == :erlang.term_to_binary(c2)
   end
 
-  test "split zeroes out prg and chr in the saved state_bin" do
+  test "split zeroes out prg, chr, and the transient frame in the saved state_bin" do
     c = loaded_console()
     {state_bin, _rom_blob} = SaveState.split(c)
     %{console: stripped} = :erlang.binary_to_term(:zlib.uncompress(state_bin))
     assert stripped.bus.prg == <<>>
     assert stripped.bus.ppu.chr == <<>>
+    assert stripped.bus.ppu.frame_ready == nil
   end
 
   test "merge rejects CRC mismatch (valid save data paired with wrong ROM)" do
