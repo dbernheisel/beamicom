@@ -11,10 +11,14 @@ defmodule Beamicom.NES.Scenic do
 
       iex> Beamicom.NES.Scenic.play("roms/game.nes")
       iex> Beamicom.NES.Scenic.play("roms/game.nes", scale: 4)
+      iex> Beamicom.NES.Scenic.play("save.png")
   """
 
   @doc """
-  Load a ROM and open the Scenic window + audio.
+  Load a ROM **or** a beamicom save PNG and open the Scenic window + audio.
+
+  The file is sniffed by its magic bytes: a `.nes` ROM boots fresh, a save PNG
+  (produced by `mix nes.save`) resumes the saved console.
 
   Options: integer `:scale` (default 3); `:speed` (default 1.0) — a playback
   multiplier below 1.0 runs the whole machine in glitch-free slow motion (audio
@@ -22,7 +26,7 @@ defmodule Beamicom.NES.Scenic do
   and the audio sink are paced to the same `:speed`, so `0.5` = half-speed with
   pitch preserved.
   """
-  def play(rom, opts \\ []) do
+  def play(path, opts \\ []) do
     scale = Keyword.get(opts, :scale, 3)
     speed = Keyword.get(opts, :speed, 1.0)
     # Audio is best-effort: the sink declines (`:ignore`) if ffplay is missing.
@@ -32,7 +36,7 @@ defmodule Beamicom.NES.Scenic do
       error -> raise(inspect(error))
     end
 
-    {:ok, _} = Beamicom.NES.Runtime.start_link(rom: rom, speed: speed)
+    {:ok, _} = Beamicom.NES.Runtime.start_link([speed: speed] ++ source_opts(path))
 
     config =
       Application.get_env(:beamicom_scenic, :viewport)
@@ -41,5 +45,24 @@ defmodule Beamicom.NES.Scenic do
 
     {:ok, _} = Scenic.start_link([config])
     :ok
+  end
+
+  # Sniff the file by magic bytes: a .nes ROM boots fresh; a beamicom save PNG
+  # resumes the saved console (ROM pulled from the PNG trailer, or matched by CRC
+  # against .nes files next to it).
+  defp source_opts(path) do
+    case File.read!(path) do
+      <<"NES", 0x1A, _::binary>> ->
+        [rom: path]
+
+      <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png ->
+        case Beamicom.NES.ShareImage.load_image(png, [Path.dirname(path)]) do
+          {:ok, console} -> [console: console]
+          {:error, reason} -> raise "#{path}: could not load save (#{inspect(reason)})"
+        end
+
+      _ ->
+        raise ArgumentError, "#{path}: not a .nes ROM or a beamicom save PNG"
+    end
   end
 end

@@ -7,7 +7,8 @@ defmodule Beamicom.NES.Scenic.Screen do
   graph is static, only the buffer changes.
 
   Local keyboard is player 1. Debug keys: space pauses/resumes, `.` steps one
-  frame while paused, `g` toggles the raw palette-address grayscale view.
+  frame while paused, `g` toggles the raw palette-address grayscale view. A
+  "Save" button writes a share PNG of the live state (see `Beamicom.NES.ShareImage`).
 
   ## Sources
     * Scenic `Assets.Stream` (hand-built `{Bitmap, {w,h,:rgb}, bin}` tuple) and
@@ -16,7 +17,8 @@ defmodule Beamicom.NES.Scenic.Screen do
   use Scenic.Scene
 
   import Scenic.Primitives, only: [rect: 3]
-  alias Beamicom.NES.{Output, Palette, Runtime}
+  import Scenic.Components, only: [button: 3]
+  alias Beamicom.NES.{Output, Palette, Runtime, ShareImage}
   alias Scenic.Assets.Stream
   alias Scenic.Assets.Stream.Bitmap
   alias Scenic.Graph
@@ -44,7 +46,10 @@ defmodule Beamicom.NES.Scenic.Screen do
     Stream.put(@stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
     Output.subscribe_video()
 
-    graph = Graph.build() |> rect({w, h}, fill: {:stream, @stream})
+    graph =
+      Graph.build()
+      |> rect({w, h}, fill: {:stream, @stream})
+      |> button("Save", id: :save, theme: :dark, t: {w - 96, 8})
 
     scene =
       scene
@@ -82,6 +87,31 @@ defmodule Beamicom.NES.Scenic.Screen do
 
   def handle_input(_input, _id, scene) do
     {:noreply, scene}
+  end
+
+  # The "Save" button snapshots the live console and writes a share PNG.
+  @impl true
+  def handle_event({:click, :save}, _from, scene) do
+    save_snapshot()
+    {:noreply, scene}
+  end
+
+  def handle_event(_event, _from, scene), do: {:noreply, scene}
+
+  defp save_snapshot do
+    case Runtime.snapshot() do
+      {console, fb} when not is_nil(fb) ->
+        stamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S")
+        path = "beamicom-save-#{stamp}.png"
+
+        Task.start(fn ->
+          File.write!(path, ShareImage.to_png(console, fb))
+          IO.puts("saved #{path}")
+        end)
+
+      _ ->
+        IO.puts("no frame rendered yet — nothing to save")
+    end
   end
 
   # Integer nearest-neighbor upscale: the local driver samples textures linearly,
