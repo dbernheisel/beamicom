@@ -48,7 +48,9 @@ defmodule Beamicom.NES.BlarggTest do
               14-rti 15-brk 16-special)
 
   defp assert_passes(name) do
-    {:ok, cart} = Cart.parse(File.read!("roms/instr_test-v5/rom_singles/#{name}.nes"))
+    {:ok, cart} =
+      Cart.parse(File.read!("test/support/fixtures/instr_test-v5/rom_singles/#{name}.nes"))
+
     {code, msg} = run(Bus.new(cart))
     assert code == 0, "blargg reported code #{inspect(code)}:\n#{msg}"
     assert msg =~ "Passed"

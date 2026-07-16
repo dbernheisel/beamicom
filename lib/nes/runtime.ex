@@ -18,12 +18,14 @@ defmodule Beamicom.NES.Runtime do
   # NTSC ~60.0988 fps.
   @period_ns round(1_000_000_000 / 60.0988)
 
-  def start_link(opts),
-    do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
+  end
 
   @doc "Set controller `port` (1 or 2) to the pressed buttons."
-  def set_buttons(server \\ __MODULE__, port, buttons),
-    do: GenServer.cast(server, {:set_buttons, port, buttons})
+  def set_buttons(server \\ __MODULE__, port, buttons) do
+    GenServer.cast(server, {:set_buttons, port, buttons})
+  end
 
   @impl true
   def init(opts) do
@@ -58,13 +60,15 @@ defmodule Beamicom.NES.Runtime do
   def step(server \\ __MODULE__), do: GenServer.cast(server, :step)
 
   @impl true
-  def handle_cast({:set_buttons, port, buttons}, state),
-    do: {:noreply, %{state | console: Console.set_buttons(state.console, port, buttons)}}
+  def handle_cast({:set_buttons, port, buttons}, state) do
+    {:noreply, %{state | console: Console.set_buttons(state.console, port, buttons)}}
+  end
 
   def handle_cast(:pause, state), do: {:noreply, %{state | paused: true}}
 
-  def handle_cast(:resume, state),
-    do: {:noreply, schedule(%{state | paused: false, epoch: now(), published: 0})}
+  def handle_cast(:resume, state) do
+    {:noreply, schedule(%{state | paused: false, epoch: now(), published: 0})}
+  end
 
   def handle_cast(:step, state), do: {:noreply, run_frame(state)}
 

@@ -50,7 +50,10 @@ defmodule Beamicom.NES.PPUVblNmiTest do
   for name <- @passing do
     test "ppu_vbl_nmi #{name} passes" do
       {code, msg} =
-        run(Console.load("roms/ppu_vbl_nmi/rom_singles/#{unquote(name)}.nes"), @max_steps)
+        run(
+          Console.load("test/support/fixtures/ppu_vbl_nmi/rom_singles/#{unquote(name)}.nes"),
+          @max_steps
+        )
 
       assert code == 0, "reported #{inspect(code)}:\n#{msg}"
       assert msg =~ "Passed"

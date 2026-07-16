@@ -26,16 +26,17 @@ defmodule Beamicom.NES.CPUNestestTest do
     }
   end
 
-  defp actual(cpu),
-    do: %{pc: cpu.pc, a: cpu.a, x: cpu.x, y: cpu.y, p: cpu.p, sp: cpu.sp, cycles: cpu.cycles}
+  defp actual(cpu) do
+    %{pc: cpu.pc, a: cpu.a, x: cpu.x, y: cpu.y, p: cpu.p, sp: cpu.sp, cycles: cpu.cycles}
+  end
 
   test "matches nestest.log register trace" do
-    {:ok, cart} = Cart.parse(File.read!("roms/other/nestest.nes"))
+    {:ok, cart} = Cart.parse(File.read!("test/support/fixtures/nestest.nes"))
     bus = Bus.new(cart)
     # Automated mode: enter at $C000 with the pinned nestest power-on state.
     cpu = %CPU{pc: 0xC000, sp: 0xFD, p: 0x24, a: 0, x: 0, y: 0, cycles: 7}
 
-    lines = "roms/other/nestest.log" |> File.read!() |> String.split("\n", trim: true)
+    lines = "test/support/fixtures/nestest.log" |> File.read!() |> String.split("\n", trim: true)
 
     Enum.reduce(Enum.with_index(lines, 1), {cpu, bus}, fn {line, n}, {cpu, bus} ->
       exp = parse(line)
