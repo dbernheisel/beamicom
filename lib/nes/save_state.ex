@@ -16,6 +16,9 @@ defmodule Beamicom.NES.SaveState do
       # Drop the last rendered frame: it's transient output, re-rendered on resume,
       # and the biggest chunk of the payload.
       |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      # Drop the buffered audio samples for the same reason (the audio analog of
+      # frame_ready): a drained, regenerated output buffer, ~1KB compressed.
+      |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
 
     state_bin =
       :zlib.compress(:erlang.term_to_binary(%{v: 1, rom_crc: rom_crc, console: stripped}))

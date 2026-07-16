@@ -25,6 +25,9 @@ defmodule Beamicom.NES.VisualCode do
   @header_magic "BMIC"
   @header_version 1
   @header_size 13
+  # NES palette indexes for the "1" dot color: the bright, saturated row (all
+  # non-black, so decode's black-vs-not test stays unambiguous).
+  @dot_color_indexes 0x21..0x2C
 
   @doc """
   Encode `payload` into a share image framing `screenshot_rgb` (NES native 256×240).
@@ -43,9 +46,15 @@ defmodule Beamicom.NES.VisualCode do
 
     cell_bits = border_cells(grid_w, grid_h, t) |> Enum.zip(bits) |> Map.new()
 
+    # "1" dots take a random bright NES-palette color (per image), "0" dots stay
+    # black — softer than harsh B/W. Decode only tests black-vs-not, so the color
+    # is purely cosmetic.
+    {cr, cg, cb} = Beamicom.NES.Palette.rgb(Enum.random(@dot_color_indexes))
+    on = <<cr, cg, cb>>
+
     rgb =
       for py <- 0..(img_h - 1), px <- 0..(img_w - 1), into: <<>> do
-        pixel(px, py, t, cell_bits, screenshot_rgb)
+        pixel(px, py, t, cell_bits, screenshot_rgb, on)
       end
 
     {img_w, img_h, rgb}
@@ -96,7 +105,7 @@ defmodule Beamicom.NES.VisualCode do
   end
 
   # 3 RGB bytes for pixel (px, py): screenshot pixel inside the frame, dot color outside.
-  defp pixel(px, py, t, cell_bits, screenshot_rgb) do
+  defp pixel(px, py, t, cell_bits, screenshot_rgb, on) do
     r = div(py, @dot)
     c = div(px, @dot)
 
@@ -107,7 +116,7 @@ defmodule Beamicom.NES.VisualCode do
       <<_::binary-size(^off), rr, gg, bb, _::binary>> = screenshot_rgb
       <<rr, gg, bb>>
     else
-      if Map.get(cell_bits, {r, c}, 0) == 1, do: <<255, 255, 255>>, else: <<0, 0, 0>>
+      if Map.get(cell_bits, {r, c}, 0) == 1, do: on, else: <<0, 0, 0>>
     end
   end
 
@@ -121,8 +130,9 @@ defmodule Beamicom.NES.VisualCode do
       px = c * @dot + half
       py = r * @dot + half
       off = (py * img_w + px) * 3
-      <<_::binary-size(^off), luma, _::binary>> = rgb
-      if luma >= 128, do: 1, else: 0
+      # "0" dots are black, "1" dots are any bright color — test black-vs-not.
+      <<_::binary-size(^off), rr, gg, bb, _::binary>> = rgb
+      if rr == 0 and gg == 0 and bb == 0, do: 0, else: 1
     end
   end
 

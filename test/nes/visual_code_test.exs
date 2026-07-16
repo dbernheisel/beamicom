@@ -111,8 +111,14 @@ defmodule Beamicom.NES.VisualCodeTest do
     |> elem(0)
   end
 
-  # Loaded state drops the transient last frame, so compare with that field cleared.
+  # Loaded state drops the transient last frame and buffered audio, so compare with
+  # those cleared.
   defp same_state?(c, c2) do
-    :erlang.term_to_binary(put_in(c.bus.ppu.frame_ready, nil)) == :erlang.term_to_binary(c2)
+    cleared =
+      c
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
+
+    :erlang.term_to_binary(cleared) == :erlang.term_to_binary(c2)
   end
 end

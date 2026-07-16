@@ -14,18 +14,23 @@ defmodule Beamicom.NES.SaveStateTest do
     c = loaded_console()
     {state_bin, rom_blob} = SaveState.split(c)
     assert {:ok, c2} = SaveState.merge(state_bin, rom_blob)
-    # frame_ready is dropped on split (re-rendered on resume), so clear it to compare.
-    expected = put_in(c.bus.ppu.frame_ready, nil)
+    # frame_ready + buffered audio are dropped on split (regenerated on resume).
+    expected =
+      c
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
+
     assert :erlang.term_to_binary(expected) == :erlang.term_to_binary(c2)
   end
 
-  test "split zeroes out prg, chr, and the transient frame in the saved state_bin" do
+  test "split zeroes out prg, chr, and transient output buffers in the saved state_bin" do
     c = loaded_console()
     {state_bin, _rom_blob} = SaveState.split(c)
     %{console: stripped} = :erlang.binary_to_term(:zlib.uncompress(state_bin))
     assert stripped.bus.prg == <<>>
     assert stripped.bus.ppu.chr == <<>>
     assert stripped.bus.ppu.frame_ready == nil
+    assert stripped.bus.apu.samples == []
   end
 
   test "merge rejects CRC mismatch (valid save data paired with wrong ROM)" do
