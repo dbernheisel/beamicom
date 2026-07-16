@@ -100,21 +100,31 @@ defmodule Beamicom.NES.VisualCode do
       <<@header_version::8, byte_size(payload)::32, :erlang.crc32(payload)::32>>
   end
 
-  # Most common non-black color in the screenshot (its dominant accent), so the
-  # dot border matches the frame. White fallback if the screenshot is all black.
+  # Pick the dot color from the screenshot so the border matches the frame:
+  # prefer the most common non-grayscale (chromatic) color, else the most common
+  # non-black color, else white for an all-black screen.
   defp dominant_color(screenshot_rgb) do
     counts =
       for <<r, g, b <- screenshot_rgb>>, {r, g, b} != {0, 0, 0}, reduce: %{} do
         acc -> Map.update(acc, {r, g, b}, 1, &(&1 + 1))
       end
 
-    if counts == %{} do
-      <<255, 255, 255>>
-    else
-      {{r, g, b}, _} = Enum.max_by(counts, fn {_color, n} -> n end)
-      <<r, g, b>>
-    end
+    chromatic = for {color, n} <- counts, not grayscale?(color), do: {color, n}
+
+    {r, g, b} =
+      cond do
+        chromatic != [] -> most_common(chromatic)
+        counts != %{} -> most_common(counts)
+        true -> {255, 255, 255}
+      end
+
+    <<r, g, b>>
   end
+
+  defp most_common(counts), do: counts |> Enum.max_by(fn {_color, n} -> n end) |> elem(0)
+
+  # Grayscale = the three channels are within a small spread of each other.
+  defp grayscale?({r, g, b}), do: Enum.max([r, g, b]) - Enum.min([r, g, b]) <= 16
 
   # 3 RGB bytes for pixel (px, py): screenshot pixel inside the frame, dot color outside.
   defp pixel(px, py, t, cell_bits, screenshot_rgb, on) do
