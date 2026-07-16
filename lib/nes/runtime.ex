@@ -65,6 +65,14 @@ defmodule Beamicom.NES.Runtime do
   def resume(server \\ __MODULE__), do: GenServer.cast(server, :resume)
   def step(server \\ __MODULE__), do: GenServer.cast(server, :step)
 
+  @doc "Return the live `{console, framebuffer}` for a mid-play save."
+  def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
+
+  @impl true
+  def handle_call(:snapshot, _from, state) do
+    {:reply, {state.console, state.console.bus.ppu.frame_ready}, state}
+  end
+
   @impl true
   def handle_cast({:set_buttons, port, buttons}, state) do
     {:noreply, %{state | console: Console.set_buttons(state.console, port, buttons)}}

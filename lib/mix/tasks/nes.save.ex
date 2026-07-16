@@ -12,7 +12,7 @@ defmodule Mix.Tasks.Nes.Save do
   @shortdoc "Save NES state to a steganographic PNG"
   use Mix.Task
 
-  alias Beamicom.NES.{Console, Palette, PNG, SaveState, VisualCode}
+  alias Beamicom.NES.{Console, ShareImage}
 
   @impl true
   def run(args) do
@@ -25,14 +25,9 @@ defmodule Mix.Tasks.Nes.Save do
 
     unless fb, do: Mix.raise("no frame rendered within budget")
 
-    {state_bin, rom_blob} = SaveState.split(console)
-    ss_rgb = Palette.to_rgb(fb)
-
-    {img_w, img_h, img_rgb} = VisualCode.encode(state_bin, ss_rgb, fb.width, fb.height)
-    png = PNG.encode(img_w, img_h, img_rgb) |> PNG.put_trailer(rom_blob)
-
+    png = ShareImage.to_png(console, fb)
     File.write!(out, png)
-    Mix.shell().info("wrote #{out} (frame #{fb.number}, state #{byte_size(state_bin)}B)")
+    Mix.shell().info("wrote #{out} (frame #{fb.number}, #{byte_size(png)}B PNG)")
   end
 
   defp run_until(console, frames) do

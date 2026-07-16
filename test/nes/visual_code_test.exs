@@ -83,6 +83,13 @@ defmodule Beamicom.NES.VisualCodeTest do
       assert {:error, :rom_unavailable} = ShareImage.load_image(png, [])
     end
 
+    test "to_png/2 builds a share image that load_image can resume" do
+      c = run_frames(Console.load(@nestest), 60)
+      png = ShareImage.to_png(c, c.bus.ppu.frame_ready)
+      assert {:ok, c2} = ShareImage.load_image(png, [])
+      assert same_state?(c, c2)
+    end
+
     test "round-trips through a PNG file on disk" do
       c = run_frames(Console.load(@nestest), 60)
       {state_bin, rom_blob} = SaveState.split(c)

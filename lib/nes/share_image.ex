@@ -1,7 +1,7 @@
 defmodule Beamicom.NES.ShareImage do
   @moduledoc "Load a save-state PNG (with or without ROM trailer) back into a Console."
 
-  alias Beamicom.NES.{PNG, VisualCode, SaveState, Cart}
+  alias Beamicom.NES.{PNG, VisualCode, SaveState, Palette, Cart}
 
   @doc """
   Load a PNG produced by `mix nes.save`. Tries the ROM trailer first, then searches
@@ -14,6 +14,19 @@ defmodule Beamicom.NES.ShareImage do
          {:ok, rom_blob} <- find_rom(png_binary, state_bin, rom_search_dirs) do
       SaveState.merge(state_bin, rom_blob)
     end
+  end
+
+  @doc """
+  Build a share-image PNG from a console and its rendered frame: the framebuffer
+  becomes the visible screenshot, the (ROM-stripped) state is encoded in the dot
+  border, and the ROM blob is appended as a trailer. Inverse of `load_image/2`.
+  """
+  def to_png(console, framebuffer) do
+    {state_bin, rom_blob} = SaveState.split(console)
+    ss_rgb = Palette.to_rgb(framebuffer)
+    {w, h, rgb} = VisualCode.encode(state_bin, ss_rgb, framebuffer.width, framebuffer.height)
+
+    PNG.encode(w, h, rgb) |> PNG.put_trailer(rom_blob)
   end
 
   defp find_rom(png_binary, state_bin, rom_search_dirs) do
