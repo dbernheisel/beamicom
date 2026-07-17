@@ -38,9 +38,14 @@ defmodule Beamicom.NES.Scenic do
 
     {:ok, _} = Beamicom.NES.Runtime.start_link([speed: speed] ++ source_opts(path))
 
+    # Extra height below the game for the control bar (Save button), so it never
+    # overlaps the screen.
     config =
       Application.get_env(:beamicom_scenic, :viewport)
-      |> Keyword.put(:size, {256 * scale, 240 * scale})
+      |> Keyword.put(
+        :size,
+        {256 * scale, 240 * scale + Beamicom.NES.Scenic.Screen.controls_height()}
+      )
       |> Keyword.put(:default_scene, {Beamicom.NES.Scenic.Screen, scale: scale})
 
     {:ok, _} = Scenic.start_link([config])

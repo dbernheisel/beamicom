@@ -37,6 +37,13 @@ defmodule Beamicom.NES.Scenic.Screen do
     key_rightshift: :select
   }
 
+  # Height (px) of the control bar below the game screen (holds the Save button).
+  # The viewport is sized game-height + this, so the button never overlaps the game.
+  @controls_h 48
+
+  @doc "Extra viewport height reserved for the control bar below the screen."
+  def controls_height, do: @controls_h
+
   @impl true
   def init(scene, params, _opts) do
     scale = Keyword.get(params, :scale, 3)
@@ -49,7 +56,13 @@ defmodule Beamicom.NES.Scenic.Screen do
     graph =
       Graph.build()
       |> rect({w, h}, fill: {:stream, @stream})
-      |> button("Save", id: :save, theme: :dark, t: {w - 96, 8})
+      |> button("Save",
+        id: :save,
+        theme: :dark,
+        width: 120,
+        height: 28,
+        t: {div(w - 120, 2), h + 10}
+      )
 
     scene =
       scene
