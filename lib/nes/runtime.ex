@@ -17,6 +17,7 @@ defmodule Beamicom.NES.Runtime do
 
   # NTSC ~60.0988 fps.
   @period_ns round(1_000_000_000 / 60.0988)
+  @cpu_cycles_per_frame round(1_789_773 / 60.0988)
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -47,10 +48,22 @@ defmodule Beamicom.NES.Runtime do
     # real-time; the audio sink must run at the matching rate to stay in sync.
     speed = Keyword.get(opts, :speed, 1.0)
 
+    # Audio is drained/published once per "slice"; with `audio_slices` > 1 that
+    # happens sub-frame, keeping the player's input queue (and A/V lag) down to
+    # ~1 slice. 1 = the safe default: one whole frame per slice, as before. Higher
+    # tightens sync but costs per-tick overhead — raise it only while the machine
+    # has slack (watch the AudioSink "audio ahead" meter; back off if it trends
+    # negative, meaning the player is starving).
+    slices = max(1, Keyword.get(opts, :audio_slices, 1))
+
     state = %{
       console: console,
       frame: -1,
       published: 0,
+      slice: 0,
+      audio_slices: slices,
+      slice_ns: round(@period_ns / slices),
+      cycles_per_slice: round(@cpu_cycles_per_frame / slices),
       epoch: now(),
       pace: pace,
       speed: speed,
@@ -81,14 +94,19 @@ defmodule Beamicom.NES.Runtime do
   def handle_cast(:pause, state), do: {:noreply, %{state | paused: true}}
 
   def handle_cast(:resume, state) do
-    {:noreply, schedule(%{state | paused: false, epoch: now(), published: 0})}
+    {:noreply, schedule(%{state | paused: false, epoch: now(), published: 0, slice: 0})}
   end
 
   def handle_cast(:step, state), do: {:noreply, run_frame(state)}
 
   @impl true
   def handle_info(:tick, %{paused: true} = state), do: {:noreply, state}
-  def handle_info(:tick, state), do: {:noreply, schedule(run_frame(state))}
+
+  def handle_info(:tick, %{audio_slices: 1} = state),
+    do: {:noreply, schedule(%{run_frame(state) | slice: state.slice + 1})}
+
+  def handle_info(:tick, state),
+    do: {:noreply, schedule(%{run_slice(state) | slice: state.slice + 1})}
 
   defp run_frame(state) do
     {console, frame} = next_frame(state.console, state.frame)
@@ -98,6 +116,33 @@ defmodule Beamicom.NES.Runtime do
     Output.publish_audio(samples)
     console = put_in(console.bus.apu, apu)
     %{state | console: console, frame: frame.number, published: state.published + 1}
+  end
+
+  # A sub-frame slice: run a fraction of a frame's cycles, publish a video frame
+  # if one became ready, then drain and publish just this slice's audio.
+  defp run_slice(state) do
+    target = state.console.cpu.cycles + state.cycles_per_slice
+    console = run_cycles(state.console, target)
+    fb = console.bus.ppu.frame_ready
+
+    {frame, published} =
+      if fb && fb.number > state.frame do
+        Output.publish(fb)
+        {fb.number, state.published + 1}
+      else
+        {state.frame, state.published}
+      end
+
+    {samples, apu} = Beamicom.NES.APU.take_samples(console.bus.apu)
+    Output.publish_audio(samples)
+    console = put_in(console.bus.apu, apu)
+    %{state | console: console, frame: frame, published: published}
+  end
+
+  defp run_cycles(console, target) do
+    Enum.reduce_while(1..2_000_000, console, fn _, c ->
+      if c.cpu.cycles >= target, do: {:halt, c}, else: {:cont, Console.step(c)}
+    end)
   end
 
   # Step the console until a new fully-rendered frame is ready.
@@ -115,7 +160,7 @@ defmodule Beamicom.NES.Runtime do
   end
 
   defp schedule(state) do
-    deadline = state.epoch + round(state.published * @period_ns / state.speed)
+    deadline = state.epoch + round(state.slice * state.slice_ns / state.speed)
     Process.send_after(self(), :tick, max(0, div(deadline - now(), 1_000_000)))
     state
   end

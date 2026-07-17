@@ -14,6 +14,8 @@ defmodule Beamicom.NES.APU do
 
   import Bitwise
 
+  alias Beamicom.NES.APU.{DMC, Noise, Pulse, Triangle}
+
   @compile {:inline, bool: 2, clamp: 1, tri_level: 1, clock_length: 1, sweep_target: 1, filter: 2}
 
   @sample_rate 44_100
@@ -25,6 +27,8 @@ defmodule Beamicom.NES.APU do
   @length {10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20,
            96, 22, 192, 24, 72, 26, 16, 28, 32, 30}
   @noise_periods {4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068}
+  # DMC rate → timer period in CPU cycles (NTSC), indexed by $4010 bits 0-3.
+  @dmc_rates {428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54}
   # 4-step frame-sequencer boundaries in CPU cycles.
   @frame4 {7457, 14913, 22371, 29829}
   @frame5 {7457, 14913, 22371, 37281}
@@ -68,67 +72,29 @@ defmodule Beamicom.NES.APU do
             m5p2: nil,
             m5pcm: 0,
             m5seq: 0,
+            # DMC (delta modulation): `dmc` holds the channel state as a
+            # `Beamicom.NES.APU.DMC` sub-struct (nil until the game first touches
+            # the DMC — keeps the hot APU map small so non-DMC games pay nothing).
+            # The whole sample is pre-loaded into `dmc.sample` when playback starts
+            # (the bus reads it via `peek`, since the APU has no memory access),
+            # then clocked out one delta bit at a time. ponytail: pre-load skips
+            # per-byte DMA CPU stalls and mid-sample bankswitch — add real DMA if a
+            # game's timing/banking needs it.
+            dmc: nil,
+            # The DMC IRQ line is kept top-level (not in `dmc`) so `irq?/1` — polled
+            # every CPU instruction — stays a single read.
+            dmc_irq: false,
             # Un-run CPU cycles owed to the APU; run lazily in bulk (see tick/2).
             pending: 0
 
-  defp pulse do
-    %{
-      duty: 0,
-      period: 0,
-      length: 0,
-      halt: false,
-      const: false,
-      vol: 0,
-      env_start: false,
-      env_div: 0,
-      env_decay: 0,
-      sweep_en: false,
-      sweep_period: 0,
-      sweep_neg: false,
-      sweep_shift: 0,
-      sweep_div: 0,
-      sweep_reload: false,
-      ones: false,
-      enabled: false
-    }
-  end
-
-  defp tri do
-    %{
-      period: 0,
-      length: 0,
-      halt: false,
-      control: false,
-      linear: 0,
-      linear_reload: 0,
-      reload_flag: false,
-      enabled: false
-    }
-  end
-
-  defp noise do
-    %{
-      period: 0,
-      mode: false,
-      length: 0,
-      halt: false,
-      const: false,
-      vol: 0,
-      env_start: false,
-      env_div: 0,
-      env_decay: 0,
-      enabled: false
-    }
-  end
-
   def new do
     %__MODULE__{
-      pulse1: pulse(),
-      pulse2: %{pulse() | ones: true},
-      triangle: tri(),
-      noise: noise(),
-      m5p1: pulse(),
-      m5p2: pulse()
+      pulse1: %Pulse{},
+      pulse2: %Pulse{ones: true},
+      triangle: %Triangle{},
+      noise: %Noise{},
+      m5p1: %Pulse{},
+      m5p2: %Pulse{}
     }
   end
 
@@ -159,8 +125,8 @@ defmodule Beamicom.NES.APU do
   defp m5_enable(ch, 0), do: %{ch | enabled: false, length: 0}
   defp m5_enable(ch, _), do: %{ch | enabled: true}
 
-  @doc "Whether the frame-counter IRQ line is asserted."
-  def irq?(%__MODULE__{frame_irq: irq}), do: irq
+  @doc "Whether the frame-counter or DMC IRQ line is asserted."
+  def irq?(%__MODULE__{frame_irq: f, dmc_irq: d}), do: f or d
 
   @doc "Drain the generated samples (oldest first)."
   def take_samples(apu) do
@@ -191,9 +157,40 @@ defmodule Beamicom.NES.APU do
     %{apu | noise: noise_reg(apu.noise, addr - 0x400C, val)}
   end
 
+  defp write_reg(apu, 0x4010, v) do
+    d = apu.dmc || %DMC{}
+    irq_enable = (v &&& 0x80) != 0
+    d = %{d | irq_enable: irq_enable, loop: (v &&& 0x40) != 0, rate: elem(@dmc_rates, v &&& 0x0F)}
+    apu = %{apu | dmc: d}
+    # Clearing the IRQ-enable flag also clears any pending DMC IRQ.
+    if irq_enable, do: apu, else: %{apu | dmc_irq: false}
+  end
+
+  defp write_reg(apu, 0x4011, v), do: put_dmc(apu, :output, v &&& 0x7F)
+  defp write_reg(apu, 0x4012, v), do: put_dmc(apu, :addr, v)
+  defp write_reg(apu, 0x4013, v), do: put_dmc(apu, :len, v)
   defp write_reg(apu, 0x4015, val), do: status_write(apu, val)
   defp write_reg(apu, 0x4017, val), do: frame_write(apu, val)
   defp write_reg(apu, _addr, _val), do: apu
+
+  defp put_dmc(apu, key, val), do: %{apu | dmc: Map.replace!(apu.dmc || %DMC{}, key, val)}
+
+  @doc "CPU address + byte length of the DMC sample (bus reads it for `dmc_start/2`)."
+  def dmc_sample_range(%__MODULE__{dmc: %DMC{addr: a, len: l}}), do: {0xC000 + a * 64, l * 16 + 1}
+
+  @doc "Whether a $4015 write asked to start the DMC and a sample fetch is owed."
+  def dmc_fetch?(%__MODULE__{dmc: %DMC{fetch: f}}), do: f
+  def dmc_fetch?(%__MODULE__{}), do: false
+
+  @doc "Begin DMC playback with the pre-read `sample` bytes."
+  def dmc_start(%__MODULE__{} = apu, sample) do
+    d = apu.dmc || %DMC{}
+    %{apu | dmc: %{d | sample: sample, restart: sample, fetch: false, timer: d.rate}}
+  end
+
+  # Whether the DMC still has sample bytes left to play ($4015 read bit 4).
+  defp dmc_playing?(%{dmc: %DMC{sample: s}}), do: byte_size(s) > 0
+  defp dmc_playing?(_), do: false
 
   @doc "Read $4015 status: length-counter-active flags + frame IRQ (clears the IRQ)."
   def read_status(apu) do
@@ -202,8 +199,10 @@ defmodule Beamicom.NES.APU do
     b =
       bool(apu.pulse1.length > 0, 0x01) ||| bool(apu.pulse2.length > 0, 0x02) |||
         bool(apu.triangle.length > 0, 0x04) ||| bool(apu.noise.length > 0, 0x08) |||
-        bool(apu.frame_irq, 0x40)
+        bool(dmc_playing?(apu), 0x10) ||| bool(apu.frame_irq, 0x40) |||
+        bool(apu.dmc_irq, 0x80)
 
+    # Reading $4015 clears the frame IRQ but NOT the DMC IRQ.
     {b, %{apu | frame_irq: false}}
   end
 
@@ -262,13 +261,30 @@ defmodule Beamicom.NES.APU do
   defp noise_reg(n, _, _), do: n
 
   defp status_write(apu, v) do
-    %{
+    apu = %{
       apu
       | pulse1: enable(apu.pulse1, (v &&& 0x01) != 0),
         pulse2: enable(apu.pulse2, (v &&& 0x02) != 0),
         triangle: enable(apu.triangle, (v &&& 0x04) != 0),
-        noise: enable(apu.noise, (v &&& 0x08) != 0)
+        noise: enable(apu.noise, (v &&& 0x08) != 0),
+        # A $4015 write always clears the DMC interrupt flag.
+        dmc_irq: false
     }
+
+    cond do
+      # DMC enabled: restart only if no bytes remain (else the current sample
+      # keeps playing). Actual fetch happens on the bus via `dmc_start/2`.
+      (v &&& 0x10) != 0 ->
+        d = apu.dmc || %DMC{}
+        %{apu | dmc: %{d | fetch: byte_size(d.sample) == 0}}
+
+      # DMC disabled: no more bytes fetched; the current buffer drains to silence.
+      apu.dmc ->
+        %{apu | dmc: %{apu.dmc | sample: <<>>, fetch: false}}
+
+      true ->
+        apu
+    end
   end
 
   defp enable(ch, true), do: %{ch | enabled: true}
@@ -349,24 +365,71 @@ defmodule Beamicom.NES.APU do
     {nt, ns} =
       adv_noise(apu.noise_timer, apu.noise_shift, apu.noise.period, apu.noise.mode, clocks)
 
-    %{
-      apu
-      | p1_timer: p1t,
-        p1_seq: p1s,
-        p2_timer: p2t,
-        p2_seq: p2s,
-        tri_timer: tt,
-        tri_seq: ts,
-        noise_timer: nt,
-        noise_shift: ns,
-        seq_cycle: apu.seq_cycle + dc,
-        sample_acc: apu.sample_acc + dc * @rate_ratio,
-        apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
-    }
-    |> frame_action()
-    |> advance_mmc5(clocks, dc)
-    |> emit_sample()
+    apu =
+      %{
+        apu
+        | p1_timer: p1t,
+          p1_seq: p1s,
+          p2_timer: p2t,
+          p2_seq: p2s,
+          tri_timer: tt,
+          tri_seq: ts,
+          noise_timer: nt,
+          noise_shift: ns,
+          seq_cycle: apu.seq_cycle + dc,
+          sample_acc: apu.sample_acc + dc * @rate_ratio,
+          apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
+      }
+      |> frame_action()
+      |> advance_mmc5(clocks, dc)
+
+    # Inline gate: `dmc` is nil until a game first uses the DMC, so non-DMC games
+    # skip the call entirely (the per-segment call overhead is what profiles show).
+    apu = if apu.dmc, do: advance_dmc(apu, dc), else: apu
+    emit_sample(apu)
   end
+
+  # DMC output unit: idle (no buffered/queued bytes) → nothing changes.
+  defp advance_dmc(%{dmc: %DMC{sample: <<>>, bits: 0}} = apu, _dc), do: apu
+
+  # Clock the DMC timer over `dc` CPU cycles, stepping the output unit each wrap.
+  defp advance_dmc(%{dmc: %DMC{timer: t} = d} = apu, dc) when dc < t,
+    do: %{apu | dmc: %{d | timer: t - dc}}
+
+  defp advance_dmc(%{dmc: %DMC{timer: used, rate: rate} = d} = apu, dc) do
+    advance_dmc(clock_dmc(%{apu | dmc: %{d | timer: rate}}), dc - used)
+  end
+
+  # One output-unit step: shift out a delta bit, nudging the DAC ±2 (clamped
+  # 0-127); refill the shift register from the sample buffer when it empties.
+  defp clock_dmc(%{dmc: %DMC{bits: b, shift: shift, output: out} = d} = apu) when b > 0 do
+    out =
+      cond do
+        (shift &&& 1) == 1 and out <= 125 -> out + 2
+        (shift &&& 1) == 0 and out >= 2 -> out - 2
+        true -> out
+      end
+
+    dmc_refill(%{apu | dmc: %{d | output: out, shift: shift >>> 1, bits: b - 1}})
+  end
+
+  defp clock_dmc(apu), do: dmc_refill(apu)
+
+  # Load the next byte into the shift register when it empties. When the last
+  # byte is consumed: loop restarts the sample, else a non-looping sample raises
+  # the DMC IRQ (only if enabled — this feeds the CPU's interrupt poll).
+  defp dmc_refill(%{dmc: %DMC{bits: 0, sample: <<byte, rest::binary>>} = d} = apu) do
+    d = %{d | shift: byte, bits: 8, sample: rest}
+
+    cond do
+      rest != <<>> -> %{apu | dmc: d}
+      d.loop -> %{apu | dmc: %{d | sample: d.restart}}
+      d.irq_enable -> %{apu | dmc: d, dmc_irq: true}
+      true -> %{apu | dmc: d}
+    end
+  end
+
+  defp dmc_refill(apu), do: apu
 
   # MMC5 sound channels + 240Hz sequencer — only for games that use them.
   defp advance_mmc5(%{m5_active: false} = apu, _clocks, _dc), do: apu
@@ -561,7 +624,7 @@ defmodule Beamicom.NES.APU do
 
   defp noise_level(%{length: 0}, _shift), do: 0
   defp noise_level(_, shift) when (shift &&& 1) == 1, do: 0
-  defp noise_level(%{vol: vol, const: const}, _shift) when not is_nil(const), do: vol
+  defp noise_level(%{const: true, vol: vol}, _shift), do: vol
   defp noise_level(%{env_decay: decay}, _shift), do: decay
 
   # Precomputed nonlinear mixer tables (NESdev "Lookup Table"): pulse index is
@@ -592,11 +655,14 @@ defmodule Beamicom.NES.APU do
         pulse_level(apu.pulse1, apu.p1_seq) + pulse_level(apu.pulse2, apu.p2_seq)
       )
 
-    tnd_out =
-      elem(@tnd_table, 3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift))
+    tnd =
+      3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift) + dmc_level(apu)
 
-    pulse_out + tnd_out + mmc5_out(apu)
+    pulse_out + elem(@tnd_table, tnd) + mmc5_out(apu)
   end
+
+  defp dmc_level(%{dmc: %DMC{output: o}}), do: o
+  defp dmc_level(_), do: 0
 
   # NES RCA output circuit: a DC-blocking first-order high-pass (90Hz) then a
   # first-order low-pass, applied per 44.1kHz sample. The low-pass sits at 8kHz
@@ -628,7 +694,7 @@ defmodule Beamicom.NES.APU do
   # Like a 2A03 pulse but with no sweep unit (never muted for period < 8).
   defp m5_pulse_level(%{length: 0}, _seq), do: 0
   defp m5_pulse_level(%{duty: duty}, seq) when (elem(@duty, duty) >>> (7 - seq) &&& 1) == 0, do: 0
-  defp m5_pulse_level(%{const: const, vol: vol}, _seq) when not is_nil(const), do: vol
+  defp m5_pulse_level(%{const: true, vol: vol}, _seq), do: vol
   defp m5_pulse_level(%{env_decay: decay}, _seq), do: decay
 
   defp clamp(v) when v > 32767, do: 32767

@@ -246,7 +246,34 @@ defmodule Beamicom.NES.PPU do
     # only the fine-Y-dependent pattern is re-fetched below.
     if ppu.tile_nt_at != nil and ppu.tile_key == key and not ppu.split_en and
          ppu.exram_mode != 1 do
-      {acc, blank?, ppu} = fetch_cached(0, ppu, ppu.tile_nt_at, [], true)
+      # This path is guaranteed non-split, non-extended-attribute, so the pattern
+      # fetch is the plain `true` branch of `fetch_bg_planes`. Without an MMC2/4
+      # CHR latch (the common case) nothing on `ppu` changes across the 33 tiles —
+      # fine-Y, the CHR table bit, banks and `chr` are all line-constants — so run
+      # a tight pure loop with no per-tile 50-key struct rebuild.
+      {acc, blank?, ppu} =
+        if ppu.chr_latch == nil do
+          fine_y = ppu.v >>> 12 &&& 0x07
+          tbl = (ppu.ctrl &&& 0x10) <<< 8
+
+          {a, b} =
+            bg_cached_fast(
+              0,
+              ppu.tile_nt_at,
+              fine_y,
+              tbl,
+              bg_banks(ppu),
+              ppu.chr,
+              ppu.chr_ram,
+              [],
+              true
+            )
+
+          {a, b, ppu}
+        else
+          fetch_cached(0, ppu, ppu.tile_nt_at, [], true)
+        end
+
       {acc |> Enum.reverse() |> List.to_tuple(), blank?, ppu}
     else
       {acc, ntat, blank?, ppu} = fetch_full(0, ppu, [], [], true)
@@ -284,6 +311,37 @@ defmodule Beamicom.NES.PPU do
     fetch_cached(i + 1, ppu, ntat, [tile | acc], blank?)
   end
 
+  # Pure fast path of `fetch_cached` (no CHR latch): reuses the row's {nt, at} and
+  # the line-constant fine-Y / CHR-table / banks / chr, so it computes all 33
+  # tiles' pattern bytes without ever rebuilding the PPU struct. Mirrors the plain
+  # `true` branch of `fetch_bg_planes/1` exactly.
+  defp bg_cached_fast(33, _ntat, _fy, _tbl, _banks, _chr, _ram, acc, blank?), do: {acc, blank?}
+
+  defp bg_cached_fast(i, ntat, fy, tbl, banks, chr, ram, acc, blank?) do
+    {nt, at} = elem(ntat, i)
+    addr = tbl ||| nt <<< 4 ||| fy
+    off = elem(banks, addr >>> 10) + (addr &&& 0x03FF)
+
+    {lo, hi} =
+      if byte_size(chr) > 0,
+        do: {:binary.at(chr, off), :binary.at(chr, off + 8)},
+        else: {Map.get(ram, off, 0), Map.get(ram, off + 8, 0)}
+
+    tile = {lo, hi, at}
+
+    bg_cached_fast(
+      i + 1,
+      ntat,
+      fy,
+      tbl,
+      banks,
+      chr,
+      ram,
+      [tile | acc],
+      blank? and lo == 0 and hi == 0
+    )
+  end
+
   # Composite one scanline's 256 pixels (background + sprite priority) into a
   # 256-byte binary of palette-RAM addresses. Sprites are rasterised once into a
   # per-column buffer (front-most opaque pixel wins), so compositing is an O(1)
@@ -309,14 +367,15 @@ defmodule Beamicom.NES.PPU do
         map_size(buf) == 0 ->
           bg_line(tiles, fine_x, ppu.mask)
 
-        # Sprite line over a blank background (CV3's intro): the background is all
-        # backdrop, so skip `bg_at` entirely — every sprite pixel wins over 0.
+        # Sprite line over a blank background (CV3's intro): every sprite pixel
+        # wins over the all-backdrop line.
         bg_blank? ->
-          sprite_over_blank(0, buf, clip?, <<>>)
+          overlay_sprites(<<0::size(256 * 8)>>, buf, clip?)
 
-        # Sprite line over real background: per-pixel bg + priority.
+        # Sprite line over real background: overlay sprites onto the batched bg
+        # line, touching only the columns a sprite covers.
         true ->
-          sprite_pixels(0, tiles, fine_x, bg_on, ppu.mask, buf, clip?, <<>>)
+          overlay_sprites(bg_line(tiles, fine_x, ppu.mask), buf, clip?)
       end
 
     # Sprite-0 hit needs sprite 0 over an opaque background pixel — impossible with
@@ -329,33 +388,32 @@ defmodule Beamicom.NES.PPU do
     {line, ppu}
   end
 
-  # Sprite-priority pixel run over a blank (all-backdrop) background: the sprite
-  # always wins where it's opaque, so no bg fetch or priority compare is needed.
-  defp sprite_over_blank(256, _buf, _clip?, acc), do: acc
-
-  defp sprite_over_blank(c, buf, clip?, acc) do
-    addr =
-      case if(clip? and c < 8, do: nil, else: Map.get(buf, c)) do
-        nil -> 0
-        {sp_addr, _front?, _z} -> sp_addr
-      end
-
-    sprite_over_blank(c + 1, buf, clip?, <<acc::binary, addr>>)
+  # Composite sprites onto a precomputed 256-byte background line by touching only
+  # the columns a sprite actually covers (≤64), splicing the untouched background
+  # runs between them — far cheaper than a 256-pixel Map-lookup walk. Front-most
+  # opaque sprite wins unless a non-front sprite sits over an opaque bg pixel; the
+  # left-8px sprite clip drops sprite columns 0..7.
+  defp overlay_sprites(bg, buf, clip?) do
+    cols = buf |> Map.keys() |> Enum.sort()
+    cols = if clip?, do: Enum.drop_while(cols, &(&1 < 8)), else: cols
+    overlay(bg, buf, cols, 0, <<>>)
   end
 
-  # Background + sprite-priority pixel run.
-  defp sprite_pixels(256, _tiles, _fine_x, _bg_on, _mask, _buf, _clip?, acc), do: acc
+  defp overlay(bg, _buf, [], cursor, acc),
+    do: <<acc::binary, binary_part(bg, cursor, 256 - cursor)::binary>>
 
-  defp sprite_pixels(c, tiles, fine_x, bg_on, mask, buf, clip?, acc) do
-    bg_addr = bg_at(tiles, fine_x, c, bg_on, mask)
+  defp overlay(bg, buf, [c | rest], cursor, acc) do
+    {sp_addr, front?, _z} = Map.fetch!(buf, c)
+    bg_addr = :binary.at(bg, c)
+    win = if bg_addr != 0 and not front?, do: bg_addr, else: sp_addr
 
-    addr =
-      case if(clip? and c < 8, do: nil, else: Map.get(buf, c)) do
-        nil -> bg_addr
-        {sp_addr, front?, _z} -> if bg_addr != 0 and not front?, do: bg_addr, else: sp_addr
-      end
-
-    sprite_pixels(c + 1, tiles, fine_x, bg_on, mask, buf, clip?, <<acc::binary, addr>>)
+    overlay(
+      bg,
+      buf,
+      rest,
+      c + 1,
+      <<acc::binary, binary_part(bg, cursor, c - cursor)::binary, win>>
+    )
   end
 
   # Per-pixel background palette-address (0 = transparent backdrop), used on sprite

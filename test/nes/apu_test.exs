@@ -75,6 +75,80 @@ defmodule Beamicom.NES.APUTest do
     assert loud > quiet
   end
 
+  test "an enabled noise channel in envelope mode produces sound (whip/whoosh)" do
+    # Castlevania 3's whip swing is a noise burst in *envelope* mode: constant
+    # flag clear, so volume comes from the decay counter (starts at 15), not the
+    # $400C low nibble (which is the envelope *rate*, here 0). If envelope output
+    # is mishandled as constant volume, this plays at volume 0 = silence.
+    apu =
+      APU.new()
+      # enable noise, envelope mode (const=0) with rate 0, short period, load length.
+      |> APU.write(0x4015, 0x08)
+      |> APU.write(0x400C, 0x00)
+      |> APU.write(0x400E, 0x00)
+      |> APU.write(0x400F, 0xF8)
+
+    {samples, _} = apu |> APU.tick(100_000) |> APU.take_samples()
+    # Check the settled tail, not the peak: a triangle-DC startup transient spikes
+    # the max even when the noise is silent. Ongoing noise keeps the tail loud;
+    # mishandling the envelope as constant volume 0 lets it decay to ~silence.
+    tail = Enum.take(samples, -2000)
+    assert Enum.max(tail) > 500
+  end
+
+  test "DMC ramps the output counter up on 1-bits and down on 0-bits" do
+    # $4010 = $0F: fastest rate, IRQ + loop off. Each 1-bit nudges the DAC +2.
+    up =
+      APU.new()
+      |> APU.write(0x4010, 0x0F)
+      |> APU.dmc_start(:binary.copy(<<0xFF>>, 16))
+      |> APU.tick(20_000)
+      |> APU.take_samples()
+      |> elem(1)
+
+    assert up.dmc.output > 100
+
+    # Start the counter high ($4011), then feed 0-bits: it should ramp down.
+    down =
+      APU.new()
+      |> APU.write(0x4010, 0x0F)
+      |> APU.write(0x4011, 0x7F)
+      |> APU.dmc_start(:binary.copy(<<0x00>>, 16))
+      |> APU.tick(20_000)
+      |> APU.take_samples()
+      |> elem(1)
+
+    assert down.dmc.output < 20
+  end
+
+  test "a finished DMC sample raises an IRQ only when IRQ is enabled" do
+    # IRQ disabled ($4010 bit 7 clear): playing to completion must NOT assert IRQ
+    # (this protects the CPU's per-instruction interrupt poll for every game).
+    # $4017 = $40 inhibits the frame IRQ so only the DMC can assert here.
+    quiet =
+      APU.new()
+      |> APU.write(0x4017, 0x40)
+      |> APU.write(0x4010, 0x0F)
+      |> APU.dmc_start(:binary.copy(<<0xAA>>, 4))
+      |> APU.tick(50_000)
+      |> APU.take_samples()
+      |> elem(1)
+
+    refute APU.irq?(quiet)
+
+    # IRQ enabled ($4010 = $8F): completing a non-looping sample raises it.
+    firing =
+      APU.new()
+      |> APU.write(0x4017, 0x40)
+      |> APU.write(0x4010, 0x8F)
+      |> APU.dmc_start(:binary.copy(<<0xAA>>, 4))
+      |> APU.tick(50_000)
+      |> APU.take_samples()
+      |> elem(1)
+
+    assert APU.irq?(firing)
+  end
+
   test "the frame counter asserts an IRQ in 4-step mode and $4015 read clears it" do
     # 4-step mode, IRQ enabled (bit 6 clear). Run past the end of a sequence.
     apu = APU.new() |> APU.write(0x4017, 0x00) |> APU.tick(30_000)

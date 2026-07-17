@@ -117,6 +117,7 @@ defmodule Beamicom.NES.Bus do
   # apu.frame_irq directly, not via a cross-module APU.irq?/1 call).
   def irq_pending?(%__MODULE__{irq_pending: true, irq_enabled: true}), do: true
   def irq_pending?(%__MODULE__{apu: %{frame_irq: true}}), do: true
+  def irq_pending?(%__MODULE__{apu: %{dmc_irq: true}}), do: true
   def irq_pending?(%__MODULE__{}), do: false
 
   @doc "Current NMI line level (false when headless)."
@@ -221,9 +222,26 @@ defmodule Beamicom.NES.Bus do
     %{bus | pad1: strobe_pad(bus.pad1, strobe), pad2: strobe_pad(bus.pad2, strobe)}
   end
 
-  # APU channel + control registers ($4000-$4013, $4015 enable, $4017 frame counter).
+  # $4015: the APU applies channel enables + DMC bookkeeping; if it flags a DMC
+  # start, read the sample from PRG (the APU struct has no memory access) and
+  # hand it over to begin playback.
+  def write(%__MODULE__{apu: apu} = bus, 0x4015, val) do
+    apu = Beamicom.NES.APU.write(apu, 0x4015, val)
+
+    apu =
+      if Beamicom.NES.APU.dmc_fetch?(apu) do
+        {addr, len} = Beamicom.NES.APU.dmc_sample_range(apu)
+        Beamicom.NES.APU.dmc_start(apu, read_dmc_sample(bus, addr, len))
+      else
+        apu
+      end
+
+    %{bus | apu: apu}
+  end
+
+  # APU channel + control registers ($4000-$4013, $4017 frame counter).
   def write(%__MODULE__{apu: apu} = bus, addr, val)
-      when addr in 0x4000..0x4013 or addr == 0x4015 or addr == 0x4017,
+      when addr in 0x4000..0x4013 or addr == 0x4017,
       do: %{bus | apu: Beamicom.NES.APU.write(apu, addr, val)}
 
   # MMC5 sound ($5000-$5015) goes to the APU; other $5xxx are mapper registers.
@@ -242,4 +260,12 @@ defmodule Beamicom.NES.Bus do
     do: Mapper.write(bus, addr, val &&& 0xFF)
 
   def write(%__MODULE__{} = bus, _addr, _val), do: bus
+
+  # DMC sample bytes from PRG ($C000-$FFFF, wrapping to $8000 past $FFFF).
+  defp read_dmc_sample(bus, addr, len) do
+    for i <- 0..(len - 1), into: <<>> do
+      a = addr + i
+      <<peek(bus, if(a > 0xFFFF, do: a - 0x8000, else: a))>>
+    end
+  end
 end
