@@ -1,15 +1,17 @@
 defmodule Beamicom.NES.AudioSink do
   @moduledoc """
   Audio sink (spec §4): subscribes to `Beamicom.NES.Output` and pipes the APU's
-  `{:audio, samples}` stream to `ffplay` as raw signed-16-bit LE mono PCM over an
-  Erlang Port. The external player owns the CoreAudio stream and buffering, so
-  the BEAM stays off the realtime audio path.
+  `{:audio, samples}` stream to `ffmpeg`'s CoreAudio (audiotoolbox) output as raw
+  signed-16-bit LE mono PCM over an Erlang Port. The external player owns the
+  CoreAudio stream and buffering, so the BEAM stays off the realtime audio path.
+  audiotoolbox is used over `ffplay` because ffplay's ~46ms SDL audio buffer is
+  fixed and dominates A/V lag; CoreAudio's buffer is much smaller.
 
-  Requires `ffplay` (`brew install ffmpeg`); if it isn't found the sink quietly
+  Requires `ffmpeg` (`brew install ffmpeg`); if it isn't found the sink quietly
   declines to start (`:ignore`) so video still works.
 
   ## Sources
-    * ffmpeg `ffplay -f s16le` raw-PCM stdin playback.
+    * ffmpeg `-f audiotoolbox` CoreAudio raw-PCM output.
   """
   use GenServer
   require Logger
@@ -38,14 +40,15 @@ defmodule Beamicom.NES.AudioSink do
     end
   end
 
-  # Feed ffplay the full-rate 44.1kHz stream but time-stretch by `speed` with
-  # `atempo` (pitch-preserving): at speed 0.5 the filter consumes 22050 input
-  # samples/sec — exactly what the `Runtime` produces when paced to 0.5× — so
-  # playback stays fed (glitch-free) and in tune while running in slow motion.
-  # `atempo` accepts 0.5..100.0; slower than 0.5 would need chained filters.
+  # Play the full-rate 44.1kHz stream via ffmpeg's CoreAudio (audiotoolbox) output
+  # rather than ffplay: ffplay hardcodes an SDL audio buffer of ~2048 samples
+  # (~46ms) with no flag to shrink it, which dominates A/V lag. audiotoolbox goes
+  # straight to CoreAudio with a much smaller buffer, so audio tracks video closely.
+  # `speed` is applied with the pitch-preserving `atempo` filter (0.5× consumes
+  # 22050 input samples/sec — exactly what the Runtime produces when paced to 0.5×).
   defp cmd_for(speed) do
-    base = ~w(ffplay -nodisp -autoexit -loglevel quiet -f s16le -ar #{@rate} -ch_layout mono)
-    base ++ atempo(speed) ++ ["-i", "-"]
+    ~w(ffmpeg -loglevel quiet -f s16le -ar #{@rate} -ch_layout mono -i -) ++
+      atempo(speed) ++ ~w(-f audiotoolbox -)
   end
 
   # `atempo` only accepts 0.5..100.0, so factors below 0.5 must be chained

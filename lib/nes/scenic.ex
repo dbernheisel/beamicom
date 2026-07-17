@@ -25,10 +25,15 @@ defmodule Beamicom.NES.Scenic do
   and video stay in sync) for hosts that can't sustain real-time. The emulator
   and the audio sink are paced to the same `:speed`, so `0.5` = half-speed with
   pitch preserved.
+
+  `:audio_slices` (default 2) delivers audio in that many sub-frame chunks to cut
+  A/V lag — 2 roughly halves the audio trail, higher tightens it further. Raise
+  it only while the machine has slack: if audio starts cutting out, lower it.
   """
   def play(path, opts \\ []) do
     scale = Keyword.get(opts, :scale, 3)
     speed = Keyword.get(opts, :speed, 1.0)
+    slices = Keyword.get(opts, :audio_slices, 2)
     # Audio is best-effort: the sink declines (`:ignore`) if ffplay is missing.
     case Beamicom.NES.AudioSink.start_link(speed: speed) do
       {:ok, _pid} -> :ok
@@ -36,7 +41,8 @@ defmodule Beamicom.NES.Scenic do
       error -> raise(inspect(error))
     end
 
-    {:ok, _} = Beamicom.NES.Runtime.start_link([speed: speed] ++ source_opts(path))
+    {:ok, _} =
+      Beamicom.NES.Runtime.start_link([speed: speed, audio_slices: slices] ++ source_opts(path))
 
     # Extra height below the game for the control bar (Save button), so it never
     # overlaps the screen.
