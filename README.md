@@ -1,82 +1,61 @@
-# BeamicomScenic
+# Beamicom
 
-Local-verification client for the
-[`beamicom`](https://github.com/dbernheisel/beamicom) NES emulator: a
-[Scenic](https://hexdocs.pm/scenic) window that renders frames from
-`Beamicom.NES.Output` and plays audio through `Beamicom.NES.AudioSink` (ffplay).
-Keeping it in a separate project means the core emulator has no Scenic / OpenGL
-dependencies.
+Beamicom is a cycle-aware NES emulator written in Elixir. This repository keeps
+the headless emulation core and two interactive clients together: a native
+Scenic application and a Phoenix application that streams the console to a web
+browser.
 
-![Screenshot](./assets/screenshot.jpg)
+## In action
 
-## Installation
+| Desktop client | Web client |
+| --- | --- |
+| [![Beamicom running in the Scenic desktop client](./beamicom_scenic/assets/screenshot.jpg)](./beamicom_scenic/README.md) | [![Beamicom running in the Phoenix browser client](./beamicom_phx/assets/screenshot.png)](./beamicom_phx/README.md) |
 
-The `scenic_driver_local` window uses native GLFW/GLEW + OpenGL, so those must be
-installed before fetching dependencies.
+## Projects
 
-### macOS
+| Project | Purpose | Start here |
+| --- | --- | --- |
+| [`beamicom`](./beamicom/) | Dependency-free emulator core: CPU, PPU, APU, mappers, input, and audio/video output | [Core documentation](./beamicom/README.md) |
+| [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
+| [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client that streams audio/video over WebRTC and accepts browser controls | [Web setup and modes](./beamicom_phx/README.md) |
+
+Both clients use the core through the local path dependency
+`../beamicom`, so keep these directories together when working with an
+individual project.
+
+```text
+beamicom_scenic ─┐
+                 ├──> beamicom
+beamicom_phx ────┘
+```
+
+## Quick start
+
+Each project has its own Mix configuration and should be run from its directory.
+
+Run the core test suite:
 
 ```sh
-brew install glfw glew pkg-config
+cd beamicom
+mix test
 ```
 
-`scenic_driver_local`'s native build finds them via `pkg-config`. If compilation
-can't locate GLFW/GLEW, point `PKG_CONFIG_PATH` at Homebrew's `.pc` files:
+Launch the desktop client after installing its native prerequisites:
 
 ```sh
-export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/glew/lib/pkgconfig"
-```
-
-Audio playback shells out to `ffplay` (part of ffmpeg); it's optional — the sink
-declines gracefully if it's missing:
-
-```sh
-brew install ffmpeg
-```
-
-### Linux (Debian/Ubuntu)
-
-```sh
-sudo apt install pkg-config libglfw3-dev libglew-dev ffmpeg
-```
-
-### Fetch and compile
-
-This project depends on `beamicom` as a sibling path dependency, so clone both
-next to each other:
-
-```
-~/beamicom          # the core emulator
-~/beamicom_scenic   # this project
-```
-
-Then:
-
-```sh
+cd beamicom_scenic
 mix deps.get
-mix compile
-```
-
-## Usage
-
-```sh
 iex -S mix
 ```
-```elixir
-Beamicom.NES.Scenic.play("../beamicom/roms/game.nes")
-Beamicom.NES.Scenic.play("../beamicom/roms/game.nes", scale: 4)   # integer scale, default 3
-Beamicom.NES.Scenic.play("../beamicom/roms/game.nes", speed: 0.5) # glitch-free slow motion, default 1.0
+
+Set up and launch the web client:
+
+```sh
+cd beamicom_phx
+mix setup
+BEAMICOM_ROM=/path/to/game.nes mix phx.server
 ```
 
-### Controls (player 1)
-
-| Key | Button |
-|-----|--------|
-| Arrow keys | D-pad |
-| `X` | A |
-| `Z` | B |
-| Enter | Start |
-| Right Shift | Select |
-
-Debug keys: `Space` pause/resume, `.` step one frame while paused, `g` toggle the
-raw palette-address grayscale view.
+See each project's README for prerequisites, usage, and controls. ROMs are not
+required to build the projects; provide your own legally obtained ROM when
+running the emulator.

@@ -1,0 +1,363 @@
+/* See the Tailwind configuration guide for advanced usage
+   https://tailwindcss.com/docs/configuration */
+
+@import "tailwindcss" source(none);
+@import "phoenix-colocated/beamicom_phx/colocated.css";
+@source "../css";
+@source "../js";
+@source "../../lib/beamicom_phx_web";
+/* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
+@source "../../_build/dev/phoenix-colocated/beamicom_phx/*/";
+
+/* A Tailwind plugin that makes "hero-#{ICON}" classes available.
+   The heroicons installation itself is managed by your mix.exs */
+@plugin "../vendor/heroicons";
+
+/* daisyUI Tailwind Plugin. */
+@plugin "daisyui/packages/bundle/daisyui" {
+  themes: false;
+}
+
+/* daisyUI theme plugin.
+  We ship with two themes, a light one inspired on Phoenix colors and a dark one inspired
+  on Elixir colors. Build your own at: https://daisyui.com/theme-generator/ */
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: "dark";
+  --color-base-100: oklch(30.33% 0.016 252.42);
+  --color-base-200: oklch(25.26% 0.014 253.1);
+  --color-base-300: oklch(20.15% 0.012 254.09);
+  --color-base-content: oklch(97.807% 0.029 256.847);
+  --color-primary: oklch(58% 0.233 277.117);
+  --color-primary-content: oklch(96% 0.018 272.314);
+  --color-secondary: oklch(58% 0.233 277.117);
+  --color-secondary-content: oklch(96% 0.018 272.314);
+  --color-accent: oklch(60% 0.25 292.717);
+  --color-accent-content: oklch(96% 0.016 293.756);
+  --color-neutral: oklch(37% 0.044 257.287);
+  --color-neutral-content: oklch(98% 0.003 247.858);
+  --color-info: oklch(58% 0.158 241.966);
+  --color-info-content: oklch(97% 0.013 236.62);
+  --color-success: oklch(60% 0.118 184.704);
+  --color-success-content: oklch(98% 0.014 180.72);
+  --color-warning: oklch(66% 0.179 58.318);
+  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-error: oklch(58% 0.253 17.585);
+  --color-error-content: oklch(96% 0.015 12.422);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1.5px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "light";
+  default: true;
+  prefersdark: false;
+  color-scheme: "light";
+  --color-base-100: oklch(98% 0 0);
+  --color-base-200: oklch(96% 0.001 286.375);
+  --color-base-300: oklch(92% 0.004 286.32);
+  --color-base-content: oklch(21% 0.006 285.885);
+  --color-primary: oklch(70% 0.213 47.604);
+  --color-primary-content: oklch(98% 0.016 73.684);
+  --color-secondary: oklch(55% 0.027 264.364);
+  --color-secondary-content: oklch(98% 0.002 247.839);
+  --color-accent: oklch(0% 0 0);
+  --color-accent-content: oklch(100% 0 0);
+  --color-neutral: oklch(44% 0.017 285.786);
+  --color-neutral-content: oklch(98% 0 0);
+  --color-info: oklch(62% 0.214 259.815);
+  --color-info-content: oklch(97% 0.014 254.604);
+  --color-success: oklch(70% 0.14 182.503);
+  --color-success-content: oklch(98% 0.014 180.72);
+  --color-warning: oklch(66% 0.179 58.318);
+  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-error: oklch(58% 0.253 17.585);
+  --color-error-content: oklch(96% 0.015 12.422);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1.5px;
+  --depth: 1;
+  --noise: 0;
+}
+
+/* Add variants based on LiveView classes */
+@custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
+@custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
+@custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
+
+/* Use the data attribute for dark mode  */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* Make LiveView wrapper divs transparent for layout */
+[data-phx-session], [data-phx-teleported-src] { display: contents }
+
+/* This file is for your main application CSS */
+
+/* ── CRT watch page ─────────────────────────────────────────────────
+   A cream-plastic CRT set in a dark room lit by its own screen. The cabinet,
+   bezel and 4:3 screen are pure CSS; the scanlines/curvature/shadow-mask on the
+   image come from the crt-lottes WebGL filter (assets/js/crt.js) rendered onto
+   .crt__glass, an opaque canvas covering the still-playing video. */
+.crt-room {
+  min-height: 100dvh;
+  display: grid;
+  grid-auto-rows: min-content;
+  place-content: center;
+  justify-items: center;
+  gap: clamp(1rem, 3vh, 2rem);
+  padding: clamp(1.5rem, 5vh, 4rem) 1rem;
+  background: radial-gradient(80% 60% at 50% 42%, #23201c 0%, #131211 45%, #0a0a0b 100%);
+}
+
+.crt {
+  position: relative;
+}
+
+/* soft light the screen throws into the room */
+.crt::before {
+  content: "";
+  position: absolute;
+  inset: -14% -10%;
+  z-index: -1;
+  background: radial-gradient(50% 45% at 50% 46%, rgba(150, 190, 255, 0.1), transparent 70%);
+  filter: blur(34px);
+  pointer-events: none;
+}
+
+.crt__cabinet {
+  padding: clamp(16px, 2.4vw, 34px);
+  border-radius: 28px;
+  background: linear-gradient(180deg, #e7e1d2 0%, #d7d0be 6%, #c6bfab 60%, #b0a893 100%);
+  box-shadow:
+    inset 0 3px 2px rgba(255, 255, 255, 0.65),
+    inset 0 -6px 10px rgba(80, 68, 48, 0.45),
+    inset 0 0 0 1px rgba(120, 105, 78, 0.35),
+    0 30px 55px rgba(0, 0, 0, 0.6),
+    0 8px 16px rgba(0, 0, 0, 0.45);
+}
+
+.crt__bezel {
+  padding: clamp(14px, 1.8vw, 26px);
+  border-radius: 22px;
+  background: linear-gradient(160deg, #2c2b29, #171615 60%, #0c0c0b);
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.08),
+    inset 0 -3px 6px rgba(0, 0, 0, 0.8);
+}
+
+.crt__screen {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px / 20px;
+  background: #000;
+  box-shadow:
+    inset 0 0 22px 6px rgba(0, 0, 0, 0.95),
+    0 0 0 1px rgba(0, 0, 0, 0.9);
+}
+
+.crt__screen video {
+  display: block;
+  width: min(78vw, 680px);
+  aspect-ratio: 4 / 3;
+  object-fit: fill;
+  background: #000;
+  border-radius: 14px / 18px;
+}
+
+/* physical-looking buttons set into the cream cabinet, left of the brand plate */
+.crt__buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.crt__btn {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #5b5238;
+  background: linear-gradient(180deg, #ded7c6, #c4bca6);
+  border: 1px solid rgba(120, 105, 78, 0.5);
+  border-radius: 6px;
+  padding: 6px 16px;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 1px 2px rgba(80, 68, 48, 0.35);
+  transition: color 0.15s, background 0.15s;
+}
+
+.crt__btn:hover {
+  color: #3f381f;
+  background: linear-gradient(180deg, #e9e3d4, #cfc7b1);
+}
+
+.crt__btn:active {
+  box-shadow: inset 0 2px 4px rgba(80, 68, 48, 0.4);
+}
+
+/* the crt-lottes filter output, stacked over the (still-decoding) video.
+   pointer-events:none lets clicks/focus fall through to the video underneath so
+   PreventGameKeyScroll keeps working. */
+.crt__glass {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 14px / 18px;
+  pointer-events: none;
+}
+
+/* keep the screen clean — hide the browser's video chrome */
+.crt__screen video::-webkit-media-controls,
+.crt__screen video::-webkit-media-controls-enclosure,
+.crt__screen video::-webkit-media-controls-panel {
+  display: none !important;
+}
+
+.crt__plate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: clamp(10px, 1.4vw, 18px);
+}
+
+/* BEAMICOM wordmark + power light, grouped on the right of the plate */
+.crt__badge {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.crt__brand {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  padding-left: 0.42em;
+  color: #6f6650;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55), 0 -1px 0 rgba(0, 0, 0, 0.25);
+}
+
+.crt__led {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ff9d8f, #e12915 55%, #7c1408);
+  box-shadow: 0 0 7px 1px rgba(225, 41, 21, 0.85), inset 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+.crt__controls {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: #7c7768;
+  text-align: center;
+}
+
+.crt__rom {
+  display: block;
+  max-width: 420px;
+  margin-inline: auto;
+  padding: 14px 18px;
+  border: 1px dashed #4a453b;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #8a8676;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.crt__rom:hover,
+.crt__rom.phx-drop-target-active {
+  border-color: #6f6650;
+  color: #b8b1a0;
+}
+
+/* Native file input hidden — the whole label is the drop target / click zone. */
+.crt__rom-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── On-screen NES controller (inlined controller.svg) ───────────── */
+.gamepad {
+  width: min(88vw, 460px);
+  margin-inline: auto;
+  touch-action: none; /* pointer events own the gestures; no scroll/zoom on drag */
+  user-select: none;
+  filter: drop-shadow(0 12px 20px rgba(0, 0, 0, 0.55));
+}
+
+.gamepad svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Highlight a pressed button. The Gamepad hook toggles this class on the mapped
+   SVG elements; brightness + glow reads clearly regardless of each shape's fill. */
+.gamepad svg .is-pressed {
+  filter: brightness(1.5) drop-shadow(0 0 4px rgba(255, 240, 120, 0.9));
+}
+
+/* Gallery of saved share-image PNGs. */
+.save-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 600px;
+  margin: 1.25rem auto 0;
+}
+
+.save-thumb {
+  padding: 4px;
+  border: 1px solid #4a453b;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.save-thumb:hover {
+  border-color: #a89a72;
+}
+
+/* Clients view saves read-only: no pointer affordance, no hover cue. */
+.save-thumb--readonly {
+  cursor: default;
+}
+
+.save-thumb--readonly:hover {
+  border-color: #4a453b;
+}
+
+.save-thumb img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  image-rendering: pixelated;
+  border-radius: 4px;
+}

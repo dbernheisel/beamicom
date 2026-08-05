@@ -1,0 +1,54 @@
+defmodule Beamicom.NES.SaveStateTest do
+  use ExUnit.Case, async: true
+
+  alias Beamicom.NES.{Console, SaveState}
+
+  @nestest "test/support/fixtures/nestest.nes"
+
+  defp loaded_console do
+    c = Console.load(@nestest)
+    Enum.reduce(1..100_000, c, fn _, acc -> Console.step(acc) end)
+  end
+
+  test "split/merge round-trips the console (except the transient last frame)" do
+    c = loaded_console()
+    {state_bin, rom_blob} = SaveState.split(c)
+    assert {:ok, c2} = SaveState.merge(state_bin, rom_blob)
+    # frame_ready + buffered audio are dropped on split (regenerated on resume).
+    expected =
+      c
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
+
+    assert :erlang.term_to_binary(expected) == :erlang.term_to_binary(c2)
+  end
+
+  test "split zeroes out prg, chr, and transient output buffers in the saved state_bin" do
+    c = loaded_console()
+    {state_bin, _rom_blob} = SaveState.split(c)
+    %{console: stripped} = :erlang.binary_to_term(:zlib.uncompress(state_bin))
+    assert stripped.bus.prg == <<>>
+    assert stripped.bus.ppu.chr == <<>>
+    assert stripped.bus.ppu.frame_ready == nil
+    assert stripped.bus.apu.samples == []
+  end
+
+  test "merge rejects CRC mismatch (valid save data paired with wrong ROM)" do
+    c = loaded_console()
+    {state_bin, _rom_blob} = SaveState.split(c)
+    # A validly-compressed but wrong ROM: decompresses fine, fails the CRC check.
+    bad_blob = :zlib.compress(:erlang.term_to_binary({<<0, 1, 2, 3>>, <<4, 5, 6, 7>>}))
+    assert {:error, :crc_mismatch} = SaveState.merge(state_bin, bad_blob)
+  end
+
+  test "merge rejects foreign binary safely" do
+    assert {:error, _} = SaveState.merge(<<"garbage">>, <<"garbage">>)
+  end
+
+  test "rom_crc/1 returns same crc as split/1" do
+    c = Console.load(@nestest)
+    {state_bin, _} = SaveState.split(c)
+    %{rom_crc: saved_crc} = :erlang.binary_to_term(:zlib.uncompress(state_bin))
+    assert SaveState.rom_crc(@nestest) == saved_crc
+  end
+end
