@@ -7,17 +7,17 @@ headless.
 
 ## Architecture
 
-Three projects, cloned as siblings:
+Beamicom is organized as three projects in one repository:
 
 ```
-~/beamicom          # this project — the core emulator (headless)
-~/beamicom_scenic   # desktop client: a Scenic/OpenGL window + ffplay audio
-~/beamicom_phx      # web client: streams A/V to the browser over Phoenix
+beamicom/          # this project — the core emulator (headless)
+beamicom_scenic/   # desktop client: a Scenic/OpenGL window + ffplay audio
+beamicom_phx/      # web client: streams A/V to the browser over Phoenix
 ```
 
-- Core: https://github.com/dbernheisel/beamicom
-- Desktop client: https://github.com/dbernheisel/beamicom_scenic
-- Web client: https://github.com/dbernheisel/beamicom_phx
+- [Repository overview](../README.md)
+- [Desktop client](../beamicom_scenic/README.md)
+- [Web client](../beamicom_phx/README.md)
 
 The core produces one `%Beamicom.NES.Framebuffer{}` per PPU frame plus a stream
 of APU samples, and fans them out through `Beamicom.NES.Output`:

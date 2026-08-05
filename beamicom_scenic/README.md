@@ -1,7 +1,7 @@
 # BeamicomScenic
 
 Local-verification client for the
-[`beamicom`](https://github.com/dbernheisel/beamicom) NES emulator: a
+[`beamicom`](../beamicom/README.md) NES emulator: a
 [Scenic](https://hexdocs.pm/scenic) window that renders frames from
 `Beamicom.NES.Output` and plays audio through `Beamicom.NES.AudioSink` (ffplay).
 Keeping it in a separate project means the core emulator has no Scenic / OpenGL
@@ -42,17 +42,18 @@ sudo apt install pkg-config libglfw3-dev libglew-dev ffmpeg
 
 ### Fetch and compile
 
-This project depends on `beamicom` as a sibling path dependency, so clone both
-next to each other:
+This project and its `beamicom` path dependency are included in the same
+repository:
 
 ```
-~/beamicom          # the core emulator
-~/beamicom_scenic   # this project
+beamicom/          # core emulator
+beamicom_scenic/   # this project
 ```
 
-Then:
+From the repository root:
 
 ```sh
+cd beamicom_scenic
 mix deps.get
 mix compile
 ```
