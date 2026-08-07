@@ -44,8 +44,14 @@ defmodule Beamicom.NES.AudioSink do
   # straight to CoreAudio with a much smaller buffer, so audio tracks video closely.
   # `speed` is applied with the pitch-preserving `atempo` filter (0.5× consumes
   # 22050 input samples/sec — exactly what the Runtime produces when paced to 0.5×).
+  #
+  # The input flags below keep A/V lag low: ffmpeg otherwise reads seconds of
+  # stdin to probe/analyze before opening CoreAudio, and in a never-ending stream
+  # that startup gulp becomes permanent latency. `nobuffer` + tiny probesize +
+  # zero analyzeduration make it open the device immediately. Safe because the
+  # raw `s16le` format is fully specified, so there is nothing to probe.
   defp cmd_for(speed) do
-    ~w(ffmpeg -loglevel quiet -f s16le -ar #{@rate} -ch_layout mono -i -) ++
+    ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f s16le -ar #{@rate} -ch_layout mono -i -) ++
       atempo(speed) ++ ~w(-f audiotoolbox -)
   end
 
