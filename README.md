@@ -15,7 +15,7 @@ browser.
 
 | Project | Purpose | Start here |
 | --- | --- | --- |
-| [`beamicom`](./beamicom/) | Dependency-free emulator core: CPU, PPU, APU, mappers, input, and audio/video output | [Core documentation](./beamicom/README.md) |
+| [`beamicom`](./beamicom/) | Dependency-free emulator core: CPU, PPU, APU, 16 mapper numbers, input, and audio/video output | [Core documentation](./beamicom/README.md) · [Mapper compatibility](./beamicom/MAPPERS.md) |
 | [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
 | [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client that streams audio/video over WebRTC and accepts browser controls | [Web setup and modes](./beamicom_phx/README.md) |
 

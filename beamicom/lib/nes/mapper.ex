@@ -15,6 +15,10 @@ defmodule Beamicom.NES.Mapper do
     * 9  MMC2 / 10 MMC4 — CHR banks latched by $xFD8/$xFE8 pattern fetches
     * 11 Color Dreams / 66 GxROM — combined PRG+CHR bank byte
     * 69 Sunsoft FME-7 — command/param ports + a CPU-cycle IRQ
+    * 34 BNROM — 32KB PRG switch
+    * 118 TxSROM — MMC3 with CHR-controlled nametable selection
+    * 119 TQROM — MMC3 with mixed CHR ROM/RAM banks
+    * 206 DxROM / Namco 108 — simplified MMC3-style PRG/CHR banking
 
     * 5  MMC5 — mode-aware PRG/CHR banking (separate sprite/bg CHR), $5105 per-
       nametable sources + fill mode, ExRAM (all four modes incl. extended
@@ -34,12 +38,19 @@ defmodule Beamicom.NES.Mapper do
 
   ## Sources
     * NESdev Wiki — NROM / MMC1 / UxROM / CNROM / MMC3 / AxROM / MMC2 / MMC4 /
-      Color Dreams / GxROM / Sunsoft FME-7 / MMC5.
+      Color Dreams / BNROM / GxROM / Sunsoft FME-7 / MMC5 / TxSROM / TQROM /
+      DxROM.
   """
 
   import Bitwise
 
   @compile {:inline, b: 2, c: 2, banks8: 1, banks16: 1, chr_reg_index: 1, set_prg_window: 3}
+
+  defp put_state(bus, key, value),
+    do: %{bus | mapper_state: Map.put(bus.mapper_state, key, value)}
+
+  defp merge_state(bus, values),
+    do: %{bus | mapper_state: Map.merge(bus.mapper_state, values)}
 
   # --- power-on bank layout ---
 
@@ -47,8 +58,10 @@ defmodule Beamicom.NES.Mapper do
     do: set_prg(bus, [b(bus, 0), b(bus, 1), b(bus, banks8(bus) - 2), b(bus, banks8(bus) - 1)])
 
   def reset(%{mapper: 1} = bus), do: apply_mmc1(bus)
-  def reset(%{mapper: 4} = bus), do: apply_mmc3(bus)
+  def reset(%{mapper: mapper} = bus) when mapper in [4, 118, 119], do: apply_mmc3(bus)
   def reset(%{mapper: 7} = bus), do: axrom(bus, 0)
+  def reset(%{mapper: 34} = bus), do: set_prg32(bus, 0)
+  def reset(%{mapper: 206} = bus), do: apply_namco108(bus)
   # FME-7: $E000 is fixed to the last 8KB bank; $8000/$A000/$C000 switch.
   def reset(%{mapper: 69} = bus),
     do: set_prg(bus, [b(bus, 0), b(bus, 1), b(bus, 2), b(bus, banks8(bus) - 1)])
@@ -60,9 +73,8 @@ defmodule Beamicom.NES.Mapper do
     mmc24_prg(bus, m, 0)
   end
 
-  # MMC5 (basic): 8KB PRG windows with $E000 fixed high, CHR 1KB banks.
-  def reset(%{mapper: 5} = bus),
-    do: set_prg(bus, [b(bus, 0), b(bus, 1), b(bus, 2), b(bus, banks8(bus) - 1)])
+  # MMC5: mode-aware PRG windows with $E000 fixed to ROM, CHR 1KB banks.
+  def reset(%{mapper: 5} = bus), do: apply_mmc5_prg(bus)
 
   # NROM: map $8000-$FFFF linearly over PRG (a 16KB image mirrors into both halves).
   def reset(bus), do: set_prg(bus, for(w <- 0..3, do: b(bus, w)))
@@ -75,8 +87,13 @@ defmodule Beamicom.NES.Mapper do
   end
 
   def write(%{mapper: 1} = bus, addr, val), do: mmc1(bus, addr, val)
-  def write(%{mapper: 4} = bus, addr, val), do: mmc3(bus, addr, val)
+
+  def write(%{mapper: mapper} = bus, addr, val) when mapper in [4, 118, 119],
+    do: mmc3(bus, addr, val)
+
   def write(%{mapper: 7} = bus, _addr, val), do: axrom(bus, val)
+  def write(%{mapper: 34} = bus, _addr, val), do: set_prg32(bus, val)
+  def write(%{mapper: 206} = bus, addr, val), do: namco108(bus, addr, val)
 
   # CNROM: fixed PRG, switch the 8KB CHR bank.
   def write(%{mapper: 3} = bus, _addr, val), do: set_chr8(bus, val &&& 0x03)
@@ -95,17 +112,21 @@ defmodule Beamicom.NES.Mapper do
 
   def write(bus, _addr, _val), do: bus
 
-  # MMC5 (basic subset): 8KB PRG banks ($5114-$5117), 1KB CHR banks
-  # ($5120-$5127), and the common mirroring patterns ($5105). NOT implemented:
-  # ExRAM, vertical split, the multiplier, extended attributes, the extra sound
-  # channels, and the scanline IRQ — see the moduledoc pointer.
+  # MMC5 register decode: mode-aware PRG/CHR banking, ExRAM/nametable routing,
+  # vertical split, multiplier, scanline IRQ, and expansion audio control.
   defp mmc5(bus, addr, val) do
     cond do
       addr == 0x5100 ->
-        %{bus | prg_mode: val &&& 0x03}
+        bus |> put_state(:prg_mode, val &&& 0x03) |> apply_mmc5_prg()
 
       addr == 0x5101 ->
-        mmc5_chr(%{bus | chr_mode: val &&& 0x03})
+        bus |> put_state(:chr_mode, val &&& 0x03) |> mmc5_chr()
+
+      addr == 0x5102 ->
+        put_state(bus, :m5_protect1, val &&& 0x03)
+
+      addr == 0x5103 ->
+        put_state(bus, :m5_protect2, val &&& 0x03)
 
       addr == 0x5104 ->
         put_ppu(bus, :exram_mode, val &&& 0x03)
@@ -124,28 +145,34 @@ defmodule Beamicom.NES.Mapper do
       addr in 0x5C00..0x5FFF ->
         put_ppu(bus, :exram, Map.put(bus.ppu.exram, addr - 0x5C00, val))
 
-      addr in 0x5114..0x5117 ->
-        mmc5_prg(bus, addr - 0x5114, val &&& 0x7F)
+      addr in 0x5113..0x5117 ->
+        reg = addr - 0x5113
+        regs = put_elem(bus.mapper_state.m5_prg_regs, reg, val)
+        bus |> put_state(:m5_prg_regs, regs) |> apply_mmc5_prg()
 
       addr in 0x5120..0x512B ->
-        mmc5_chr(%{bus | chr_regs: put_elem(bus.chr_regs, chr_reg_index(addr), val)})
+        regs = put_elem(bus.mapper_state.chr_regs, chr_reg_index(addr), val)
+        bus |> put_state(:chr_regs, regs) |> mmc5_chr()
 
       addr == 0x5130 ->
-        mmc5_chr(put_ppu(%{bus | chr_hi: val &&& 0x03}, :ext_chr_hi, val &&& 0x03))
+        bus
+        |> put_state(:chr_hi, val &&& 0x03)
+        |> put_ppu(:ext_chr_hi, val &&& 0x03)
+        |> mmc5_chr()
 
       # Scanline IRQ: $5203 = compare target, $5204 bit7 = enable.
       addr == 0x5203 ->
-        %{bus | irq_latch: val}
+        put_state(bus, :irq_latch, val)
 
       addr == 0x5204 ->
         %{bus | irq_enabled: (val &&& 0x80) != 0}
 
       # 8x8 unsigned multiplier.
       addr == 0x5205 ->
-        %{bus | mul_a: val}
+        put_state(bus, :mul_a, val)
 
       addr == 0x5206 ->
-        %{bus | mul_b: val}
+        put_state(bus, :mul_b, val)
 
       # Vertical split: $5200 enable/side/threshold, $5201 scroll, $5202 CHR bank.
       addr == 0x5200 ->
@@ -172,8 +199,12 @@ defmodule Beamicom.NES.Mapper do
     {value, %{bus | irq_pending: false}}
   end
 
-  def read(%{mapper: 5} = bus, 0x5205), do: {bus.mul_a * bus.mul_b &&& 0xFF, bus}
-  def read(%{mapper: 5} = bus, 0x5206), do: {(bus.mul_a * bus.mul_b) >>> 8 &&& 0xFF, bus}
+  def read(%{mapper: 5} = bus, 0x5205),
+    do: {bus.mapper_state.mul_a * bus.mapper_state.mul_b &&& 0xFF, bus}
+
+  def read(%{mapper: 5} = bus, 0x5206),
+    do: {(bus.mapper_state.mul_a * bus.mapper_state.mul_b) >>> 8 &&& 0xFF, bus}
+
   # ExRAM is CPU-readable in the work-RAM modes (2/3).
   def read(%{mapper: 5, ppu: %{exram_mode: m, exram: ex}} = bus, addr)
       when addr in 0x5C00..0x5FFF and m in [2, 3],
@@ -194,34 +225,48 @@ defmodule Beamicom.NES.Mapper do
   # bit only gates whether /IRQ is actually asserted — see `Bus.irq_pending?/1`.
   defp mmc5_scanline(bus) do
     sl = bus.ppu.irq_scanline
+    latch = bus.mapper_state.irq_latch
 
-    %{
-      bus
-      | irq_counter: sl,
-        irq_pending: bus.irq_pending or (sl == bus.irq_latch and bus.irq_latch != 0)
-    }
+    bus
+    |> put_state(:irq_counter, sl)
+    |> Map.put(:irq_pending, bus.irq_pending or (sl == latch and latch != 0))
   end
 
-  # PRG window mapping depends on $5100 mode (NESdev): mode 3 = four 8KB, mode 2 =
-  # 16KB@$8000 + two 8KB, mode 1 = two 16KB, mode 0 = one 32KB. $5117 ($E000) is
-  # always ROM. `bank` is an 8KB index (bit 7 ROM/RAM is treated as ROM).
-  defp mmc5_prg(bus, reg, bank) do
-    case {bus.prg_mode, reg} do
-      {3, w} -> set_prg_window(bus, w, b(bus, bank))
-      {2, 1} -> set_prg16(bus, 0, bank)
-      {2, 2} -> set_prg_window(bus, 2, b(bus, bank))
-      {2, 3} -> set_prg_window(bus, 3, b(bus, bank))
-      {1, 1} -> set_prg16(bus, 0, bank)
-      {1, 3} -> set_prg16(bus, 2, bank)
-      {0, 3} -> Enum.reduce(0..3, bus, &set_prg_window(&2, &1, b(&2, (bank &&& 0x7C) + &1)))
-      _ -> bus
-    end
-  end
+  # Recompute all PRG windows whenever the mode or a bank register changes.
+  # $5113 always maps RAM at $6000. $5114-$5116 select RAM with bit 7 clear and
+  # ROM with it set; $5117 is forced to ROM so vectors can never point into RAM.
+  defp apply_mmc5_prg(bus) do
+    ms = bus.mapper_state
+    {ram6000, r14, r15, r16, r17} = ms.m5_prg_regs
 
-  # 16KB PRG at window w/w+1 (bit 0 of the bank index ignored).
-  defp set_prg16(bus, w, bank) do
-    base = bank &&& 0x7E
-    bus |> set_prg_window(w, b(bus, base)) |> set_prg_window(w + 1, b(bus, base + 1))
+    controls =
+      case ms.prg_mode do
+        3 -> [{r14, 0, 1, false}, {r15, 0, 1, false}, {r16, 0, 1, false}, {r17, 0, 1, true}]
+        2 -> [{r15, 0, 2, false}, {r15, 1, 2, false}, {r16, 0, 1, false}, {r17, 0, 1, true}]
+        1 -> [{r15, 0, 2, false}, {r15, 1, 2, false}, {r17, 0, 2, true}, {r17, 1, 2, true}]
+        0 -> [{r17, 0, 4, true}, {r17, 1, 4, true}, {r17, 2, 4, true}, {r17, 3, 4, true}]
+      end
+
+    {offsets, ram_windows} =
+      controls
+      |> Enum.with_index()
+      |> Enum.reduce({[], 0}, fn {{reg, local, alignment, force_rom}, window}, {offsets, mask} ->
+        bank = (reg &&& bnot(alignment - 1)) + local
+        ram? = not force_rom and (reg &&& 0x80) == 0
+        offset = if(ram?, do: ram_off(bus, bank), else: b(bus, bank &&& 0x7F))
+        {[offset | offsets], if(ram?, do: mask ||| 1 <<< window, else: mask)}
+      end)
+
+    [a, b0, c0, d] = Enum.reverse(offsets)
+
+    bus
+    |> merge_state(%{
+      wram_source: :ram,
+      wram_enabled: true,
+      wram_bank: ram6000 &&& 0x0F,
+      prg_ram_windows: ram_windows
+    })
+    |> Map.put(:prg_banks, {a, b0, c0, d})
   end
 
   # $5120-$5127 sprite CHR → chr_regs 0-7; $5128-$512B background → chr_regs 8-11.
@@ -231,8 +276,9 @@ defmodule Beamicom.NES.Mapper do
   # Expand the CHR registers into two 8x1KB window sets per the CHR mode ($5101):
   # sprites from $5120-$5127, background from $5128-$512B (used in 8x16 mode).
   defp mmc5_chr(bus) do
-    sprite = for w <- 0..7, do: chr_off(bus, elem(bus.chr_regs, sprite_reg(bus.chr_mode, w)), w)
-    bg = for w <- 0..7, do: chr_off(bus, elem(bus.chr_regs, 8 + bg_reg(bus.chr_mode, w)), w)
+    ms = bus.mapper_state
+    sprite = for w <- 0..7, do: chr_off(bus, elem(ms.chr_regs, sprite_reg(ms.chr_mode, w)), w)
+    bg = for w <- 0..7, do: chr_off(bus, elem(ms.chr_regs, 8 + bg_reg(ms.chr_mode, w)), w)
     %{bus | ppu: %{bus.ppu | chr_banks: List.to_tuple(sprite), bg_chr_banks: List.to_tuple(bg)}}
   end
 
@@ -247,9 +293,10 @@ defmodule Beamicom.NES.Mapper do
   defp bg_reg(_m, _w), do: 3
 
   defp chr_off(bus, reg, w) do
-    win = elem({8, 4, 2, 1}, bus.chr_mode)
-    local = elem({w, w &&& 0x03, w &&& 0x01, 0}, bus.chr_mode)
-    bank = reg ||| bus.chr_hi <<< 8
+    ms = bus.mapper_state
+    win = elem({8, 4, 2, 1}, ms.chr_mode)
+    local = elem({w, w &&& 0x03, w &&& 0x01, 0}, ms.chr_mode)
+    bank = reg ||| ms.chr_hi <<< 8
     size = max(byte_size(bus.ppu.chr), 0x2000)
     rem((bank * win + local) * 0x400 + size, size)
   end
@@ -294,7 +341,7 @@ defmodule Beamicom.NES.Mapper do
 
   # --- MMC1: 5-bit serial shift register ---
 
-  def clock_irq(%{mapper: 4} = bus, n) when n > 0,
+  def clock_irq(%{mapper: mapper} = bus, n) when mapper in [4, 118, 119] and n > 0,
     do: Enum.reduce(1..n, bus, fn _, b -> tick_mmc3_irq(b) end)
 
   def clock_irq(%{mapper: 5} = bus, n) when n > 0, do: mmc5_scanline(bus)
@@ -302,51 +349,85 @@ defmodule Beamicom.NES.Mapper do
   def clock_irq(bus, _n), do: bus
 
   defp mmc1(bus, _addr, val) when (val &&& 0x80) != 0,
-    do: apply_mmc1(%{bus | shift: 0, shift_count: 0, ctrl: bus.ctrl ||| 0x0C})
+    do:
+      apply_mmc1(
+        merge_state(bus, %{
+          shift: 0,
+          shift_count: 0,
+          ctrl: bus.mapper_state.ctrl ||| 0x0C
+        })
+      )
 
   defp mmc1(bus, addr, val) do
-    shift = bus.shift >>> 1 ||| (val &&& 1) <<< 4
+    ms = bus.mapper_state
+    shift = ms.shift >>> 1 ||| (val &&& 1) <<< 4
 
-    if bus.shift_count == 4 do
-      bus = %{bus | shift: 0, shift_count: 0}
+    if ms.shift_count == 4 do
+      bus = merge_state(bus, %{shift: 0, shift_count: 0})
 
       case addr >>> 13 &&& 0x03 do
-        0 -> apply_mmc1(%{bus | ctrl: shift})
-        1 -> apply_mmc1(%{bus | chr0: shift})
-        2 -> apply_mmc1(%{bus | chr1: shift})
-        3 -> apply_mmc1(%{bus | prg_reg: shift})
+        0 -> bus |> put_state(:ctrl, shift) |> apply_mmc1()
+        1 -> bus |> put_state(:chr0, shift) |> apply_mmc1()
+        2 -> bus |> put_state(:chr1, shift) |> apply_mmc1()
+        3 -> bus |> put_state(:prg_reg, shift) |> apply_mmc1()
       end
     else
-      %{bus | shift: shift, shift_count: bus.shift_count + 1}
+      merge_state(bus, %{shift: shift, shift_count: ms.shift_count + 1})
     end
   end
 
   defp apply_mmc1(bus) do
+    ms = bus.mapper_state
+    outer = if byte_size(bus.prg) > 0x40000, do: ms.chr0 &&& 0x10, else: 0
+
     {lo16, hi16} =
-      case bus.ctrl >>> 2 &&& 0x03 do
-        m when m in [0, 1] ->
-          p = bus.prg_reg &&& 0x0E
-          {p, p + 1}
+      if ms.submapper == 5 do
+        # SEROM/SHROM: the 32 KiB PRG ROM is fixed; the serial register still
+        # controls mirroring and CHR banking.
+        {0, 1}
+      else
+        case ms.ctrl >>> 2 &&& 0x03 do
+          m when m in [0, 1] ->
+            p = outer + (ms.prg_reg &&& 0x0E)
+            {p, p + 1}
 
-        2 ->
-          {0, bus.prg_reg &&& 0x0F}
+          2 ->
+            {outer, outer + (ms.prg_reg &&& 0x0F)}
 
-        3 ->
-          {bus.prg_reg &&& 0x0F, banks16(bus) - 1}
+          3 ->
+            {outer + (ms.prg_reg &&& 0x0F), min(outer + 0x0F, banks16(bus) - 1)}
+        end
       end
 
     {clo, chi} =
-      if (bus.ctrl &&& 0x10) == 0 do
-        c = bus.chr0 &&& 0x1E
+      if (ms.ctrl &&& 0x10) == 0 do
+        c = ms.chr0 &&& 0x1E
         {c, c + 1}
       else
-        {bus.chr0, bus.chr1}
+        {ms.chr0, ms.chr1}
       end
+
+    ram_size = max(ms.prg_ram_size, 0x2000)
+
+    ram_bank =
+      cond do
+        ram_size >= 0x8000 -> (ms.chr0 >>> 3 &&& 1) ||| (ms.chr0 >>> 2 &&& 1) <<< 1
+        ram_size >= 0x4000 -> ms.chr0 >>> 3 &&& 1
+        true -> 0
+      end
+
+    bus =
+      merge_state(bus, %{
+        wram_source: :ram,
+        wram_enabled: (ms.prg_reg &&& 0x10) == 0,
+        wram_writable: true,
+        wram_bank: ram_bank
+      })
 
     bus
     |> set_prg([b(bus, lo16 * 2), b(bus, lo16 * 2 + 1), b(bus, hi16 * 2), b(bus, hi16 * 2 + 1)])
     |> set_chr(chr4(bus, clo) ++ chr4(bus, chi))
-    |> mirror(mmc1_mirror(bus.ctrl &&& 0x03))
+    |> mirror(mmc1_mirror(ms.ctrl &&& 0x03))
   end
 
   defp mmc1_mirror(0), do: :single0
@@ -358,23 +439,83 @@ defmodule Beamicom.NES.Mapper do
 
   defp mmc3(bus, addr, val) do
     case {addr &&& 0xE001, val} do
-      {0x8000, v} -> apply_mmc3(%{bus | bank_select: v})
-      {0x8001, v} -> apply_mmc3(%{bus | regs: put_elem(bus.regs, bus.bank_select &&& 0x07, v)})
-      {0xA000, v} -> mirror(bus, if((v &&& 1) == 0, do: :vertical, else: :horizontal))
-      {0xC000, v} -> %{bus | irq_latch: v}
-      {0xC001, _} -> %{bus | irq_reload: true}
-      {0xE000, _} -> %{bus | irq_enabled: false, irq_pending: false}
-      {0xE001, _} -> %{bus | irq_enabled: true}
-      _ -> bus
+      {0x8000, v} ->
+        apply_mmc3(mmc3_bank_select(bus, v))
+
+      {0x8001, v} ->
+        ms = bus.mapper_state
+        bus |> put_state(:regs, put_elem(ms.regs, ms.bank_select &&& 0x07, v)) |> apply_mmc3()
+
+      {0xA000, _v} when bus.mapper == 118 ->
+        # TxSROM wires CIRAM A10 to CHR A17, bypassing this MMC3 output.
+        bus
+
+      {0xA000, v} ->
+        mirror(bus, if((v &&& 1) == 0, do: :vertical, else: :horizontal))
+
+      {0xA001, v} ->
+        mmc3_ram_control(bus, v)
+
+      {0xC000, v} ->
+        put_state(bus, :irq_latch, v)
+
+      {0xC001, _} ->
+        put_state(bus, :irq_reload, true)
+
+      {0xE000, _} ->
+        %{bus | irq_enabled: false, irq_pending: false}
+
+      {0xE001, _} ->
+        %{bus | irq_enabled: true}
+
+      _ ->
+        bus
     end
   end
 
+  defp mmc3_bank_select(%{mapper_state: %{submapper: 1} = ms} = bus, val) do
+    enabled = (val &&& 0x20) != 0
+
+    merge_state(bus, %{
+      bank_select: val,
+      mmc6_ram_enabled: enabled,
+      mmc6_read_mask: if(enabled, do: ms.mmc6_read_mask, else: 0),
+      mmc6_write_mask: if(enabled, do: ms.mmc6_write_mask, else: 0)
+    })
+  end
+
+  defp mmc3_bank_select(bus, val), do: put_state(bus, :bank_select, val)
+
+  # MMC6 (NES 2.0 mapper 4 submapper 1) has two independently protected 512B
+  # RAM halves. Reads/writes are also globally gated by $8000 bit 5.
+  defp mmc3_ram_control(
+         %{mapper_state: %{submapper: 1, mmc6_ram_enabled: false}} = bus,
+         _val
+       ),
+       do: bus
+
+  defp mmc3_ram_control(%{mapper_state: %{submapper: 1}} = bus, val) do
+    merge_state(bus, %{
+      mmc6_read_mask: (val >>> 5 &&& 1) ||| (val >>> 6 &&& 1) <<< 1,
+      mmc6_write_mask: (val >>> 4 &&& 1) ||| (val >>> 5 &&& 2)
+    })
+  end
+
+  defp mmc3_ram_control(bus, val) do
+    merge_state(bus, %{
+      wram_source: :ram,
+      wram_enabled: (val &&& 0x80) != 0,
+      wram_writable: (val &&& 0x40) == 0
+    })
+  end
+
   defp apply_mmc3(bus) do
-    r = bus.regs
+    ms = bus.mapper_state
+    r = ms.regs
     last = banks8(bus) - 1
 
     prg =
-      if (bus.bank_select &&& 0x40) == 0 do
+      if (ms.bank_select &&& 0x40) == 0 do
         [elem(r, 6), elem(r, 7), last - 1, last]
       else
         [last - 1, elem(r, 7), elem(r, 6), last]
@@ -388,51 +529,136 @@ defmodule Beamicom.NES.Mapper do
     ]
 
     hi = [elem(r, 2), elem(r, 3), elem(r, 4), elem(r, 5)]
-    chr = if (bus.bank_select &&& 0x80) == 0, do: lo ++ hi, else: hi ++ lo
+    chr = if (ms.bank_select &&& 0x80) == 0, do: lo ++ hi, else: hi ++ lo
 
     bus
     |> set_prg(Enum.map(prg, &b(bus, &1)))
+    |> set_chr(Enum.map(chr, &mmc3_chr_bank(bus, &1)))
+    |> apply_txsrom_mirroring()
+  end
+
+  # TQROM uses CHR bank bit 6 as the chip select. Negative bank offsets encode
+  # its 8KB CHR RAM windows without adding another field to the hot PPU struct.
+  defp mmc3_chr_bank(%{mapper: 119}, bank) when (bank &&& 0x40) != 0,
+    do: -(rem(bank &&& 0x07, 8) * 0x400) - 1
+
+  defp mmc3_chr_bank(%{mapper: 119} = bus, bank), do: c(bus, bank &&& 0x3F)
+  defp mmc3_chr_bank(bus, bank), do: c(bus, bank)
+
+  defp apply_txsrom_mirroring(%{mapper: 118} = bus) do
+    ms = bus.mapper_state
+    r = ms.regs
+
+    sources =
+      if (ms.bank_select &&& 0x80) == 0 do
+        {elem(r, 0) >>> 7, elem(r, 0) >>> 7, elem(r, 1) >>> 7, elem(r, 1) >>> 7}
+      else
+        {elem(r, 2) >>> 7, elem(r, 3) >>> 7, elem(r, 4) >>> 7, elem(r, 5) >>> 7}
+      end
+
+    %{bus | ppu: %{bus.ppu | nt_source: sources}}
+  end
+
+  defp apply_txsrom_mirroring(bus), do: bus
+
+  # --- Namco 108 / DxROM (mapper 206) ---
+
+  defp namco108(bus, addr, val) when addr in 0x8000..0x9FFF and (addr &&& 1) == 0,
+    do: put_state(bus, :bank_select, val &&& 0x07)
+
+  defp namco108(bus, addr, val) when addr in 0x8000..0x9FFF do
+    ms = bus.mapper_state
+    reg = ms.bank_select
+
+    val =
+      cond do
+        reg in [0, 1] -> val &&& 0x3E
+        reg in 2..5 -> val &&& 0x3F
+        true -> val &&& 0x0F
+      end
+
+    bus |> put_state(:regs, put_elem(ms.regs, reg, val)) |> apply_namco108()
+  end
+
+  defp namco108(bus, _addr, _val), do: bus
+
+  defp apply_namco108(bus) do
+    r = bus.mapper_state.regs
+    last = banks8(bus) - 1
+
+    chr = [
+      elem(r, 0),
+      elem(r, 0) + 1,
+      elem(r, 1),
+      elem(r, 1) + 1,
+      elem(r, 2),
+      elem(r, 3),
+      elem(r, 4),
+      elem(r, 5)
+    ]
+
+    bus
+    |> set_prg(Enum.map([elem(r, 6), elem(r, 7), last - 1, last], &b(bus, &1)))
     |> set_chr(Enum.map(chr, &c(bus, &1)))
   end
 
   defp tick_mmc3_irq(bus) do
+    ms = bus.mapper_state
+
     counter =
-      if bus.irq_counter == 0 or bus.irq_reload, do: bus.irq_latch, else: bus.irq_counter - 1
+      if ms.irq_counter == 0 or ms.irq_reload, do: ms.irq_latch, else: ms.irq_counter - 1
 
     pending = bus.irq_pending or (counter == 0 and bus.irq_enabled)
-    %{bus | irq_counter: counter, irq_reload: false, irq_pending: pending}
+
+    bus
+    |> merge_state(%{irq_counter: counter, irq_reload: false})
+    |> Map.put(:irq_pending, pending)
   end
 
   # --- FME-7 (Sunsoft): command/parameter ports + a CPU-cycle IRQ ---
   # $8000 latches which internal register; $A000 writes its parameter.
 
-  defp fme7(bus, addr, val) when addr in 0x8000..0x9FFF, do: %{bus | fme_cmd: val &&& 0x0F}
+  defp fme7(bus, addr, val) when addr in 0x8000..0x9FFF,
+    do: put_state(bus, :fme_cmd, val &&& 0x0F)
 
-  defp fme7(bus, addr, val) when addr in 0xA000..0xBFFF, do: fme7_param(bus, bus.fme_cmd, val)
+  defp fme7(bus, addr, val) when addr in 0xA000..0xBFFF,
+    do: fme7_param(bus, bus.mapper_state.fme_cmd, val)
+
   defp fme7(bus, _addr, _val), do: bus
 
   # Regs 0-7: 1KB CHR banks. 9/A/B: 8KB PRG at $8000/$A000/$C000. C: mirroring.
   # D: IRQ control (bit0 count enable, bit7 IRQ enable; also acks). E/F: counter.
   defp fme7_param(bus, cmd, val) when cmd in 0..7, do: set_chr_window(bus, cmd, c(bus, val))
+  defp fme7_param(bus, 8, val), do: fme7_wram(bus, val)
   defp fme7_param(bus, 9, val), do: set_prg_window(bus, 0, b(bus, val &&& 0x3F))
   defp fme7_param(bus, 10, val), do: set_prg_window(bus, 1, b(bus, val &&& 0x3F))
   defp fme7_param(bus, 11, val), do: set_prg_window(bus, 2, b(bus, val &&& 0x3F))
   defp fme7_param(bus, 12, val), do: mirror(bus, fme7_mirror(val &&& 0x03))
 
   defp fme7_param(bus, 13, val),
-    do: %{
+    do:
       bus
-      | fme_count_on: (val &&& 1) != 0,
-        irq_enabled: (val &&& 0x80) != 0,
-        irq_pending: false
-    }
+      |> put_state(:fme_count_on, (val &&& 1) != 0)
+      |> Map.merge(%{irq_enabled: (val &&& 0x80) != 0, irq_pending: false})
 
-  defp fme7_param(bus, 14, val), do: %{bus | irq_counter: (bus.irq_counter &&& 0xFF00) ||| val}
+  defp fme7_param(bus, 14, val),
+    do: put_state(bus, :irq_counter, (bus.mapper_state.irq_counter &&& 0xFF00) ||| val)
 
   defp fme7_param(bus, 15, val),
-    do: %{bus | irq_counter: (bus.irq_counter &&& 0x00FF) ||| val <<< 8}
+    do: put_state(bus, :irq_counter, (bus.mapper_state.irq_counter &&& 0x00FF) ||| val <<< 8)
 
   defp fme7_param(bus, _cmd, _val), do: bus
+
+  defp fme7_wram(bus, val) do
+    ram? = (val &&& 0x40) != 0
+
+    merge_state(bus, %{
+      wram_source: if(ram?, do: :ram, else: :rom),
+      wram_enabled: not ram? or (val &&& 0x80) != 0,
+      wram_writable: ram? and (val &&& 0x80) != 0,
+      wram_bank: val &&& 0x3F
+    })
+  end
 
   defp fme7_mirror(0), do: :vertical
   defp fme7_mirror(1), do: :horizontal
@@ -445,12 +671,15 @@ defmodule Beamicom.NES.Mapper do
 
   def clock_cpu_irq(bus, _n), do: bus
 
-  defp fme7_tick(%{fme_count_on: false} = bus), do: bus
+  defp fme7_tick(%{mapper_state: %{fme_count_on: false}} = bus), do: bus
 
-  defp fme7_tick(%{irq_counter: 0} = bus),
-    do: %{bus | irq_counter: 0xFFFF, irq_pending: bus.irq_pending or bus.irq_enabled}
+  defp fme7_tick(%{mapper_state: %{irq_counter: 0}} = bus),
+    do:
+      bus
+      |> put_state(:irq_counter, 0xFFFF)
+      |> Map.put(:irq_pending, bus.irq_pending or bus.irq_enabled)
 
-  defp fme7_tick(bus), do: %{bus | irq_counter: bus.irq_counter - 1}
+  defp fme7_tick(bus), do: put_state(bus, :irq_counter, bus.mapper_state.irq_counter - 1)
 
   # --- helpers ---
 
@@ -465,6 +694,9 @@ defmodule Beamicom.NES.Mapper do
     size = max(byte_size(bus.ppu.chr), 0x2000)
     rem(bank * 0x400 + size, size)
   end
+
+  defp ram_off(bus, bank),
+    do: rem(bank * 0x2000, max(bus.mapper_state.prg_ram_size, 0x2000))
 
   # Four 1KB offsets making up a 4KB CHR bank (MMC1).
   defp chr4(bus, bank4), do: for(i <- 0..3, do: c(bus, bank4 * 4 + i))

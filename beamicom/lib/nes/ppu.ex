@@ -320,12 +320,23 @@ defmodule Beamicom.NES.PPU do
   defp bg_cached_fast(i, ntat, fy, tbl, banks, chr, ram, acc, blank?) do
     {nt, at} = elem(ntat, i)
     addr = tbl ||| nt <<< 4 ||| fy
-    off = elem(banks, addr >>> 10) + (addr &&& 0x03FF)
+    bank = elem(banks, addr >>> 10)
+    local = addr &&& 0x03FF
 
     {lo, hi} =
-      if byte_size(chr) > 0,
-        do: {:binary.at(chr, off), :binary.at(chr, off + 8)},
-        else: {Map.get(ram, off, 0), Map.get(ram, off + 8, 0)}
+      cond do
+        bank < 0 ->
+          off = -bank - 1 + local
+          {Map.get(ram, off, 0), Map.get(ram, off + 8, 0)}
+
+        byte_size(chr) > 0 ->
+          off = bank + local
+          {:binary.at(chr, off), :binary.at(chr, off + 8)}
+
+        true ->
+          off = bank + local
+          {Map.get(ram, off, 0), Map.get(ram, off + 8, 0)}
+      end
 
     tile = {lo, hi, at}
 
@@ -640,12 +651,23 @@ defmodule Beamicom.NES.PPU do
         true ->
           addr = (ppu.ctrl &&& 0x10) <<< 8 ||| ppu.nt_latch <<< 4 ||| fine_y
           banks = bg_banks(ppu)
-          off = elem(banks, addr >>> 10) + (addr &&& 0x03FF)
+          bank = elem(banks, addr >>> 10)
+          local = addr &&& 0x03FF
 
           {lo, hi} =
-            if byte_size(ppu.chr) > 0,
-              do: {:binary.at(ppu.chr, off), :binary.at(ppu.chr, off + 8)},
-              else: {Map.get(ppu.chr_ram, off, 0), Map.get(ppu.chr_ram, off + 8, 0)}
+            cond do
+              bank < 0 ->
+                off = -bank - 1 + local
+                {Map.get(ppu.chr_ram, off, 0), Map.get(ppu.chr_ram, off + 8, 0)}
+
+              byte_size(ppu.chr) > 0 ->
+                off = bank + local
+                {:binary.at(ppu.chr, off), :binary.at(ppu.chr, off + 8)}
+
+              true ->
+                off = bank + local
+                {Map.get(ppu.chr_ram, off, 0), Map.get(ppu.chr_ram, off + 8, 0)}
+            end
 
           {addr, lo, addr + 8, hi}
       end
@@ -857,17 +879,30 @@ defmodule Beamicom.NES.PPU do
 
   # CHR byte via a given eight-1KB-window bank set (mapper-controlled).
   defp chr_at(ppu, addr, banks) do
-    off = elem(banks, addr >>> 10) + (addr &&& 0x03FF)
-    if byte_size(ppu.chr) > 0, do: :binary.at(ppu.chr, off), else: Map.get(ppu.chr_ram, off, 0)
+    bank = elem(banks, addr >>> 10)
+    local = addr &&& 0x03FF
+
+    cond do
+      bank < 0 -> Map.get(ppu.chr_ram, -bank - 1 + local, 0)
+      byte_size(ppu.chr) > 0 -> :binary.at(ppu.chr, bank + local)
+      true -> Map.get(ppu.chr_ram, bank + local, 0)
+    end
   end
 
   # Background fetches use the dedicated bg set only in 8x16 sprite mode (MMC5).
   defp bg_banks(ppu), do: if((ppu.ctrl &&& 0x20) != 0, do: ppu.bg_chr_banks, else: ppu.chr_banks)
 
   defp write(ppu, addr, v) when addr in 0x0000..0x1FFF do
-    # CHR-ROM is read-only; only CHR-RAM boards accept writes.
-    off = elem(ppu.chr_banks, addr >>> 10) + (addr &&& 0x03FF)
-    if byte_size(ppu.chr) > 0, do: ppu, else: %{ppu | chr_ram: Map.put(ppu.chr_ram, off, v)}
+    # CHR-ROM is read-only. TQROM encodes a selected RAM window as a negative
+    # bank offset; CHR-RAM-only boards retain the ordinary non-negative layout.
+    bank = elem(ppu.chr_banks, addr >>> 10)
+    local = addr &&& 0x03FF
+
+    cond do
+      bank < 0 -> %{ppu | chr_ram: Map.put(ppu.chr_ram, -bank - 1 + local, v)}
+      byte_size(ppu.chr) == 0 -> %{ppu | chr_ram: Map.put(ppu.chr_ram, bank + local, v)}
+      true -> ppu
+    end
   end
 
   defp write(ppu, addr, v) when addr in 0x2000..0x3EFF, do: nt_write(ppu, addr, v)

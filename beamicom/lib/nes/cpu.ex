@@ -25,7 +25,18 @@ defmodule Beamicom.NES.CPU do
   # nmi_line?/1 is a hot per-cycle check; keep a local inlinable copy so the
   # driving loop doesn't pay a cross-module call for it.
   @compile {:inline,
-            nmi?: 1, poll_nmi_line: 2, peek: 2, peek16: 2, irq_pending?: 1, nmi_sensitive_addr?: 1}
+            nmi?: 1,
+            poll_nmi_line: 2,
+            bulk_poll: 3,
+            peek: 2,
+            peek16: 2,
+            irq_pending?: 1,
+            nmi_sensitive_addr?: 1,
+            adv: 2,
+            page_crossed?: 2,
+            ld: 3,
+            set: 3,
+            set_zn: 2}
 
   defstruct a: 0,
             x: 0,
@@ -221,14 +232,29 @@ defmodule Beamicom.NES.CPU do
   # vector reads dominate the interpreter and never need register side effects;
   # keeping their dispatch local lets the compiler inline the common PRG/RAM
   # paths while preserving Bus.peek/2's exact address map.
+  defp peek(%Bus{mapper: 5} = bus, addr) when addr >= 0x8000, do: Bus.peek(bus, addr)
+
   defp peek(%Bus{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
     do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
 
   defp peek(%Bus{ram: ram}, addr) when addr in 0x0000..0x1FFF,
     do: :binary.at(ram, addr &&& 0x07FF)
 
-  defp peek(%Bus{wram: wram}, addr) when addr in 0x6000..0x7FFF,
-    do: Map.get(wram, addr, 0)
+  defp peek(%Bus{mapper: 4, mapper_state: %{submapper: 1}} = bus, addr)
+       when addr in 0x6000..0x7FFF,
+       do: Bus.peek(bus, addr)
+
+  defp peek(
+         %Bus{
+           wram: wram,
+           mapper_state: %{wram_source: :ram, wram_enabled: true, wram_bank: 0}
+         },
+         addr
+       )
+       when addr in 0x6000..0x7FFF,
+       do: Map.get(wram, addr, 0)
+
+  defp peek(%Bus{} = bus, addr) when addr in 0x6000..0x7FFF, do: Bus.peek(bus, addr)
 
   defp peek(%Bus{mapper: 5, ppu: %{exram_mode: mode, exram: exram}}, addr)
        when addr in 0x5C00..0x5FFF and mode >= 2,
@@ -555,9 +581,19 @@ defmodule Beamicom.NES.CPU do
 
   # --- shared operation helpers ---
 
-  defp ld(cpu, reg, v) do
+  defp ld(cpu, :a, v) do
     v = v &&& 0xFF
-    %{cpu | reg => v, p: set_zn(cpu.p, v)}
+    %{cpu | a: v, p: set_zn(cpu.p, v)}
+  end
+
+  defp ld(cpu, :x, v) do
+    v = v &&& 0xFF
+    %{cpu | x: v, p: set_zn(cpu.p, v)}
+  end
+
+  defp ld(cpu, :y, v) do
+    v = v &&& 0xFF
+    %{cpu | y: v, p: set_zn(cpu.p, v)}
   end
 
   defp adc(cpu, operand) do

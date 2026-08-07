@@ -22,11 +22,15 @@ defmodule Beamicom.NES.MapperTest do
 
   defp chr0(bus), do: elem(bus.ppu.chr_banks, 0)
 
+  defp mapper_state(bus, values),
+    do: %{bus | mapper_state: Map.merge(bus.mapper_state, Map.new(values))}
+
   # MMC1 register write = five serial writes of the low bit, LSB first.
   defp mmc1(bus, addr, val), do: Enum.reduce(0..4, bus, &Bus.write(&2, addr, val >>> &1 &&& 1))
 
   test "UxROM switches the $8000 bank and keeps $C000 fixed to the last bank" do
-    bus = bus(2)
+    # NES 2.0 submapper 1 identifies a conflict-free board.
+    bus = mapper_state(bus(2), submapper: 1)
     assert Bus.peek(bus, 0x8000) == 0
     assert Bus.peek(bus, 0xC000) == 3
 
@@ -51,6 +55,48 @@ defmodule Beamicom.NES.MapperTest do
     # 0x0E = PRG mode 3 (bits 2-3) + vertical mirroring (bits 0-1 = 2).
     bus = mmc1(bus(1), 0x8000, 0x0E)
     assert bus.ppu.mirroring == :vertical
+  end
+
+  test "MMC1 uses CHR bit 4 as the outer PRG bank on 512KB SUROM boards" do
+    prg = for i <- 0..31, into: <<>>, do: :binary.copy(<<i>>, 0x4000)
+
+    cart = %Cart{
+      mapper: 1,
+      prg_rom: prg,
+      chr_rom: <<>>,
+      prg_ram_size: 0x2000,
+      mirroring: :horizontal,
+      battery: false
+    }
+
+    bus = Bus.new(cart, PPU.new(<<>>, :horizontal))
+    bus = bus |> mmc1(0xA000, 0x10) |> mmc1(0xE000, 2)
+
+    assert Bus.peek(bus, 0x8000) == 18
+    assert Bus.peek(bus, 0xC000) == 31
+  end
+
+  test "MMC1 banks larger PRG-RAM and honors the PRG register disable bit" do
+    bus = mapper_state(bus(1), prg_ram_size: 0x8000)
+    bus = bus |> mmc1(0xA000, 0x08) |> Bus.write(0x6000, 0xAA)
+    assert Bus.peek(bus, 0x6000) == 0xAA
+
+    bus = mmc1(bus, 0xA000, 0x00)
+    assert Bus.peek(bus, 0x6000) == 0
+    bus = Bus.write(bus, 0x6000, 0x55)
+
+    bus = mmc1(bus, 0xA000, 0x08)
+    assert Bus.peek(bus, 0x6000) == 0xAA
+
+    bus = mmc1(bus, 0xE000, 0x10)
+    assert Bus.peek(bus, 0x6000) == 0
+    assert Bus.write(bus, 0x6000, 0x11).wram == bus.wram
+  end
+
+  test "MMC1 submapper 5 keeps its 32KB PRG ROM fixed" do
+    bus = mapper_state(bus(1), submapper: 5) |> mmc1(0xE000, 3)
+    assert Bus.peek(bus, 0x8000) == 0
+    assert Bus.peek(bus, 0xC000) == 1
   end
 
   test "MMC3 switches an 8KB PRG bank via bank-select then bank-data" do
@@ -82,24 +128,131 @@ defmodule Beamicom.NES.MapperTest do
     assert bus.irq_pending
   end
 
+  test "MMC3 $A001 enables and write-protects PRG-RAM" do
+    bus = bus(4) |> Bus.write(0x6000, 0x11) |> Bus.write(0xA001, 0x00)
+    assert Bus.peek(bus, 0x6000) == 0
+    assert Bus.write(bus, 0x6000, 0x22).wram == bus.wram
+
+    bus = Bus.write(bus, 0xA001, 0xC0)
+    assert Bus.peek(bus, 0x6000) == 0x11
+    assert Bus.write(bus, 0x6000, 0x22).wram == bus.wram
+
+    bus = bus |> Bus.write(0xA001, 0x80) |> Bus.write(0x6000, 0x33)
+    assert Bus.peek(bus, 0x6000) == 0x33
+  end
+
+  test "MMC6 submapper controls its two mirrored 512-byte RAM halves" do
+    bus = mapper_state(bus(4), submapper: 1)
+
+    # $8000 bit 5 globally enables RAM; $A001 HhLl enables read/write per half.
+    bus = bus |> Bus.write(0x8000, 0x20) |> Bus.write(0xA001, 0xF0)
+    bus = bus |> Bus.write(0x7000, 0x11) |> Bus.write(0x7200, 0x22)
+    assert Bus.peek(bus, 0x7000) == 0x11
+    assert Bus.peek(bus, 0x7400) == 0x11
+    assert Bus.peek(bus, 0x7200) == 0x22
+
+    # Disable writes to the low half while leaving both halves readable.
+    protected = Bus.write(bus, 0xA001, 0xE0)
+    assert Bus.write(protected, 0x7000, 0x33).wram == protected.wram
+    assert Bus.write(protected, 0x7200, 0x44) |> Bus.peek(0x7200) == 0x44
+
+    disabled = Bus.write(protected, 0x8000, 0x00)
+    assert Bus.peek(disabled, 0x7000) == 0
+  end
+
   test "CNROM switches the 8KB CHR bank, PRG stays fixed" do
-    bus = Bus.write(bus_chr(3), 0x8000, 2)
+    bus = bus_chr(3) |> mapper_state(submapper: 1) |> Bus.write(0x8000, 2)
     assert chr0(bus) == 0x4000
     assert Bus.peek(bus, 0x8000) == 0
   end
 
   test "GxROM sets PRG (bits 4-5) and CHR (bits 0-1) from one byte" do
     # $12 → PRG 32KB bank 1 (8KB bank 4 = 16KB bank 2 = value 2), CHR 8KB bank 2.
-    bus = Bus.write(bus_chr(66), 0x8000, 0x12)
+    bus = Mapper.write(bus_chr(66), 0x8000, 0x12)
     assert Bus.peek(bus, 0x8000) == 2
     assert chr0(bus) == 0x4000
   end
 
   test "Color Dreams sets PRG (bits 0-1) and CHR (bits 4-7)" do
     # $21 → PRG 32KB bank 1 (value 2), CHR 8KB bank 2.
-    bus = Bus.write(bus_chr(11), 0x8000, 0x21)
+    bus = Mapper.write(bus_chr(11), 0x8000, 0x21)
     assert Bus.peek(bus, 0x8000) == 2
     assert chr0(bus) == 0x4000
+  end
+
+  test "BNROM switches its complete 32KB PRG window" do
+    bus = Mapper.write(bus(34), 0x8000, 1)
+    assert Bus.peek(bus, 0x8000) == 2
+    assert Bus.peek(bus, 0xC000) == 3
+  end
+
+  test "discrete mappers apply board-specific bus conflicts" do
+    # The fixture's visible byte at $8000 is zero, so a conflicting write is
+    # masked to zero before it reaches the bank register.
+    uxrom = Bus.write(bus(2), 0x8000, 2)
+    assert Bus.peek(uxrom, 0x8000) == 0
+
+    # AxROM defaults to conflict-free; NES 2.0 submapper 2 opts into conflicts.
+    axrom = Bus.write(bus(7), 0x8000, 1)
+    assert Bus.peek(axrom, 0x8000) == 2
+
+    axrom_conflicting = bus(7) |> mapper_state(submapper: 2) |> Bus.write(0x8000, 1)
+    assert Bus.peek(axrom_conflicting, 0x8000) == 0
+
+    gxrom = Bus.write(bus_chr(66), 0x8000, 0x12)
+    assert Bus.peek(gxrom, 0x8000) == 0
+    assert chr0(gxrom) == 0
+
+    bnrom = Bus.write(bus(34), 0x8000, 1)
+    assert Bus.peek(bnrom, 0x8000) == 0
+  end
+
+  test "TxSROM derives per-nametable CIRAM pages from its CHR registers" do
+    bus = bus_chr(118)
+
+    # CHR inversion maps R2-R5 into the first pattern table and therefore makes
+    # their bit 7 select each of the four 1KB nametable pages independently.
+    bus = bus |> Bus.write(0x8000, 0x82) |> Bus.write(0x8001, 0x80)
+    bus = bus |> Bus.write(0x8000, 0x83) |> Bus.write(0x8001, 0x00)
+    bus = bus |> Bus.write(0x8000, 0x84) |> Bus.write(0x8001, 0x80)
+    bus = bus |> Bus.write(0x8000, 0x85) |> Bus.write(0x8001, 0x00)
+
+    assert bus.ppu.nt_source == {1, 0, 1, 0}
+    assert Bus.write(bus, 0xA000, 0).ppu.nt_source == {1, 0, 1, 0}
+  end
+
+  test "TQROM selects CHR ROM or writable CHR RAM per bank" do
+    bus = bus_chr(119) |> Bus.write(0x8000, 0) |> Bus.write(0x8001, 0x40)
+    assert elem(bus.ppu.chr_banks, 0) < 0
+    assert elem(bus.ppu.chr_banks, 1) < 0
+
+    ppu =
+      bus.ppu
+      |> PPU.write_register(0x2006, 0)
+      |> PPU.write_register(0x2006, 0)
+      |> PPU.write_register(0x2007, 0xAA)
+
+    assert ppu.chr_ram[0] == 0xAA
+
+    rom = %{bus | ppu: ppu} |> Bus.write(0x8000, 0) |> Bus.write(0x8001, 0)
+    assert elem(rom.ppu.chr_banks, 0) == 0
+  end
+
+  test "DxROM/Namco 108 switches banks without MMC3 mode or IRQ controls" do
+    bus = bus_chr(206)
+
+    # Upper bank-select bits do not exist: $C6 still selects R6.
+    bus = bus |> Bus.write(0x8000, 0xC6) |> Bus.write(0x8001, 2)
+    assert Bus.peek(bus, 0x8000) == 1
+    assert Bus.peek(bus, 0xC000) == 3
+
+    bus = bus |> Bus.write(0x8000, 0) |> Bus.write(0x8001, 4)
+    assert elem(bus.ppu.chr_banks, 0) == 0x1000
+    assert elem(bus.ppu.chr_banks, 1) == 0x1400
+
+    unchanged = bus |> Bus.write(0xC000, 1) |> Bus.write(0xE001, 0) |> Mapper.clock_irq(2)
+    refute unchanged.irq_enabled
+    refute unchanged.irq_pending
   end
 
   test "FME-7 selects an 8KB PRG bank via command + parameter ports" do
@@ -123,6 +276,28 @@ defmodule Beamicom.NES.MapperTest do
     assert Mapper.clock_cpu_irq(bus, 3).irq_pending
   end
 
+  test "FME-7 command 8 banks ROM or enabled PRG-RAM at $6000" do
+    # ROM bank 2 contains byte 1 in the fixture's 16KB-filled layout.
+    bus = mapper_state(bus(69), prg_ram_size: 0x4000)
+    bus = bus |> Bus.write(0x8000, 8) |> Bus.write(0xA000, 2)
+    assert Bus.peek(bus, 0x6000) == 1
+
+    # Bit 6 selects RAM and bit 7 enables it; low bits select the RAM bank.
+    bus = bus |> Bus.write(0xA000, 0xC1) |> Bus.write(0x6000, 0xAA)
+    assert Bus.peek(bus, 0x6000) == 0xAA
+    assert Bus.write(bus, 0xA000, 0xC0) |> Bus.peek(0x6000) == 0
+
+    disabled = Bus.write(bus, 0xA000, 0x41)
+    assert Bus.peek(disabled, 0x6000) == 0
+    assert Bus.write(disabled, 0x6000, 0x55).wram == disabled.wram
+  end
+
+  test "Sunsoft 5B audio ports select and write its internal registers" do
+    bus = bus(69) |> Bus.write(0xC000, 2) |> Bus.write(0xE000, 0x34)
+    assert elem(bus.apu.sunsoft5b.regs, 2) == 0x34
+    assert bus.apu.pending == 0
+  end
+
   test "MMC2 latch CHR register selects the bank under the default (FE) latch" do
     # $C000 sets the table-0 FE bank; the latch defaults to FE, so it's active.
     bus = Bus.write(bus_chr(9), 0xC000, 3)
@@ -130,10 +305,38 @@ defmodule Beamicom.NES.MapperTest do
   end
 
   test "MMC5 banks 8KB PRG (mode 3) and sets per-nametable source" do
-    bus = Bus.write(bus_chr(5), 0x5114, 2)
+    bus = Bus.write(bus_chr(5), 0x5114, 0x82)
     assert Bus.peek(bus, 0x8000) == 1
     # $5105 = $44 → sources {CIRAM0, CIRAM1, CIRAM0, CIRAM1} (vertical mirroring).
     assert Bus.write(bus_chr(5), 0x5105, 0x44).ppu.nt_source == {0, 1, 0, 1}
+  end
+
+  test "MMC5 maps banked PRG-RAM into $6000 and $8000 and enforces write protection" do
+    bus = mapper_state(bus_chr(5), prg_ram_size: 0x8000)
+
+    bus =
+      bus
+      |> Bus.write(0x5102, 2)
+      |> Bus.write(0x5103, 1)
+      |> Bus.write(0x5113, 2)
+      |> Bus.write(0x6000, 0x66)
+      |> Bus.write(0x5114, 1)
+      |> Bus.write(0x8000, 0xAA)
+
+    assert Bus.peek(bus, 0x6000) == 0x66
+    assert Bus.peek(bus, 0x8000) == 0xAA
+    assert bus |> Bus.write(0x5114, 0) |> Bus.peek(0x8000) == 0
+    assert bus |> Bus.write(0x5114, 0x82) |> Bus.peek(0x8000) == 1
+
+    protected = Bus.write(bus, 0x5102, 0)
+    assert Bus.write(protected, 0x8000, 0x55).wram == protected.wram
+  end
+
+  test "MMC5 reapplies latched PRG registers when its PRG mode changes" do
+    bus = bus_chr(5) |> Bus.write(0x5115, 0x84) |> Bus.write(0x5100, 2)
+    assert Bus.peek(bus, 0x8000) == 2
+    assert Bus.peek(bus, 0xA000) == 2
+    assert Bus.peek(bus, 0xE000) == 3
   end
 
   test "MMC5 keeps separate sprite ($5120-27) and background ($5128-2B) CHR banks" do

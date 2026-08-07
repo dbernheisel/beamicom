@@ -77,6 +77,28 @@ defmodule Beamicom.NES.APUTest do
     assert loud > quiet
   end
 
+  test "Sunsoft 5B tone registers contribute an oscillating expansion channel" do
+    apu =
+      APU.new()
+      |> APU.sunsoft5b_select(0)
+      |> APU.sunsoft5b_write(100)
+      |> APU.sunsoft5b_select(1)
+      |> APU.sunsoft5b_write(0)
+      # Tone A enabled; all other tones and all noise inputs disabled.
+      |> APU.sunsoft5b_select(7)
+      |> APU.sunsoft5b_write(0x3E)
+      |> APU.sunsoft5b_select(8)
+      |> APU.sunsoft5b_write(15)
+
+    {samples, _apu} = apu |> APU.tick(50_000) |> APU.take_samples()
+    assert Enum.max(samples) - Enum.min(samples) > 2_000
+  end
+
+  test "Sunsoft 5B register select high nibble disables data writes" do
+    apu = APU.new() |> APU.sunsoft5b_select(0x10) |> APU.sunsoft5b_write(0xFF)
+    assert elem(apu.sunsoft5b.regs, 0) == 0
+  end
+
   test "an enabled noise channel in envelope mode produces sound (whip/whoosh)" do
     # Castlevania 3's whip swing is a noise burst in *envelope* mode: constant
     # flag clear, so volume comes from the decay counter (starts at 15), not the

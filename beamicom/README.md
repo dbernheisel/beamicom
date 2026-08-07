@@ -39,8 +39,9 @@ fire-and-forget. Sinks subscribe via `Beamicom.NES.Output.subscribe_video/0`,
 - **CPU** — 6502 core
 - **PPU** — per-scanline rendering
 - **APU** — pulse/triangle/noise/DMC, plus MMC5's extra channels
-- **Mappers** — 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3, 5 MMC5, 7 AxROM,
-  9 MMC2 / 10 MMC4, 11 Color Dreams / 66 GxROM, 69 Sunsoft FME-7
+- **Mappers** — 16 mapper numbers are implemented; see the complete
+  [supported and unsupported mapper compatibility matrix](MAPPERS.md), including
+  board-level limitations and NES 2.0 submapper coverage
 - **Input** — two controller ports (`Beamicom.NES.Runtime.set_buttons/3`)
 
 ## Usage

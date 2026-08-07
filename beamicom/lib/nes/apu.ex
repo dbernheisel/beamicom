@@ -14,9 +14,16 @@ defmodule Beamicom.NES.APU do
 
   import Bitwise
 
-  alias Beamicom.NES.APU.{DMC, Noise, Pulse, Triangle}
+  alias Beamicom.NES.APU.{DMC, Noise, Pulse, Sunsoft5B, Triangle}
 
-  @compile {:inline, bool: 2, clamp: 1, tri_level: 1, clock_length: 1, sweep_target: 1, filter: 2}
+  @compile {:inline,
+            bool: 2,
+            clamp: 1,
+            tri_level: 1,
+            clock_length: 1,
+            sweep_target: 1,
+            filter: 2,
+            lfsr_step: 2}
 
   @sample_rate 44_100
   @cpu_hz 1_789_773
@@ -72,6 +79,9 @@ defmodule Beamicom.NES.APU do
             m5p2: nil,
             m5pcm: 0,
             m5seq: 0,
+            # Mapper 69's optional Sunsoft 5B/YM2149 expansion audio. Kept as a
+            # nested state so ordinary 2A03/MMC5 APU updates add only one field.
+            sunsoft5b: nil,
             # DMC (delta modulation): `dmc` holds the channel state as a
             # `Beamicom.NES.APU.DMC` sub-struct (nil until the game first touches
             # the DMC — keeps the hot APU map small so non-DMC games pay nothing).
@@ -96,6 +106,20 @@ defmodule Beamicom.NES.APU do
       m5p1: %Pulse{},
       m5p2: %Pulse{}
     }
+  end
+
+  @doc "Select a Sunsoft 5B internal audio register ($C000-$DFFF)."
+  def sunsoft5b_select(apu, value) do
+    apu = flush(apu)
+    state = Sunsoft5B.select(apu.sunsoft5b || %Sunsoft5B{}, value)
+    %{apu | sunsoft5b: state}
+  end
+
+  @doc "Write the selected Sunsoft 5B audio register ($E000-$FFFF)."
+  def sunsoft5b_write(apu, value) do
+    apu = flush(apu)
+    state = Sunsoft5B.write(apu.sunsoft5b || %Sunsoft5B{}, value)
+    %{apu | sunsoft5b: state}
   end
 
   @doc "MMC5 sound register write ($5000-$5015)."
@@ -402,6 +426,10 @@ defmodule Beamicom.NES.APU do
     # Inline gate: `dmc` is nil until a game first uses the DMC, so non-DMC games
     # skip the call entirely (the per-segment call overhead is what profiles show).
     apu = if apu.dmc, do: advance_dmc(apu, dc), else: apu
+
+    apu =
+      if apu.sunsoft5b, do: %{apu | sunsoft5b: Sunsoft5B.advance(apu.sunsoft5b, dc)}, else: apu
+
     emit_sample(apu)
   end
 
@@ -497,11 +525,35 @@ defmodule Beamicom.NES.APU do
     {timer2, lfsr(shift, mode, steps)}
   end
 
-  defp lfsr(shift, _mode, 0), do: shift
+  defp lfsr(shift, false, steps), do: lfsr_long(shift, steps)
+  defp lfsr(shift, true, steps), do: lfsr_short(shift, steps)
 
-  defp lfsr(shift, mode, steps) do
-    fb = bxor(shift, shift >>> if(mode, do: 6, else: 1)) &&& 1
-    lfsr(shift >>> 1 ||| fb <<< 14, mode, steps - 1)
+  # Noise periods can be as low as four CPU/2 clocks, producing several LFSR
+  # transitions per sample segment. Four-way unrolling removes most recursive
+  # calls while preserving the exact bit sequence.
+  defp lfsr_long(shift, steps) when steps >= 4 do
+    shift = lfsr_step(shift, 1)
+    shift = lfsr_step(shift, 1)
+    shift = lfsr_step(shift, 1)
+    lfsr_long(lfsr_step(shift, 1), steps - 4)
+  end
+
+  defp lfsr_long(shift, 0), do: shift
+  defp lfsr_long(shift, steps), do: lfsr_long(lfsr_step(shift, 1), steps - 1)
+
+  defp lfsr_short(shift, steps) when steps >= 4 do
+    shift = lfsr_step(shift, 6)
+    shift = lfsr_step(shift, 6)
+    shift = lfsr_step(shift, 6)
+    lfsr_short(lfsr_step(shift, 6), steps - 4)
+  end
+
+  defp lfsr_short(shift, 0), do: shift
+  defp lfsr_short(shift, steps), do: lfsr_short(lfsr_step(shift, 6), steps - 1)
+
+  defp lfsr_step(shift, tap) do
+    fb = bxor(shift, shift >>> tap) &&& 1
+    shift >>> 1 ||| fb <<< 14
   end
 
   defp mmc5_frame(ch), do: ch |> clock_env() |> clock_length()
@@ -674,7 +726,15 @@ defmodule Beamicom.NES.APU do
     tnd =
       3 * tri_level(apu.tri_seq) + 2 * noise_level(apu.noise, apu.noise_shift) + dmc_level(apu)
 
-    pulse_out + elem(@tnd_table, tnd) + mmc5_out(apu)
+    expansion =
+      cond do
+        apu.m5_active and apu.sunsoft5b != nil -> mmc5_out(apu) + Sunsoft5B.output(apu.sunsoft5b)
+        apu.m5_active -> mmc5_out(apu)
+        apu.sunsoft5b != nil -> Sunsoft5B.output(apu.sunsoft5b)
+        true -> 0.0
+      end
+
+    pulse_out + elem(@tnd_table, tnd) + expansion
   end
 
   defp dmc_level(%{dmc: %DMC{output: o}}), do: o
@@ -700,8 +760,6 @@ defmodule Beamicom.NES.APU do
 
   # MMC5 sound sums with the 2A03 output (exact blend unspecified; approximated
   # with the pulse curve + linear PCM).
-  defp mmc5_out(%{m5_active: false}), do: 0.0
-
   defp mmc5_out(apu) do
     m5 = m5_pulse_level(apu.m5p1, apu.m5p1_seq) + m5_pulse_level(apu.m5p2, apu.m5p2_seq)
     elem(@m5_pulse_table, m5) + elem(@m5pcm_table, apu.m5pcm)

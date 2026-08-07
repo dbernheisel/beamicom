@@ -41,17 +41,29 @@ defmodule Beamicom.NES.SaveStateTest do
     assert {:error, :crc_mismatch} = SaveState.merge(state_bin, bad_blob)
   end
 
-  test "merge upgrades v1 saves created before the bus APU accumulator" do
+  test "merge upgrades v1 saves created before newer bus fields" do
     c = loaded_console()
     {state_bin, rom_blob} = SaveState.split(c)
     saved = :erlang.binary_to_term(:zlib.uncompress(state_bin))
-    legacy_console = %{saved.console | bus: Map.delete(saved.console.bus, :apu_pending)}
+    # Simulate the old wide Bus struct: mapper fields lived at the top level and
+    # newer general fields such as apu_pending did not exist.
+    legacy_bus =
+      saved.console.bus
+      |> Map.delete(:apu_pending)
+      |> Map.delete(:mapper_state)
+      |> Map.put(:shift, saved.console.bus.mapper_state.shift)
+      |> Map.put(:ctrl, saved.console.bus.mapper_state.ctrl)
+      |> Map.put(:wram_source, :ram)
+
+    legacy_console = %{saved.console | bus: legacy_bus}
 
     legacy_state =
       :zlib.compress(:erlang.term_to_binary(%{saved | console: legacy_console}))
 
     assert {:ok, restored} = SaveState.merge(legacy_state, rom_blob)
     assert restored.bus.apu_pending == 0
+    assert restored.bus.mapper_state.wram_source == :ram
+    assert restored.bus.mapper_state.m5_prg_regs == {0, 0x80, 0x81, 0x82, 0xFF}
     assert %Console{} = Console.step(restored)
   end
 

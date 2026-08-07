@@ -1,16 +1,16 @@
 defmodule Beamicom.NES.Bus do
   @moduledoc """
   CPU-visible memory map: 2KB internal RAM (mirrored to $1FFF), PPU registers
-  ($2000-$3FFF, mirrored every 8), OAM DMA ($4014), 8KB cartridge PRG-RAM
-  ($6000-$7FFF), and mapper-banked PRG-ROM ($8000-$FFFF as two 16KB windows
-  selected by `prg_lo`/`prg_hi`). APU/controller registers read back 0 for now.
+  ($2000-$3FFF, mirrored every 8), OAM DMA ($4014), cartridge PRG-RAM
+  ($6000-$7FFF), and mapper-banked PRG-ROM ($8000-$FFFF as four 8KB windows).
 
   Reads split in two: `peek/2` is a pure view for the instruction stream, zero
   page pointers, the stack, and vectors (never register space); `read/2` returns
   `{value, bus}` because PPU register reads mutate. `ppu` may be nil for headless
   CPU-only runs. Writes to $8000-$FFFF are cartridge mapper register writes,
-  dispatched to `Beamicom.NES.Mapper`, which also carries the MMC1 shift-register state
-  (`shift`/`shift_count`/`ctrl`/`chr0`/`chr1`/`prg_reg`).
+  dispatched to `Beamicom.NES.Mapper`. Mapper-specific registers and uncommon
+  routing flags live together in `mapper_state`; only mapper identity, PRG bank
+  offsets, and IRQ projections remain top-level because CPU execution polls them.
 
   ## Sources
     * NESdev Wiki — CPU memory map: https://www.nesdev.org/wiki/CPU_memory_map
@@ -24,6 +24,41 @@ defmodule Beamicom.NES.Bus do
   # the smaller Bus state so the large APU struct is not rebuilt every step.
   @apu_flush_threshold 100
 
+  @default_mapper_state %{
+    submapper: 0,
+    prg_ram_size: 0x2000,
+    wram_source: :ram,
+    wram_enabled: true,
+    wram_writable: true,
+    wram_bank: 0,
+    prg_ram_windows: 0,
+    shift: 0,
+    shift_count: 0,
+    ctrl: 0x0C,
+    chr0: 0,
+    chr1: 0,
+    prg_reg: 0,
+    bank_select: 0,
+    regs: {0, 0, 0, 0, 0, 0, 0, 0},
+    mmc6_ram_enabled: false,
+    mmc6_read_mask: 0,
+    mmc6_write_mask: 0,
+    irq_latch: 0,
+    irq_counter: 0,
+    irq_reload: false,
+    fme_cmd: 0,
+    fme_count_on: false,
+    prg_mode: 3,
+    chr_mode: 3,
+    m5_prg_regs: {0, 0x80, 0x81, 0x82, 0xFF},
+    m5_protect1: 1,
+    m5_protect2: 2,
+    mul_a: 0,
+    mul_b: 0,
+    chr_regs: {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    chr_hi: 0
+  }
+
   defstruct [
     :ram,
     :wram,
@@ -33,38 +68,17 @@ defmodule Beamicom.NES.Bus do
     pad1: %{buttons: 0, index: 0, strobe: false},
     pad2: %{buttons: 0, index: 0, strobe: false},
     mapper: 0,
+    mapper_state: @default_mapper_state,
     # PRG as four 8KB window offsets ($8000/$A000/$C000/$E000).
     prg_banks: {0, 0x2000, 0, 0x2000},
-    # MMC1 shift register + latched registers.
-    shift: 0,
-    shift_count: 0,
-    ctrl: 0x0C,
-    chr0: 0,
-    chr1: 0,
-    prg_reg: 0,
-    # MMC3 bank registers + scanline IRQ.
-    bank_select: 0,
-    regs: {0, 0, 0, 0, 0, 0, 0, 0},
-    irq_latch: 0,
-    irq_counter: 0,
-    irq_reload: false,
+    # IRQ line projections stay top-level because the CPU polls them every instruction.
     irq_enabled: false,
     irq_pending: false,
-    # FME-7 command latch + counter-enable.
-    fme_cmd: 0,
-    fme_count_on: false,
-    # MMC5 PRG/CHR bank modes + 8x8 hardware multiplier + 1KB ExRAM.
-    prg_mode: 3,
-    chr_mode: 3,
-    mul_a: 0,
-    mul_b: 0,
-    # MMC5 CHR bank registers (0-7 = $5120-$5127 sprite, 8-11 = $5128-$512B bg)
-    # + $5130 upper bank bits.
-    chr_regs: {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    chr_hi: 0,
     apu: nil,
     apu_pending: 0
   ]
+
+  def default_mapper_state, do: @default_mapper_state
 
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
     bus = %__MODULE__{
@@ -73,6 +87,11 @@ defmodule Beamicom.NES.Bus do
       prg: cart.prg_rom,
       ppu: ppu,
       mapper: cart.mapper,
+      mapper_state: %{
+        @default_mapper_state
+        | submapper: cart.submapper || 0,
+          prg_ram_size: (cart.prg_ram_size || 0) + (cart.prg_nvram_size || 0)
+      },
       apu: Beamicom.NES.APU.new()
     }
 
@@ -165,6 +184,19 @@ defmodule Beamicom.NES.Bus do
     do: {true, %{bus | ppu: %{ppu | nmi_suppress: false}}}
 
   @doc "Pure read for instruction/stack/vector fetches (never register space)."
+  def peek(
+        %__MODULE__{mapper: 5, mapper_state: %{prg_ram_windows: ram_windows}} = bus,
+        addr
+      )
+      when addr >= 0x8000 do
+    window = (addr - 0x8000) >>> 13
+    offset = elem(bus.prg_banks, window) + (addr &&& 0x1FFF)
+
+    if (ram_windows &&& 1 <<< window) != 0,
+      do: Map.get(bus.wram, ram_key(bus, offset), 0),
+      else: :binary.at(bus.prg, rem(offset, byte_size(bus.prg)))
+  end
+
   # PRG-ROM first: code/operand fetches are by far the most common read.
   def peek(%__MODULE__{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
     do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
@@ -172,8 +204,30 @@ defmodule Beamicom.NES.Bus do
   def peek(%__MODULE__{} = bus, addr) when addr in 0x0000..0x1FFF,
     do: :binary.at(bus.ram, addr &&& 0x07FF)
 
-  def peek(%__MODULE__{} = bus, addr) when addr in 0x6000..0x7FFF,
-    do: Map.get(bus.wram, addr, 0)
+  def peek(%__MODULE__{mapper_state: %{wram_source: :rom} = ms} = bus, addr)
+      when addr in 0x6000..0x7FFF do
+    offset = ms.wram_bank * 0x2000 + (addr &&& 0x1FFF)
+    :binary.at(bus.prg, rem(offset, byte_size(bus.prg)))
+  end
+
+  def peek(
+        %__MODULE__{mapper: 4, mapper_state: %{submapper: 1} = ms} = bus,
+        addr
+      )
+      when addr in 0x6000..0x7FFF do
+    half = addr >>> 9 &&& 1
+
+    if addr >= 0x7000 and ms.mmc6_ram_enabled and (ms.mmc6_read_mask &&& 1 <<< half) != 0,
+      do: Map.get(bus.wram, 0x6000 + (addr &&& 0x03FF), 0),
+      else: 0
+  end
+
+  def peek(%__MODULE__{mapper_state: %{wram_enabled: false}}, addr)
+      when addr in 0x6000..0x7FFF,
+      do: 0
+
+  def peek(%__MODULE__{mapper_state: ms} = bus, addr) when addr in 0x6000..0x7FFF,
+    do: Map.get(bus.wram, ram_key(bus, ms.wram_bank * 0x2000 + (addr &&& 0x1FFF)), 0)
 
   # MMC5 ExRAM is CPU-addressable (even executable) in the work-RAM modes (2/3).
   def peek(%__MODULE__{mapper: 5, ppu: %{exram_mode: m, exram: ex}}, addr)
@@ -288,14 +342,99 @@ defmodule Beamicom.NES.Bus do
   def write(%__MODULE__{mapper: 5} = bus, addr, val) when addr in 0x4020..0x5FFF,
     do: Mapper.write(bus, addr, val &&& 0xFF)
 
-  def write(%__MODULE__{} = bus, addr, val) when addr in 0x6000..0x7FFF,
-    do: %{bus | wram: Map.put(bus.wram, addr, val &&& 0xFF)}
+  def write(%__MODULE__{mapper: 4, mapper_state: %{submapper: 1} = ms} = bus, addr, val)
+      when addr in 0x6000..0x7FFF do
+    half = addr >>> 9 &&& 1
 
-  # Cartridge mapper register writes.
+    if addr >= 0x7000 and ms.mmc6_ram_enabled and
+         (ms.mmc6_read_mask &&& 1 <<< half) != 0 and
+         (ms.mmc6_write_mask &&& 1 <<< half) != 0 do
+      %{bus | wram: Map.put(bus.wram, 0x6000 + (addr &&& 0x03FF), val &&& 0xFF)}
+    else
+      bus
+    end
+  end
+
+  def write(
+        %__MODULE__{
+          mapper_state: %{
+            wram_source: :ram,
+            wram_enabled: true,
+            wram_writable: true,
+            wram_bank: bank
+          }
+        } = bus,
+        addr,
+        val
+      )
+      when addr in 0x6000..0x7FFF do
+    key = ram_key(bus, bank * 0x2000 + (addr &&& 0x1FFF))
+    %{bus | wram: Map.put(bus.wram, key, val &&& 0xFF)}
+  end
+
+  def write(%__MODULE__{} = bus, addr, _val) when addr in 0x6000..0x7FFF, do: bus
+
+  # Sunsoft 5B expansion audio ports. Plain FME-7 cartridges ignore the audio
+  # output electrically, so accepting these writes is harmless for both variants.
+  def write(%__MODULE__{mapper: 69} = bus, addr, val) when addr in 0xC000..0xDFFF do
+    bus = sync_apu(bus)
+    %{bus | apu: Beamicom.NES.APU.sunsoft5b_select(bus.apu, val &&& 0xFF)}
+  end
+
+  def write(%__MODULE__{mapper: 69} = bus, addr, val) when addr in 0xE000..0xFFFF do
+    bus = sync_apu(bus)
+    %{bus | apu: Beamicom.NES.APU.sunsoft5b_write(bus.apu, val &&& 0xFF)}
+  end
+
+  # MMC5's $5114-$5116 may replace $8000-$DFFF with writable PRG-RAM.
+  def write(
+        %__MODULE__{mapper: 5, mapper_state: %{prg_ram_windows: ram_windows}} = bus,
+        addr,
+        val
+      )
+      when addr in 0x8000..0xFFFF do
+    window = (addr - 0x8000) >>> 13
+
+    if (ram_windows &&& 1 <<< window) != 0 and mmc5_ram_writable?(bus) do
+      offset = elem(bus.prg_banks, window) + (addr &&& 0x1FFF)
+      %{bus | wram: Map.put(bus.wram, ram_key(bus, offset), val &&& 0xFF)}
+    else
+      bus
+    end
+  end
+
+  # Cartridge mapper register writes.  Discrete-logic boards commonly drive the
+  # CPU data bus at the same time as ROM, so the mapper sees the bitwise AND of
+  # the written value and the currently mapped ROM byte.
   def write(%__MODULE__{} = bus, addr, val) when addr in 0x8000..0xFFFF,
-    do: Mapper.write(bus, addr, val &&& 0xFF)
+    do: Mapper.write(bus, addr, mapper_write_value(bus, addr, val &&& 0xFF))
 
   def write(%__MODULE__{} = bus, _addr, _val), do: bus
+
+  defp ram_key(bus, offset),
+    do: 0x6000 + rem(offset, max(bus.mapper_state.prg_ram_size, 0x2000))
+
+  defp mmc5_ram_writable?(bus),
+    do: bus.mapper_state.m5_protect1 == 2 and bus.mapper_state.m5_protect2 == 1
+
+  # NES 2.0 submapper 1 marks conflict-free UxROM/CNROM boards. AxROM's default
+  # submapper is conflict-free; submapper 2 explicitly has bus conflicts.
+  defp mapper_write_value(
+         %__MODULE__{mapper: mapper, mapper_state: %{submapper: sub}} = bus,
+         addr,
+         val
+       )
+       when mapper in [2, 3] and sub in [0, 2],
+       do: val &&& peek(bus, addr)
+
+  defp mapper_write_value(%__MODULE__{mapper: 7, mapper_state: %{submapper: 2}} = bus, addr, val),
+    do: val &&& peek(bus, addr)
+
+  defp mapper_write_value(%__MODULE__{mapper: mapper} = bus, addr, val)
+       when mapper in [11, 34, 66],
+       do: val &&& peek(bus, addr)
+
+  defp mapper_write_value(_bus, _addr, val), do: val
 
   # DMC sample bytes from PRG ($C000-$FFFF, wrapping to $8000 past $FFFF).
   defp read_dmc_sample(bus, addr, len) do

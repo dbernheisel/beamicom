@@ -1,7 +1,7 @@
 defmodule Beamicom.NES.SaveState do
   @moduledoc "Serialize/deserialize NES console state, ROM-stripped."
 
-  alias Beamicom.NES.{Console, Cart}
+  alias Beamicom.NES.{Bus, Cart, Console}
 
   @doc "Split a console into {state_bin, rom_blob}. Both are zlib-compressed term binaries."
   def split(%Console{} = console) do
@@ -69,10 +69,22 @@ defmodule Beamicom.NES.SaveState do
     :ok
   end
 
-  # v1 predates Bus.apu_pending. Keep the save format version stable while new
-  # fields with safe defaults are introduced; old struct maps retain their
-  # __struct__ tag but do not acquire fields added by a later module version.
+  # Keep the save format version stable while Bus fields with safe defaults are
+  # introduced; old struct maps retain their __struct__ tag but do not acquire
+  # fields added by a later module version.
   defp ensure_current_bus_fields(%Console{bus: bus} = console) do
-    %{console | bus: Map.put_new(bus, :apu_pending, 0)}
+    defaults = Bus.default_mapper_state()
+
+    mapper_state =
+      Enum.reduce(
+        Map.keys(defaults),
+        Map.merge(defaults, Map.get(bus, :mapper_state, %{})),
+        fn key, state ->
+          if Map.has_key?(bus, key), do: Map.put(state, key, Map.fetch!(bus, key)), else: state
+        end
+      )
+
+    bus = bus |> Map.drop(Map.keys(defaults)) |> then(&Map.merge(%Bus{}, &1))
+    %{console | bus: %{bus | mapper_state: mapper_state}}
   end
 end
