@@ -4,8 +4,9 @@ defmodule Beamicom.NES.Output do
   `%Beamicom.NES.Framebuffer{}` per PPU frame and `publish/1`es it here; sinks (Scenic,
   Phoenix channel, GStreamer feed) `subscribe/0` for `{:frame, number}`
   notifications and read the latest frame from ETS when ready. APU audio is
-  streamed separately via `publish_audio/1` → `{:audio, samples}` (no coalescing —
-  audio can't drop samples).
+  streamed separately via `publish_audio/2` → `{:audio, sample_count, pcm}` (no
+  coalescing — audio can't drop samples). PCM chunks are binaries so fan-out
+  between BEAM processes is reference-counted instead of copying sample lists.
 
   Owns a `:read_concurrency` ETS table so reads bypass the GenServer entirely —
   the publish cost is one ETS insert plus an async notify, and it never blocks
@@ -25,12 +26,14 @@ defmodule Beamicom.NES.Output do
   def publish(frame), do: GenServer.cast(__MODULE__, {:publish, frame})
 
   @doc """
-  Publish a chunk of APU audio samples. Unlike video (latest-frame, coalesced),
-  audio is a stream: every chunk is pushed to subscribers as `{:audio, samples}`
-  so a sink can feed a sound device without gaps.
+  Publish a chunk of signed-16-bit little-endian PCM. Unlike video (latest-frame,
+  coalesced), audio is a stream: every chunk is pushed to subscribers as
+  `{:audio, sample_count, pcm}` so a sink can feed a sound device without gaps.
   """
-  def publish_audio([]), do: :ok
-  def publish_audio(samples), do: GenServer.cast(__MODULE__, {:audio, samples})
+  def publish_audio(0, <<>>), do: :ok
+
+  def publish_audio(sample_count, pcm) when is_integer(sample_count) and is_binary(pcm),
+    do: GenServer.cast(__MODULE__, {:audio, sample_count, pcm})
 
   @doc """
   Subscribe the caller to video `{:frame, number}` notifications only. A
@@ -39,7 +42,7 @@ defmodule Beamicom.NES.Output do
   """
   def subscribe_video, do: GenServer.call(__MODULE__, {:subscribe, :video})
 
-  @doc "Subscribe the caller to audio `{:audio, samples}` chunks only (the audio sink)."
+  @doc "Subscribe to audio `{:audio, sample_count, pcm}` chunks only."
   def subscribe_audio, do: GenServer.call(__MODULE__, {:subscribe, :audio})
 
   @doc "Subscribe the caller to both video and audio (e.g. a combined sink or test)."
@@ -75,8 +78,8 @@ defmodule Beamicom.NES.Output do
   end
 
   @impl true
-  def handle_cast({:audio, samples}, state) do
-    Enum.each(state.audio, &send(&1, {:audio, samples}))
+  def handle_cast({:audio, sample_count, pcm}, state) do
+    Enum.each(state.audio, &send(&1, {:audio, sample_count, pcm}))
     {:noreply, state}
   end
 

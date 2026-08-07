@@ -24,7 +24,8 @@ defmodule Beamicom.NES.CPU do
 
   # nmi_line?/1 is a hot per-cycle check; keep a local inlinable copy so the
   # driving loop doesn't pay a cross-module call for it.
-  @compile {:inline, nmi?: 1, poll_nmi_line: 2}
+  @compile {:inline,
+            nmi?: 1, poll_nmi_line: 2, peek: 2, peek16: 2, irq_pending?: 1, nmi_sensitive_addr?: 1}
 
   defstruct a: 0,
             x: 0,
@@ -50,14 +51,14 @@ defmodule Beamicom.NES.CPU do
   @penalty_modes ~w(abx aby izy)a
 
   @doc "Cold reset: load PC from the reset vector ($FFFC), SP=$FD, I set (spec §11, determinism §10)."
-  def reset(bus), do: %__MODULE__{pc: Bus.peek16(bus, 0xFFFC), sp: 0xFD, p: 0x24, cycles: 7}
+  def reset(bus), do: %__MODULE__{pc: peek16(bus, 0xFFFC), sp: 0xFD, p: 0x24, cycles: 7}
 
   @doc "Service an NMI: push PC then P (B clear), set I, jump to the $FFFA vector (7 cycles)."
   def nmi(cpu, bus) do
     {cpu, bus} = push(cpu, bus, cpu.pc >>> 8)
     {cpu, bus} = push(cpu, bus, cpu.pc &&& 0xFF)
     {cpu, bus} = push(cpu, bus, (cpu.p &&& bxor(0xFF, @b)) ||| 0x20)
-    cpu = %{cpu | p: cpu.p ||| @i, pc: Bus.peek16(bus, 0xFFFA), cycles: cpu.cycles + 7}
+    cpu = %{cpu | p: cpu.p ||| @i, pc: peek16(bus, 0xFFFA), cycles: cpu.cycles + 7}
     tick_cycles(cpu, bus, 7)
   end
 
@@ -66,7 +67,7 @@ defmodule Beamicom.NES.CPU do
     {cpu, bus} = push(cpu, bus, cpu.pc >>> 8)
     {cpu, bus} = push(cpu, bus, cpu.pc &&& 0xFF)
     {cpu, bus} = push(cpu, bus, (cpu.p &&& bxor(0xFF, @b)) ||| 0x20)
-    cpu = %{cpu | p: cpu.p ||| @i, pc: Bus.peek16(bus, 0xFFFE), cycles: cpu.cycles + 7}
+    cpu = %{cpu | p: cpu.p ||| @i, pc: peek16(bus, 0xFFFE), cycles: cpu.cycles + 7}
     tick_cycles(cpu, bus, 7)
   end
 
@@ -79,7 +80,7 @@ defmodule Beamicom.NES.CPU do
   penalties tick after the access, matching where they occur.
   """
   def step(cpu, bus) do
-    opcode = Bus.peek(bus, cpu.pc)
+    opcode = peek(bus, cpu.pc)
     cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
     {op, mode, cyc} = decode(opcode)
     {addr, crossed, cpu, bus} = resolve(mode, cpu, bus)
@@ -94,11 +95,11 @@ defmodule Beamicom.NES.CPU do
     # the last cycle waits for the next instruction (spec §5.2 item 3).
     poll = cpu.nmi_pending
     {cpu, bus, extra} = exec(op, mode, addr, cpu, bus)
-    # Re-poll at the access dot so a $2000 NMI-enable takes effect immediately,
-    # then let a $2002 read within the vblank-set window cancel a latched NMI.
-    cpu = poll_nmi(cpu, bus)
-    {suppress, bus} = Bus.take_nmi_suppress(bus)
-    cpu = if suppress, do: %{cpu | nmi_pending: false}, else: cpu
+    # Only PPUCTRL writes and PPUSTATUS reads can change the NMI line during
+    # `exec`. Avoid the post-access poll/suppress calls for every other memory
+    # access (the overwhelming common case); PPU register mirrors share the low
+    # three address bits, so this remains exact for $2000-$3FFF.
+    {cpu, bus} = post_access_nmi(cpu, bus, addr)
     {cpu, bus} = tick_ppu_cycles(cpu, bus, 1 + extra)
     bus = Bus.flush_ticks(bus, cyc + penalty + extra)
     cpu = %{cpu | cycles: cpu.cycles + cyc + penalty + extra}
@@ -106,7 +107,7 @@ defmodule Beamicom.NES.CPU do
 
     cond do
       poll and cpu.nmi_pending -> nmi(%{cpu | nmi_pending: false}, bus)
-      Bus.irq_pending?(bus) and (cpu.p &&& @i) == 0 -> irq(cpu, bus)
+      irq_pending?(bus) and (cpu.p &&& @i) == 0 -> irq(cpu, bus)
       true -> {cpu, bus}
     end
   end
@@ -180,7 +181,32 @@ defmodule Beamicom.NES.CPU do
   # Detect the asserting (rising) edge of the NMI line. The 6502's edge detector
   # adds a one-cycle delay before the interrupt is recognized, so an edge seen
   # this cycle only reaches nmi_pending on the next poll.
-  defp poll_nmi(cpu, bus), do: poll_nmi_line(cpu, Bus.nmi_line?(bus))
+  defp post_access_nmi(cpu, bus, addr) do
+    if nmi_sensitive_addr?(addr) do
+      line = if bus.ppu, do: nmi?(bus.ppu), else: false
+      cpu = poll_nmi_line(cpu, line)
+
+      case bus.ppu do
+        %{nmi_suppress: true} = ppu ->
+          {%{cpu | nmi_pending: false}, %{bus | ppu: %{ppu | nmi_suppress: false}}}
+
+        _ ->
+          {cpu, bus}
+      end
+    else
+      {cpu, bus}
+    end
+  end
+
+  defp nmi_sensitive_addr?(addr) when addr in 0x2000..0x3FFF,
+    do: (addr &&& 0x07) in [0, 2]
+
+  defp nmi_sensitive_addr?(_addr), do: false
+
+  defp irq_pending?(%Bus{irq_pending: true, irq_enabled: true}), do: true
+  defp irq_pending?(%Bus{apu: %{frame_irq: true}}), do: true
+  defp irq_pending?(%Bus{apu: %{dmc_irq: true}}), do: true
+  defp irq_pending?(%Bus{}), do: false
 
   # Common case (~every cycle): the line hasn't changed and no edge is queued, so
   # all three fields would be rewritten with their current values — skip it.
@@ -191,6 +217,27 @@ defmodule Beamicom.NES.CPU do
     %{cpu | nmi_pending: cpu.nmi_pending or cpu.nmi_edge, nmi_edge: edge, nmi_prev: line}
   end
 
+  # CPU-local pure memory fetches. Instruction, operand, stack, pointer, and
+  # vector reads dominate the interpreter and never need register side effects;
+  # keeping their dispatch local lets the compiler inline the common PRG/RAM
+  # paths while preserving Bus.peek/2's exact address map.
+  defp peek(%Bus{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
+    do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
+
+  defp peek(%Bus{ram: ram}, addr) when addr in 0x0000..0x1FFF,
+    do: :binary.at(ram, addr &&& 0x07FF)
+
+  defp peek(%Bus{wram: wram}, addr) when addr in 0x6000..0x7FFF,
+    do: Map.get(wram, addr, 0)
+
+  defp peek(%Bus{mapper: 5, ppu: %{exram_mode: mode, exram: exram}}, addr)
+       when addr in 0x5C00..0x5FFF and mode >= 2,
+       do: Map.get(exram, addr - 0x5C00, 0)
+
+  defp peek(%Bus{}, _addr), do: 0
+
+  defp peek16(bus, addr), do: peek(bus, addr) ||| peek(bus, addr + 1) <<< 8
+
   # --- addressing modes: return {addr | nil, page_crossed?, cpu, bus} ---
 
   defp resolve(:imp, cpu, bus), do: {nil, false, cpu, bus}
@@ -198,42 +245,42 @@ defmodule Beamicom.NES.CPU do
 
   defp resolve(:imm, cpu, bus), do: {cpu.pc, false, %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}, bus}
 
-  defp resolve(:zp, cpu, bus), do: {Bus.peek(bus, cpu.pc), false, adv(cpu, 1), bus}
+  defp resolve(:zp, cpu, bus), do: {peek(bus, cpu.pc), false, adv(cpu, 1), bus}
 
   defp resolve(:zpx, cpu, bus),
-    do: {Bus.peek(bus, cpu.pc) + cpu.x &&& 0xFF, false, adv(cpu, 1), bus}
+    do: {peek(bus, cpu.pc) + cpu.x &&& 0xFF, false, adv(cpu, 1), bus}
 
   defp resolve(:zpy, cpu, bus),
-    do: {Bus.peek(bus, cpu.pc) + cpu.y &&& 0xFF, false, adv(cpu, 1), bus}
+    do: {peek(bus, cpu.pc) + cpu.y &&& 0xFF, false, adv(cpu, 1), bus}
 
-  defp resolve(:abs, cpu, bus), do: {Bus.peek16(bus, cpu.pc), false, adv(cpu, 2), bus}
+  defp resolve(:abs, cpu, bus), do: {peek16(bus, cpu.pc), false, adv(cpu, 2), bus}
 
-  defp resolve(:abx, cpu, bus), do: indexed(Bus.peek16(bus, cpu.pc), cpu.x, adv(cpu, 2), bus)
-  defp resolve(:aby, cpu, bus), do: indexed(Bus.peek16(bus, cpu.pc), cpu.y, adv(cpu, 2), bus)
+  defp resolve(:abx, cpu, bus), do: indexed(peek16(bus, cpu.pc), cpu.x, adv(cpu, 2), bus)
+  defp resolve(:aby, cpu, bus), do: indexed(peek16(bus, cpu.pc), cpu.y, adv(cpu, 2), bus)
 
   defp resolve(:ind, cpu, bus) do
-    ptr = Bus.peek16(bus, cpu.pc)
+    ptr = peek16(bus, cpu.pc)
     # 6502 page-boundary bug: the high byte wraps within the same page.
-    lo = Bus.peek(bus, ptr)
-    hi = Bus.peek(bus, (ptr &&& 0xFF00) ||| (ptr + 1 &&& 0xFF))
+    lo = peek(bus, ptr)
+    hi = peek(bus, (ptr &&& 0xFF00) ||| (ptr + 1 &&& 0xFF))
     {lo ||| hi <<< 8, false, adv(cpu, 2), bus}
   end
 
   defp resolve(:izx, cpu, bus) do
-    zp = Bus.peek(bus, cpu.pc) + cpu.x &&& 0xFF
-    addr = Bus.peek(bus, zp) ||| Bus.peek(bus, zp + 1 &&& 0xFF) <<< 8
+    zp = peek(bus, cpu.pc) + cpu.x &&& 0xFF
+    addr = peek(bus, zp) ||| peek(bus, zp + 1 &&& 0xFF) <<< 8
     {addr, false, adv(cpu, 1), bus}
   end
 
   defp resolve(:izy, cpu, bus) do
-    zp = Bus.peek(bus, cpu.pc)
-    base = Bus.peek(bus, zp) ||| Bus.peek(bus, zp + 1 &&& 0xFF) <<< 8
+    zp = peek(bus, cpu.pc)
+    base = peek(bus, zp) ||| peek(bus, zp + 1 &&& 0xFF) <<< 8
     addr = base + cpu.y &&& 0xFFFF
     {addr, page_crossed?(base, addr), adv(cpu, 1), bus}
   end
 
   defp resolve(:rel, cpu, bus) do
-    off = Bus.peek(bus, cpu.pc)
+    off = peek(bus, cpu.pc)
     cpu = adv(cpu, 1)
     off = if off >= 0x80, do: off - 0x100, else: off
     {cpu.pc + off &&& 0xFFFF, false, cpu, bus}
@@ -392,7 +439,7 @@ defmodule Beamicom.NES.CPU do
     {cpu, bus} = push(cpu, bus, cpu.pc >>> 8)
     {cpu, bus} = push(cpu, bus, cpu.pc &&& 0xFF)
     {cpu, bus} = push(cpu, bus, cpu.p ||| @b)
-    {%{cpu | p: cpu.p ||| @i, pc: Bus.peek16(bus, 0xFFFE)}, bus, 0}
+    {%{cpu | p: cpu.p ||| @i, pc: peek16(bus, 0xFFFE)}, bus, 0}
   end
 
   # Branches
@@ -578,7 +625,7 @@ defmodule Beamicom.NES.CPU do
 
   defp pull(cpu, bus) do
     sp = cpu.sp + 1 &&& 0xFF
-    {%{cpu | sp: sp}, Bus.peek(bus, 0x0100 + sp)}
+    {%{cpu | sp: sp}, peek(bus, 0x0100 + sp)}
   end
 
   defp flag(cpu, mask, on), do: %{cpu | p: set(cpu.p, mask, on)}

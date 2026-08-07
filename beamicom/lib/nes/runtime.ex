@@ -13,7 +13,7 @@ defmodule Beamicom.NES.Runtime do
   """
   use GenServer
 
-  alias Beamicom.NES.{Console, Output}
+  alias Beamicom.NES.{Bus, CPU, Console, Output}
 
   # NTSC ~60.0988 fps.
   @period_ns round(1_000_000_000 / 60.0988)
@@ -112,9 +112,9 @@ defmodule Beamicom.NES.Runtime do
     {console, frame} = next_frame(state.console, state.frame)
     Output.publish(frame)
     # Drain this frame's audio and stream it to subscribers (also bounds memory).
-    {samples, apu} = Beamicom.NES.APU.take_samples(console.bus.apu)
-    Output.publish_audio(samples)
-    console = put_in(console.bus.apu, apu)
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
+    Output.publish_audio(sample_count, pcm)
+    console = %{console | bus: bus}
     %{state | console: console, frame: frame.number, published: state.published + 1}
   end
 
@@ -133,25 +133,45 @@ defmodule Beamicom.NES.Runtime do
         {state.frame, state.published}
       end
 
-    {samples, apu} = Beamicom.NES.APU.take_samples(console.bus.apu)
-    Output.publish_audio(samples)
-    console = put_in(console.bus.apu, apu)
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
+    Output.publish_audio(sample_count, pcm)
+    console = %{console | bus: bus}
     %{state | console: console, frame: frame, published: published}
   end
 
-  defp run_cycles(console, target) do
-    Enum.reduce_while(1..2_000_000, console, fn _, c ->
-      if c.cpu.cycles >= target, do: {:halt, c}, else: {:cont, Console.step(c)}
-    end)
+  defp run_cycles(%Console{} = console, target) do
+    {cpu, bus} = run_cycles(console.cpu, console.bus, target, 2_000_000)
+    %{console | cpu: cpu, bus: bus}
+  end
+
+  defp run_cycles(cpu, bus, _target, 0), do: {cpu, bus}
+
+  defp run_cycles(cpu, bus, target, remaining) do
+    if cpu.cycles >= target do
+      {cpu, bus}
+    else
+      {cpu, bus} = CPU.step(cpu, bus)
+      run_cycles(cpu, bus, target, remaining - 1)
+    end
   end
 
   # Step the console until a new fully-rendered frame is ready.
-  defp next_frame(console, after_number) do
-    Enum.reduce_while(1..1_000_000, console, fn _, c ->
-      c = Console.step(c)
-      fb = c.bus.ppu.frame_ready
-      if fb && fb.number > after_number, do: {:halt, {c, fb}}, else: {:cont, c}
-    end)
+  defp next_frame(%Console{} = console, after_number) do
+    case next_frame(console.cpu, console.bus, after_number, 1_000_000) do
+      {cpu, bus, frame} -> {%{console | cpu: cpu, bus: bus}, frame}
+      {cpu, bus} -> %{console | cpu: cpu, bus: bus}
+    end
+  end
+
+  defp next_frame(cpu, bus, _after_number, 0), do: {cpu, bus}
+
+  defp next_frame(cpu, bus, after_number, remaining) do
+    {cpu, bus} = CPU.step(cpu, bus)
+    frame = bus.ppu.frame_ready
+
+    if frame && frame.number > after_number,
+      do: {cpu, bus, frame},
+      else: next_frame(cpu, bus, after_number, remaining - 1)
   end
 
   defp schedule(%{pace: false} = state) do

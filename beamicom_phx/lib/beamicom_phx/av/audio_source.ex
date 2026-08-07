@@ -1,8 +1,8 @@
 defmodule BeamicomPhx.AV.AudioSource do
   @moduledoc """
-  Membrane push source: subscribes to `Beamicom.NES.Output` audio, packs each
-  chunk of signed-16-bit samples into a little-endian binary, and emits it as a
-  `Membrane.RawAudio` buffer (44100 Hz mono — the APU's native rate).
+  Membrane push source: subscribes to `Beamicom.NES.Output` audio and emits each
+  pre-encoded signed-16-bit little-endian PCM chunk as a `Membrane.RawAudio`
+  buffer (44100 Hz mono — the APU's native rate).
 
   Unlike video (latest-frame coalesced), audio is a stream — every chunk is
   forwarded so no samples are dropped. PTS accumulates by cumulative sample
@@ -40,14 +40,12 @@ defmodule BeamicomPhx.AV.AudioSource do
   end
 
   @impl true
-  def handle_info({:audio, samples}, _ctx, state) do
-    payload = for s <- samples, into: <<>>, do: <<s::signed-little-16>>
-
+  def handle_info({:audio, sample_count, pcm}, _ctx, state) do
     buffer = %Membrane.Buffer{
-      payload: payload,
+      payload: pcm,
       pts: div(state.count * 1_000_000_000, @sample_rate)
     }
 
-    {[buffer: {:output, buffer}], %{state | count: state.count + length(samples)}}
+    {[buffer: {:output, buffer}], %{state | count: state.count + sample_count}}
   end
 end

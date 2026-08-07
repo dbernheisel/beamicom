@@ -4,15 +4,12 @@ defmodule Beamicom.NES.AudioSinkTest do
 
   alias Beamicom.NES.AudioSink
 
-  test "encodes samples to signed little-endian 16-bit PCM" do
-    assert AudioSink.pcm([0, 1, -1, 258]) == <<0, 0, 1, 0, 255, 255, 2, 1>>
-  end
-
-  test "streams audio chunks to its port without crashing" do
+  test "streams pre-encoded PCM chunks to its port without crashing" do
     # Pipe to `cat` instead of ffplay so the test needs no audio device.
     pid = start_supervised!({AudioSink, command: ["cat"], name: :test_audio_sink})
 
-    send(pid, {:audio, [100, -100, 200]})
+    pcm = <<100::signed-little-16, -100::signed-little-16, 200::signed-little-16>>
+    send(pid, {:audio, 3, pcm})
     send(pid, {:frame, 0})
     # Force the mailbox to drain (FIFO), then confirm the sink is still alive.
     :sys.get_state(pid)

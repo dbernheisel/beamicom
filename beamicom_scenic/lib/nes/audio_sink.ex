@@ -1,11 +1,12 @@
 defmodule Beamicom.NES.AudioSink do
   @moduledoc """
   Audio sink (spec §4): subscribes to `Beamicom.NES.Output` and pipes the APU's
-  `{:audio, samples}` stream to `ffmpeg`'s CoreAudio (audiotoolbox) output as raw
-  signed-16-bit LE mono PCM over an Erlang Port. The external player owns the
-  CoreAudio stream and buffering, so the BEAM stays off the realtime audio path.
-  audiotoolbox is used over `ffplay` because ffplay's ~46ms SDL audio buffer is
-  fixed and dominates A/V lag; CoreAudio's buffer is much smaller.
+  `{:audio, sample_count, pcm}` stream to `ffmpeg`'s CoreAudio (audiotoolbox)
+  output as raw signed-16-bit LE mono PCM over an Erlang Port. The external
+  player owns the CoreAudio stream and buffering, so the BEAM stays off the
+  realtime audio path. audiotoolbox is used over `ffplay` because ffplay's
+  ~46ms SDL audio buffer is fixed and dominates A/V lag; CoreAudio's buffer is
+  much smaller.
 
   Requires `ffmpeg` (`brew install ffmpeg`); if it isn't found the sink quietly
   declines to start (`:ignore`) so video still works.
@@ -20,9 +21,6 @@ defmodule Beamicom.NES.AudioSink do
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
-
-  @doc "Encode signed-16-bit sample integers to little-endian PCM bytes."
-  def pcm(samples), do: for(s <- samples, into: <<>>, do: <<s::signed-little-16>>)
 
   @impl true
   def init(opts) do
@@ -58,8 +56,8 @@ defmodule Beamicom.NES.AudioSink do
   defp atempo(speed), do: ["-af", "atempo=0.5,atempo=#{speed / 0.5}"]
 
   @impl true
-  def handle_info({:audio, samples}, state) do
-    Port.command(state.port, pcm(samples))
+  def handle_info({:audio, _sample_count, pcm}, state) do
+    Port.command(state.port, pcm)
     {:noreply, state}
   end
 

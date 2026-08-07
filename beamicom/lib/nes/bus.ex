@@ -20,6 +20,10 @@ defmodule Beamicom.NES.Bus do
   import Bitwise
   alias Beamicom.NES.{Mapper, PPU}
 
+  # Match APU's lazy-run threshold, but keep the per-instruction accumulator on
+  # the smaller Bus state so the large APU struct is not rebuilt every step.
+  @apu_flush_threshold 100
+
   defstruct [
     :ram,
     :wram,
@@ -58,7 +62,8 @@ defmodule Beamicom.NES.Bus do
     # + $5130 upper bank bits.
     chr_regs: {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     chr_hi: 0,
-    apu: nil
+    apu: nil,
+    apu_pending: 0
   ]
 
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
@@ -105,7 +110,33 @@ defmodule Beamicom.NES.Bus do
 
     # Only FME-7 (69) has a CPU-cycle IRQ; skip the call entirely otherwise.
     bus = if bus.mapper == 69, do: Mapper.clock_cpu_irq(bus, cycles), else: bus
-    %{bus | apu: Beamicom.NES.APU.tick(bus.apu, cycles)}
+    pending = bus.apu_pending + cycles
+
+    if pending >= @apu_flush_threshold,
+      do: %{bus | apu: Beamicom.NES.APU.tick(bus.apu, pending), apu_pending: 0},
+      else: %{bus | apu_pending: pending}
+  end
+
+  @doc "Bring the APU current with all CPU cycles accumulated on the bus."
+  def sync_apu(%__MODULE__{apu_pending: 0} = bus), do: bus
+
+  def sync_apu(%__MODULE__{apu: apu, apu_pending: pending} = bus) do
+    apu = apu |> Beamicom.NES.APU.tick(pending) |> Beamicom.NES.APU.flush()
+    %{bus | apu: apu, apu_pending: 0}
+  end
+
+  @doc "Drain current audio samples and return `{samples, updated_bus}`."
+  def take_audio(%__MODULE__{} = bus) do
+    bus = sync_apu(bus)
+    {samples, apu} = Beamicom.NES.APU.take_samples(bus.apu)
+    {samples, %{bus | apu: apu}}
+  end
+
+  @doc "Drain audio once as `{sample_count, signed_16_bit_little_endian_pcm, updated_bus}`."
+  def take_audio_pcm(%__MODULE__{} = bus) do
+    bus = sync_apu(bus)
+    {sample_count, pcm, apu} = Beamicom.NES.APU.take_pcm(bus.apu)
+    {sample_count, pcm, %{bus | apu: apu}}
   end
 
   @doc """
@@ -172,8 +203,9 @@ defmodule Beamicom.NES.Bus do
   end
 
   # APU status ($4015): length-counter flags + frame IRQ (reading clears it).
-  def read(%__MODULE__{apu: apu} = bus, 0x4015) do
-    {value, apu} = Beamicom.NES.APU.read_status(apu)
+  def read(%__MODULE__{} = bus, 0x4015) do
+    bus = sync_apu(bus)
+    {value, apu} = Beamicom.NES.APU.read_status(bus.apu)
     {value, %{bus | apu: apu}}
   end
 
@@ -225,8 +257,9 @@ defmodule Beamicom.NES.Bus do
   # $4015: the APU applies channel enables + DMC bookkeeping; if it flags a DMC
   # start, read the sample from PRG (the APU struct has no memory access) and
   # hand it over to begin playback.
-  def write(%__MODULE__{apu: apu} = bus, 0x4015, val) do
-    apu = Beamicom.NES.APU.write(apu, 0x4015, val)
+  def write(%__MODULE__{} = bus, 0x4015, val) do
+    bus = sync_apu(bus)
+    apu = Beamicom.NES.APU.write(bus.apu, 0x4015, val)
 
     apu =
       if Beamicom.NES.APU.dmc_fetch?(apu) do
@@ -240,13 +273,16 @@ defmodule Beamicom.NES.Bus do
   end
 
   # APU channel + control registers ($4000-$4013, $4017 frame counter).
-  def write(%__MODULE__{apu: apu} = bus, addr, val)
-      when addr in 0x4000..0x4013 or addr == 0x4017,
-      do: %{bus | apu: Beamicom.NES.APU.write(apu, addr, val)}
+  def write(%__MODULE__{} = bus, addr, val) when addr in 0x4000..0x4013 or addr == 0x4017 do
+    bus = sync_apu(bus)
+    %{bus | apu: Beamicom.NES.APU.write(bus.apu, addr, val)}
+  end
 
   # MMC5 sound ($5000-$5015) goes to the APU; other $5xxx are mapper registers.
-  def write(%__MODULE__{mapper: 5} = bus, addr, val) when addr in 0x5000..0x5015,
-    do: %{bus | apu: Beamicom.NES.APU.mmc5_write(bus.apu, addr, val &&& 0xFF)}
+  def write(%__MODULE__{mapper: 5} = bus, addr, val) when addr in 0x5000..0x5015 do
+    bus = sync_apu(bus)
+    %{bus | apu: Beamicom.NES.APU.mmc5_write(bus.apu, addr, val &&& 0xFF)}
+  end
 
   # Expansion-area mapper registers — only MMC5 decodes $5xxx (others: open bus).
   def write(%__MODULE__{mapper: 5} = bus, addr, val) when addr in 0x4020..0x5FFF,

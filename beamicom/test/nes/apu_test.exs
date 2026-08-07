@@ -1,7 +1,9 @@
 defmodule Beamicom.NES.APUTest do
   use ExUnit.Case, async: true
 
-  alias Beamicom.NES.APU
+  alias Beamicom.NES.{APU, Bus, Console}
+
+  @nestest "test/support/fixtures/nestest.nes"
 
   @moduledoc "APU channel output (spec §2, §12 step 10)."
 
@@ -156,5 +158,46 @@ defmodule Beamicom.NES.APUTest do
 
     {_status, apu} = APU.read_status(apu)
     refute APU.irq?(apu)
+  end
+
+  test "bus accumulates sub-threshold cycles without touching APU pending state" do
+    bus = Console.load(@nestest).bus
+    bus = Bus.flush_ticks(bus, 37)
+
+    assert bus.apu_pending == 37
+    assert bus.apu.pending == 0
+  end
+
+  test "bus audio drain is sample-identical to advancing the APU directly" do
+    bus = Console.load(@nestest).bus
+    cycles = [37, 41, 29, 113, 7, 251]
+    total = Enum.sum(cycles)
+    expected_apu = APU.tick(bus.apu, total)
+    {expected_samples, expected_apu} = APU.take_samples(expected_apu)
+
+    bus = Enum.reduce(cycles, bus, fn count, current -> Bus.flush_ticks(current, count) end)
+    {samples, bus} = Bus.take_audio(bus)
+
+    assert samples == expected_samples
+    assert bus.apu == expected_apu
+    assert bus.apu_pending == 0
+  end
+
+  test "PCM drain encodes samples oldest-first and reports their count" do
+    apu = %{APU.new() | samples: [258, -1, 1, 0]}
+    {sample_count, pcm, apu} = APU.take_pcm(apu)
+
+    assert sample_count == 4
+    assert pcm == <<0, 0, 1, 0, 255, 255, 2, 1>>
+    assert apu.samples == []
+  end
+
+  test "APU register access flushes cycles accumulated on the bus" do
+    bus = Console.load(@nestest).bus |> Bus.flush_ticks(37)
+    bus = Bus.write(bus, 0x4000, 0xBF)
+
+    assert bus.apu_pending == 0
+    assert bus.apu.pending == 0
+    assert bus.apu.seq_cycle == 37
   end
 end

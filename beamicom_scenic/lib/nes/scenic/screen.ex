@@ -99,7 +99,7 @@ defmodule Beamicom.NES.Scenic.Screen do
   end
 
   # Audio arrives here too (see Output); the Scenic sink is video-only.
-  def handle_info({:audio, _samples}, scene), do: {:noreply, scene}
+  def handle_info({:audio, _sample_count, _pcm}, scene), do: {:noreply, scene}
 
   # A background save finished: show the file name under the Save button.
   def handle_info({:saved, path}, scene) do

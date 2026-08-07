@@ -45,6 +45,7 @@ defmodule Beamicom.NES.SaveState do
 
       console =
         console
+        |> ensure_current_bus_fields()
         |> put_in([Access.key!(:bus), Access.key!(:prg)], prg)
         |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:chr)], chr)
 
@@ -66,5 +67,12 @@ defmodule Beamicom.NES.SaveState do
     Application.load(:beamicom)
     for mod <- Application.spec(:beamicom, :modules) || [], do: Code.ensure_loaded(mod)
     :ok
+  end
+
+  # v1 predates Bus.apu_pending. Keep the save format version stable while new
+  # fields with safe defaults are introduced; old struct maps retain their
+  # __struct__ tag but do not acquire fields added by a later module version.
+  defp ensure_current_bus_fields(%Console{bus: bus} = console) do
+    %{console | bus: Map.put_new(bus, :apu_pending, 0)}
   end
 end

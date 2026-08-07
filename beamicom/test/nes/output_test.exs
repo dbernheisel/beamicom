@@ -13,10 +13,11 @@ defmodule Beamicom.NES.OutputTest do
     assert %Framebuffer{number: 7} = Output.latest()
   end
 
-  test "audio samples are streamed to subscribers" do
+  test "audio PCM binaries are streamed to subscribers with their sample count" do
     Output.subscribe()
-    Output.publish_audio([1, 2, 3])
-    assert_receive {:audio, [1, 2, 3]}
+    pcm = <<1::signed-little-16, 2::signed-little-16, 3::signed-little-16>>
+    Output.publish_audio(3, pcm)
+    assert_receive {:audio, 3, ^pcm}
   end
 
   @tag :tmp_dir
@@ -35,6 +36,16 @@ defmodule Beamicom.NES.OutputTest do
     start_supervised!({Runtime, rom: path, pace: false, name: :test_runtime})
 
     assert_receive {:frame, n} when is_integer(n) and n >= 0, 2000
+
+    assert_receive {:audio, sample_count, pcm}
+                   when is_integer(sample_count) and sample_count > 0 and is_binary(pcm),
+                   2000
+
+    assert byte_size(pcm) == sample_count * 2
+    assert_receive {:frame, n} when is_integer(n) and n >= 1, 2000
+    assert_receive {:audio, sample_count, pcm} when is_binary(pcm), 2000
+    assert sample_count in 700..750
+    assert byte_size(pcm) == sample_count * 2
     assert %Framebuffer{width: 256, height: 240} = Output.latest()
   end
 end

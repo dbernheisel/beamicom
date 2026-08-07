@@ -41,6 +41,20 @@ defmodule Beamicom.NES.SaveStateTest do
     assert {:error, :crc_mismatch} = SaveState.merge(state_bin, bad_blob)
   end
 
+  test "merge upgrades v1 saves created before the bus APU accumulator" do
+    c = loaded_console()
+    {state_bin, rom_blob} = SaveState.split(c)
+    saved = :erlang.binary_to_term(:zlib.uncompress(state_bin))
+    legacy_console = %{saved.console | bus: Map.delete(saved.console.bus, :apu_pending)}
+
+    legacy_state =
+      :zlib.compress(:erlang.term_to_binary(%{saved | console: legacy_console}))
+
+    assert {:ok, restored} = SaveState.merge(legacy_state, rom_blob)
+    assert restored.bus.apu_pending == 0
+    assert %Console{} = Console.step(restored)
+  end
+
   test "merge rejects foreign binary safely" do
     assert {:error, _} = SaveState.merge(<<"garbage">>, <<"garbage">>)
   end

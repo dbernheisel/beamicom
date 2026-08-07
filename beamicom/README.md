@@ -25,8 +25,9 @@ of APU samples, and fans them out through `Beamicom.NES.Output`:
 - **Video** is coalesced — sinks read the *latest* frame straight from an ETS
   table (`:read_concurrency`) and drop intermediates. A slow renderer never
   back-pressures the emulation loop.
-- **Audio** is a stream — every chunk is pushed to subscribers as `{:audio, samples}`,
-  because audio can't drop samples without an audible gap.
+- **Audio** is a stream — every chunk is encoded once as signed 16-bit
+  little-endian PCM and pushed as `{:audio, sample_count, pcm}`. The binary is
+  reference-counted across subscribers, and audio chunks are never dropped.
 
 `Beamicom.NES.Runtime` is the emulation loop (a `GenServer`): it paces frames
 from a fixed monotonic epoch so timing error doesn't accumulate, and publishes

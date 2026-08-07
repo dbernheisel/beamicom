@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Nes.Wav do
   @shortdoc "Record a ROM's audio to a WAV"
   use Mix.Task
 
-  alias Beamicom.NES.{APU, Console, WAV}
+  alias Beamicom.NES.{Bus, Console, WAV}
 
   @cpu_hz 1_789_773
 
@@ -34,8 +34,8 @@ defmodule Mix.Tasks.Nes.Wav do
       Enum.reverse(acc)
     else
       console = Enum.reduce(1..2000, console, fn _, c -> Console.step(c) end)
-      {samples, apu} = APU.take_samples(console.bus.apu)
-      capture(put_in(console.bus.apu, apu), target, prepend(acc, samples))
+      {samples, bus} = Bus.take_audio(console.bus)
+      capture(%{console | bus: bus}, target, prepend(acc, samples))
     end
   end
 

@@ -128,11 +128,27 @@ defmodule Beamicom.NES.APU do
   @doc "Whether the frame-counter or DMC IRQ line is asserted."
   def irq?(%__MODULE__{frame_irq: f, dmc_irq: d}), do: f or d
 
-  @doc "Drain the generated samples (oldest first)."
+  @doc "Drain the generated samples as a list (oldest first)."
   def take_samples(apu) do
     apu = flush(apu)
     {Enum.reverse(apu.samples), %{apu | samples: []}}
   end
+
+  @doc "Drain samples once as `{sample_count, signed_16_bit_little_endian_pcm, apu}`."
+  def take_pcm(apu) do
+    apu = flush(apu)
+    {sample_count, pcm} = encode_pcm(apu.samples, 0, [])
+    {sample_count, pcm, %{apu | samples: []}}
+  end
+
+  # Samples are accumulated newest-first. Consing each encoded sample while
+  # walking that list produces an oldest-first iodata list without a separate
+  # Enum.reverse/1 pass.
+  defp encode_pcm([], sample_count, bytes),
+    do: {sample_count, IO.iodata_to_binary(bytes)}
+
+  defp encode_pcm([sample | samples], sample_count, bytes),
+    do: encode_pcm(samples, sample_count + 1, [<<sample::signed-little-16>> | bytes])
 
   # --- register writes ($4000-$4017) ---
   # Run the backlog first so the write lands at the right point in time.
