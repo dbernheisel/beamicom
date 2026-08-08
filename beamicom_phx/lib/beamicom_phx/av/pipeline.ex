@@ -6,7 +6,7 @@ defmodule BeamicomPhx.AV.Pipeline do
   watch-only Phase 1. Upgrade path when multi-viewer/RTP (Phase 2) lands: a single
   shared encoder fanned out with `Membrane.Tee` to per-peer Sinks + the RTP output.
 
-  Video is encoded with SVT-AV1 and pre-payloaded into RTP by `BeamicomPhx.AV.Av1Payloader`
+  Video is encoded with SVT-AV1 and pre-payloaded into RTP by `BeamicomStream.AV.Av1Payloader`
   before reaching the sink (`payload_rtp: false` mode). Audio is pre-payloaded with
   `Membrane.RTP.Opus.Payloader` for the same reason — `payload_rtp` is a sink-wide flag.
   """
@@ -25,7 +25,7 @@ defmodule BeamicomPhx.AV.Pipeline do
       child(:sink, sink),
 
       # Video: RGB -> I420 -> AV1 (SVT, real-time) -> RTP payload -> sink
-      child(:video_src, BeamicomPhx.AV.VideoSource)
+      child(:video_src, BeamicomStream.AV.VideoSource)
       |> child(:scaler, %Membrane.FFmpeg.SWScale.Converter{format: :I420})
       # Bandwidth is a non-issue at 256x240 over LAN, so favor quality: a low CRF
       # (vs the plugin's default 35) and a slower preset (vs 10). NES pixel art also
@@ -37,12 +37,12 @@ defmodule BeamicomPhx.AV.Pipeline do
         approx_framerate: {60, 1},
         config_parameters: %{"scm" => "2"}
       })
-      |> child(:av1_pay, BeamicomPhx.AV.Av1Payloader)
+      |> child(:av1_pay, BeamicomStream.AV.Av1Payloader)
       |> via_in(:input, options: [kind: :video])
       |> get_child(:sink),
 
       # Audio: 44.1k s16le -> 48k -> Opus -> RTP payload -> sink
-      child(:audio_src, BeamicomPhx.AV.AudioSource)
+      child(:audio_src, BeamicomStream.AV.AudioSource)
       |> child(:resampler, %Membrane.FFmpeg.SWResample.Converter{
         output_stream_format: %Membrane.RawAudio{
           channels: 1,

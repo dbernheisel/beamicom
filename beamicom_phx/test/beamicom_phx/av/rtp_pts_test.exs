@@ -15,7 +15,7 @@ defmodule BeamicomPhx.AV.RtpPtsTest do
       Testing.Pipeline.start_link_supervised!(
         spec: [
           child(:src, %Testing.Source{output: buffers, stream_format: %Membrane.RTP{}})
-          |> child(:pts, %BeamicomPhx.AV.RtpPts{clock_rate: 90_000})
+          |> child(:pts, %BeamicomStream.AV.RtpPts{clock_rate: 90_000})
           |> child(:sink, Testing.Sink)
         ]
       )

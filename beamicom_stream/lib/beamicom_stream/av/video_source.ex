@@ -1,18 +1,14 @@
-defmodule BeamicomPhx.AV.VideoSource do
-  @moduledoc """
-  Membrane push source: subscribes to `Beamicom.NES.Output` video notifications,
-  reads the latest frame from ETS, resolves it to RGB with `Beamicom.NES.Palette`,
-  and emits it as a `Membrane.RawVideo` buffer. The emulator is the clock, so this
-  is a `:push` source driven entirely by `{:frame, number}` messages.
-  """
+defmodule BeamicomStream.AV.VideoSource do
+  @moduledoc "Membrane push source for Beamicom's latest RGB video frame."
   use Membrane.Source
 
   alias Beamicom.NES.{Framebuffer, Output, Palette}
 
   @width 256
   @height 240
-  # NTSC ~60.0988 fps; PTS derived from the frame number so it never drifts.
   @period_ns round(1_000_000_000 / 60.0988)
+
+  def_options(owner: [spec: pid() | nil, default: nil])
 
   def_output_pad(:output,
     accepted_format: %Membrane.RawVideo{pixel_format: :RGB},
@@ -20,11 +16,12 @@ defmodule BeamicomPhx.AV.VideoSource do
   )
 
   @impl true
-  def handle_init(_ctx, _opts), do: {[], %{}}
+  def handle_init(_ctx, opts), do: {[], %{owner: opts.owner}}
 
   @impl true
   def handle_playing(_ctx, state) do
     Output.subscribe_video()
+    if state.owner, do: send(state.owner, {:beamicom_stream_source_ready, :video})
 
     format = %Membrane.RawVideo{
       width: @width,
@@ -41,11 +38,7 @@ defmodule BeamicomPhx.AV.VideoSource do
   def handle_info({:frame, number}, _ctx, state) do
     case Output.latest() do
       %Framebuffer{} = frame ->
-        buffer = %Membrane.Buffer{
-          payload: Palette.to_rgb(frame),
-          pts: number * @period_ns
-        }
-
+        buffer = %Membrane.Buffer{payload: Palette.to_rgb(frame), pts: number * @period_ns}
         {[buffer: {:output, buffer}], state}
 
       nil ->

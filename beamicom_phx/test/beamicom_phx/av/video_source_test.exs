@@ -21,7 +21,7 @@ defmodule BeamicomPhx.AV.VideoSourceTest do
     pipeline =
       Testing.Pipeline.start_link_supervised!(
         spec: [
-          child(:src, BeamicomPhx.AV.VideoSource)
+          child(:src, BeamicomStream.AV.VideoSource)
           |> child(:sink, Testing.Sink)
         ]
       )

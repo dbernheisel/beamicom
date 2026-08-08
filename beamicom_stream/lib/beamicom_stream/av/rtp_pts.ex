@@ -1,17 +1,8 @@
-defmodule BeamicomPhx.AV.RtpPts do
-  @moduledoc """
-  Restores a buffer PTS from the parsed RTP timestamp.
-
-  `Membrane.RTP.Parser` exposes the RTP header timestamp in `metadata.rtp.timestamp`
-  but leaves `Membrane.Buffer.pts` nil. `Membrane.WebRTC.Sink` (in `payload_rtp: false`
-  mode) needs a PTS — it computes the outgoing RTP timestamp by dividing the PTS by the
-  codec timebase — and crashes on nil. Convert the RTP timestamp (in `clock_rate` ticks:
-  90 kHz video, 48 kHz audio) back to nanoseconds so the sink can restamp it.
-  """
+defmodule BeamicomStream.AV.RtpPts do
+  @moduledoc "Restores a buffer PTS from its parsed RTP timestamp."
   use Membrane.Filter
 
   def_options(clock_rate: [spec: pos_integer()])
-
   def_input_pad(:input, accepted_format: %Membrane.RTP{})
   def_output_pad(:output, accepted_format: %Membrane.RTP{})
 

@@ -37,7 +37,7 @@ defmodule BeamicomPhx.AV.Av1PayloaderTest do
             encoder_mode: 10,
             approx_framerate: {60, 1}
           })
-          |> child(:pay, BeamicomPhx.AV.Av1Payloader)
+          |> child(:pay, BeamicomStream.AV.Av1Payloader)
           |> child(:sink, Testing.Sink)
         ]
       )

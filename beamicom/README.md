@@ -7,16 +7,19 @@ headless.
 
 ## Architecture
 
-Beamicom is organized as three projects in one repository:
+Beamicom is organized as several projects in one repository:
 
 ```
 beamicom/          # this project — the core emulator (headless)
 beamicom_scenic/   # desktop client: a Scenic/OpenGL window + ffplay audio
+beamicom_stream/   # headless local AV1/Opus RTP client + terminal controls
 beamicom_phx/      # web client: streams A/V to the browser over Phoenix
+beamicom_v4l2/     # Linux framebuffer and virtual-camera client
 ```
 
 - [Repository overview](../README.md)
 - [Desktop client](../beamicom_scenic/README.md)
+- [Local stream client](../beamicom_stream/README.md)
 - [Web client](../beamicom_phx/README.md)
 
 The core produces one `%Beamicom.NES.Framebuffer{}` per PPU frame plus a stream
@@ -53,6 +56,43 @@ drive it directly:
 {:ok, _} = Beamicom.NES.Runtime.start_link(rom: "roms/game.nes")
 Beamicom.NES.Runtime.set_buttons(1, [:a, :start])
 Beamicom.NES.Output.latest()   # => %Beamicom.NES.Framebuffer{}
+```
+
+### Terminal input
+
+`Beamicom.TerminalInput` is a reusable Linux terminal adapter for interactive
+clients. It accepts callbacks rather than depending on a client project:
+
+```elixir
+{:ok, input} =
+  Beamicom.TerminalInput.start_link(
+    on_buttons: fn port, buttons ->
+      Beamicom.NES.Runtime.set_buttons(port, buttons)
+    end
+  )
+
+Beamicom.TerminalInput.run(input)
+```
+
+It parses ANSI arrows plus X/Z, Enter, and Space, and restores `/dev/tty` after
+raw-mode input. Since standard terminals have no key-up events, held buttons
+auto-release unless refreshed by keyboard repeat.
+
+### EI Unix-socket input
+
+Core Beamicom implements the standard binary EI handshake, device, button, and
+frame interfaces directly in Elixir:
+
+```elixir
+{:ok, server} =
+  Beamicom.EI.Server.start_link(
+    path: Beamicom.EI.default_path(),
+    on_buttons: &Beamicom.NES.Runtime.set_buttons/2
+  )
+
+{:ok, client} = Beamicom.EI.Client.start_link(path: Beamicom.EI.default_path())
+:ok = Beamicom.EI.Client.await_ready(client)
+:ok = Beamicom.EI.Client.set_buttons(client, 1, [:right, :a])
 ```
 
 ### Headless capture (no dependencies needed)

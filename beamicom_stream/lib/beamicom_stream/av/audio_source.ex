@@ -1,18 +1,11 @@
-defmodule BeamicomPhx.AV.AudioSource do
-  @moduledoc """
-  Membrane push source: subscribes to `Beamicom.NES.Output` audio and emits each
-  pre-encoded signed-16-bit little-endian PCM chunk as a `Membrane.RawAudio`
-  buffer (44100 Hz mono — the APU's native rate).
-
-  Unlike video (latest-frame coalesced), audio is a stream — every chunk is
-  forwarded so no samples are dropped. PTS accumulates by cumulative sample
-  count so it is monotonic and drift-free.
-  """
+defmodule BeamicomStream.AV.AudioSource do
+  @moduledoc "Membrane push source for Beamicom's 44.1 kHz mono s16le audio."
   use Membrane.Source
 
   alias Beamicom.NES.Output
-
   @sample_rate 44_100
+
+  def_options(owner: [spec: pid() | nil, default: nil])
 
   def_output_pad(:output,
     accepted_format: %Membrane.RawAudio{
@@ -24,11 +17,12 @@ defmodule BeamicomPhx.AV.AudioSource do
   )
 
   @impl true
-  def handle_init(_ctx, _opts), do: {[], %{count: 0}}
+  def handle_init(_ctx, opts), do: {[], %{count: 0, owner: opts.owner}}
 
   @impl true
   def handle_playing(_ctx, state) do
     Output.subscribe_audio()
+    if state.owner, do: send(state.owner, {:beamicom_stream_source_ready, :audio})
 
     format = %Membrane.RawAudio{
       channels: 1,

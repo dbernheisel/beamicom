@@ -30,10 +30,35 @@ defmodule BeamicomPhx.Application do
   # frames, so it no longer depends on a ROM being present at boot.
   defp emulator_children do
     case Application.get_env(:beamicom_phx, :mode, :server) do
-      :server -> [BeamicomPhx.Emulator] ++ rtp_broadcast_children()
+      :server -> [BeamicomPhx.Emulator] ++ ei_children() ++ rtp_broadcast_children()
       :client -> [{BeamicomPhx.AV.Relay, listen_port: BeamicomPhx.RtpConfig.listen_port()}]
       _ -> []
     end
+  end
+
+  defp ei_children do
+    path = Beamicom.EI.default_path()
+
+    [
+      %{
+        id: BeamicomPhx.EIServer,
+        start:
+          {Beamicom.EI.Server, :start_link,
+           [
+             [
+               name: BeamicomPhx.EIServer,
+               path: path,
+               on_buttons: &Beamicom.NES.Runtime.set_buttons/2
+             ]
+           ]}
+      },
+      %{
+        id: BeamicomPhx.EIClient,
+        start:
+          {Beamicom.EI.Client, :start_link,
+           [[registered_name: BeamicomPhx.EIClient, name: "beamicom-phx", path: path]]}
+      }
+    ]
   end
 
   # Load the ROM named by BEAMICOM_ROM at boot, if server mode and one is set.
@@ -55,9 +80,9 @@ defmodule BeamicomPhx.Application do
       target ->
         [
           %{
-            id: BeamicomPhx.AV.RtpBroadcast,
+            id: BeamicomStream.AV.RtpBroadcast,
             start:
-              {Membrane.Pipeline, :start_link, [BeamicomPhx.AV.RtpBroadcast, [target: target]]}
+              {Membrane.Pipeline, :start_link, [BeamicomStream.AV.RtpBroadcast, [target: target]]}
           }
         ]
     end

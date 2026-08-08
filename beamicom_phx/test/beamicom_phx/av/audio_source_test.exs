@@ -9,7 +9,7 @@ defmodule BeamicomPhx.AV.AudioSourceTest do
     pipeline =
       Testing.Pipeline.start_link_supervised!(
         spec: [
-          child(:src, BeamicomPhx.AV.AudioSource)
+          child(:src, BeamicomStream.AV.AudioSource)
           |> child(:sink, Testing.Sink)
         ]
       )

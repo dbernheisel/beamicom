@@ -17,7 +17,7 @@ defmodule BeamicomPhx.AV.RtpSerializerTest do
             output: buffers,
             stream_format: %Membrane.RTP{}
           })
-          |> child(:ser, %BeamicomPhx.AV.RtpSerializer{
+          |> child(:ser, %BeamicomStream.AV.RtpSerializer{
             ssrc: 12345,
             payload_type: 96,
             clock_rate: 90_000

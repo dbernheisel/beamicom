@@ -52,11 +52,11 @@ defmodule BeamicomPhx.AV.Relay do
     spec = [
       child(:udp_video, %UDP.Source{local_port_no: port})
       |> child(:video_parser, RTP.Parser)
-      |> child(:video_pts, %BeamicomPhx.AV.RtpPts{clock_rate: 90_000})
+      |> child(:video_pts, %BeamicomStream.AV.RtpPts{clock_rate: 90_000})
       |> child(:video_tee, Membrane.Tee),
       child(:udp_audio, %UDP.Source{local_port_no: port + 2})
       |> child(:audio_parser, RTP.Parser)
-      |> child(:audio_pts, %BeamicomPhx.AV.RtpPts{clock_rate: 48_000})
+      |> child(:audio_pts, %BeamicomStream.AV.RtpPts{clock_rate: 48_000})
       |> child(:audio_tee, Membrane.Tee)
     ]
 
