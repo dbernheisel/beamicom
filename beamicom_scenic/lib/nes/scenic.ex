@@ -44,6 +44,24 @@ defmodule Beamicom.NES.Scenic do
     {:ok, _} =
       Beamicom.NES.Runtime.start_link([speed: speed, audio_slices: slices] ++ source_opts(path))
 
+    socket = Beamicom.EI.default_path()
+
+    {:ok, _} =
+      Beamicom.EI.Server.start_link(
+        name: Beamicom.NES.Scenic.EIServer,
+        path: socket,
+        on_buttons: &Beamicom.NES.Runtime.set_buttons/2
+      )
+
+    {:ok, client} =
+      Beamicom.EI.Client.start_link(
+        registered_name: Beamicom.NES.Scenic.EIClient,
+        name: "beamicom-scenic",
+        path: socket
+      )
+
+    :ok = Beamicom.EI.Client.await_ready(client)
+
     # Extra height below the game for the control bar (Save button), so it never
     # overlaps the screen.
     config =

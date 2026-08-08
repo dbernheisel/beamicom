@@ -1,9 +1,10 @@
 # BeamicomV4L2
 
 `BeamicomV4L2` is a Beamicom client backed by a Rustler NIF. It boots a ROM,
-renders live emulator frames to the Linux framebuffer, and continuously copies
-that display to a V4L2 video-output device. Common 16-, 24-, and 32-bit
-true-color framebuffer layouts are converted to packed YUYV.
+renders live emulator frames to the Linux framebuffer, continuously copies that
+display to a V4L2 video-output device, and plays emulator audio through
+`ffplay`. Common 16-, 24-, and 32-bit true-color framebuffer layouts are
+converted to packed YUYV.
 
 The NIF owns a background Rust thread, so frame conversion, pacing, and device
 I/O do not block a BEAM scheduler. Dropping or stopping the Elixir process
@@ -20,7 +21,18 @@ cd beamicom_v4l2
 BEAMICOM_V4L2_BUILD=true mix deps.get
 ```
 
-Start an interactive Elixir session:
+Start the player and its Unix-domain controller socket:
+
+```sh
+BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 /absolute/path/to/game.nes
+```
+
+The command stays in the foreground and prints the socket path. By default it
+is `$XDG_RUNTIME_DIR/beamicom-ei.sock`, or `/tmp/beamicom-ei.sock`
+when `XDG_RUNTIME_DIR` is unavailable. Stop the player with Ctrl-C.
+
+To start the player programmatically instead, open an interactive Elixir
+session:
 
 ```sh
 BEAMICOM_V4L2_BUILD=true iex -S mix
@@ -31,6 +43,10 @@ At the IEx prompt, boot a legally obtained ROM:
 ```elixir
 {:ok, player} = BeamicomV4L2.play("path/to/game.nes")
 ```
+
+Audio begins automatically through the host's default SDL audio device. It is
+fed directly from the emulator as signed 16-bit, 44.1 kHz mono PCM; the video
+preview command below does not need to play or capture audio itself.
 
 The game now runs at 60 fps and uses Scenic-style nearest-neighbor 3× scaling.
 Its 768×720 video is drawn in the top-left of `/dev/fb0` and that game region is
@@ -118,6 +134,9 @@ BeamicomV4L2.status(player)
 #=>   rom: "/absolute/path/to/game.nes",
 #=>   frame: 120,
 #=>   scale: 3,
+#=>   audio: %{
+#=>     enabled: true, running: true, error: nil, chunks: 240, samples: 88200
+#=>   },
 #=>   controls: %{1 => [], 2 => []},
 #=>   stream: %{running: true, frames: 119, error: nil}
 #=> }
@@ -126,10 +145,97 @@ BeamicomV4L2.stop(player)
 ```
 
 The ROM is required. The defaults are `/dev/fb0`, `/dev/video-beamicom`, 60
-fps, and 3× nearest-neighbor scaling. Set `scale: 1` through `scale: 8` when
-starting the player to select another integer scale.
+fps, 3× nearest-neighbor scaling, and audio enabled. Set `scale: 1` through
+`scale: 8` when starting the player to select another integer scale.
+
+### Audio
+
+The player subscribes to the emulator's audio output and owns a separate
+`ffplay` process for the lifetime of the ROM. Audio is best-effort: if `ffplay`
+is unavailable or its audio device fails, `status/1` reports the error while
+emulation and V4L2 video continue running.
+
+Disable audio for CI, headless hosts, or capture-only use:
+
+```elixir
+{:ok, player} = BeamicomV4L2.play("path/to/game.nes", audio: false)
+```
+
+The runtime publishes audio twice per video frame by default to keep playback
+latency down. `audio_slices: 1` uses one chunk per frame; higher values trade
+more emulator scheduling overhead for smaller chunks. Slow-motion playback can
+use `speed`, and the audio sink applies matching pitch-preserving tempo:
+
+```elixir
+BeamicomV4L2.play("path/to/game.nes", speed: 0.5, audio_slices: 2)
+```
+
+Advanced callers can replace the player command, for example when routing PCM
+to a system-specific virtual sink:
+
+```elixir
+audio_command = [
+  "ffmpeg", "-loglevel", "error",
+  "-f", "s16le", "-ar", "44100", "-ac", "1", "-i", "pipe:0",
+  "-f", "pulse", "beamicom"
+]
+
+BeamicomV4L2.play("path/to/game.nes", audio_command: audio_command)
+```
+
+The command receives raw signed 16-bit little-endian, 44.1 kHz mono PCM on
+standard input.
+
+V4L2 devices carry video only, so `/dev/video-beamicom` cannot contain an audio
+track. To produce one A/V recording or network stream, route Beamicom audio to
+a PipeWire/PulseAudio or ALSA virtual sink, then give both the V4L2 device and
+that sink's monitor source to a muxer. For example, create a PulseAudio null sink
+(also supported by PipeWire's PulseAudio compatibility layer):
+
+```sh
+pactl load-module module-null-sink sink_name=beamicom
+```
+
+Start the player with the `audio_command` above, then mux its monitor source with
+the video:
+
+```sh
+ffmpeg \
+  -f v4l2 -framerate 60 -i /dev/video-beamicom \
+  -f pulse -i beamicom.monitor \
+  -c:v libx264 -c:a aac beamicom.mkv
+```
+
+Configure `audio_command` to send raw PCM to that sink instead of the default
+`ffplay`. This keeps the virtual camera usable by ordinary V4L2 clients while
+the container or streaming protocol provides the combined A/V output.
 
 ### Controls
+
+#### Unix socket control
+
+`mix beamicom.v4l2` starts a pure-Elixir EI protocol server on a mode-`0600`
+Unix-domain socket. Its terminal controller, Phoenix, and Scenic all use the
+shared `Beamicom.EI.Client`. The wire format is the standard binary EI protocol.
+
+The server advertises two devices with the `ei_button` capability. Changes
+commit on `ei_device.frame`; disconnecting releases that client's held buttons.
+
+```elixir
+{:ok, client} = Beamicom.EI.Client.start_link(path: Beamicom.EI.default_path())
+:ok = Beamicom.EI.Client.await_ready(client)
+:ok = Beamicom.EI.Client.set_buttons(client, 1, [:right, :a])
+```
+
+Select another path when launching if needed:
+
+```sh
+mix beamicom.v4l2 game.nes --socket /tmp/my-controller.sock
+```
+
+The reusable EI server, client, and codec live in core Beamicom without a NIF.
+
+#### Direct API
 
 The player tracks held buttons independently for controller ports 1 and 2.
 Browser-style key names and Scenic-style key atoms use this default mapping:
@@ -254,10 +360,10 @@ options v4l2loopback devices=1 video_nr=2 card_label="Beamicom Framebuffer" excl
 
 ### 4. Run the E2E test
 
-The test starts `BeamicomV4L2.Player` with the checked-in Blargg
-`01.basics.nes` ROM, waits for live emulation, exercises the control mapping,
-captures the continuously rendered framebuffer through the Rust NIF, and
-compares the recovered image against the emulator output:
+The test starts `BeamicomV4L2.Player` with audio explicitly disabled and the
+checked-in Blargg `01.basics.nes` ROM, waits for live emulation, exercises the
+control mapping, captures the continuously rendered framebuffer through the
+Rust NIF, and compares the recovered image against the emulator output:
 
 ```sh
 BEAMICOM_V4L2_BUILD=true \

@@ -161,7 +161,7 @@ defmodule Beamicom.NES.Scenic.Screen do
         do: MapSet.put(scene.assigns.pressed, @buttons[k]),
         else: MapSet.delete(scene.assigns.pressed, @buttons[k])
 
-    Runtime.set_buttons(1, MapSet.to_list(pressed))
+    Beamicom.EI.Client.set_buttons(Beamicom.NES.Scenic.EIClient, 1, MapSet.to_list(pressed))
     assign(scene, pressed: pressed)
   end
 
