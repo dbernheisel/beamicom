@@ -1,0 +1,89 @@
+name: Build beamicom_v4l2 precompiled NIFs
+
+on:
+  push:
+    tags:
+      - "beamicom_v4l2-v*"
+
+jobs:
+  test_rust:
+    name: Rust checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust with mise
+        uses: jdx/mise-action@v4
+        with:
+          cache: true
+          install: true
+          install_args: rust
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path beamicom_v4l2/native/beamicom_v4l2_nif/Cargo.toml --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path beamicom_v4l2/native/beamicom_v4l2_nif/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path beamicom_v4l2/native/beamicom_v4l2_nif/Cargo.toml
+
+  build_release:
+    name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }}
+    needs: test_rust
+    runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        nif: ["2.15"]
+        job:
+          - {target: arm-unknown-linux-gnueabihf, os: ubuntu-22.04, use-cross: true}
+          - {target: aarch64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true}
+          - {target: aarch64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true}
+          - {target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: false}
+          - {target: x86_64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract project version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^  @version "\(.*\)"/\1/p' beamicom_v4l2/mix.exs)
+          echo "PROJECT_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install toolchain with mise
+        uses: jdx/mise-action@v4
+        with:
+          cache: true
+          install: true
+          install_args: rust
+
+      - name: Build archive
+        id: build-crate
+        uses: philss/rustler-precompiled-action@v1.1.5
+        with:
+          project-name: beamicom_v4l2_nif
+          project-version: ${{ env.PROJECT_VERSION }}
+          target: ${{ matrix.job.target }}
+          nif-version: ${{ matrix.nif }}
+          use-cross: ${{ matrix.job.use-cross }}
+          project-dir: beamicom_v4l2/native/beamicom_v4l2_nif
+
+      - uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.build-crate.outputs.file-path }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.build-crate.outputs.file-name }}
+          path: ${{ steps.build-crate.outputs.file-path }}
+
+      - name: Publish release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build-crate.outputs.file-path }}

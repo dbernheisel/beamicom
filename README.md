@@ -18,6 +18,7 @@ browser.
 | [`beamicom`](./beamicom/) | Dependency-free emulator core: CPU, PPU, APU, 16 mapper numbers, input, and audio/video output | [Core documentation](./beamicom/README.md) · [Mapper compatibility](./beamicom/MAPPERS.md) |
 | [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
 | [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client that streams audio/video over WebRTC and accepts browser controls | [Web setup and modes](./beamicom_phx/README.md) |
+| [`beamicom_v4l2`](./beamicom_v4l2/) | Linux framebuffer/V4L2 client that boots ROMs and maps NES controls | [Build and usage](./beamicom_v4l2/README.md) |
 
 Both clients use the core through the local path dependency
 `../beamicom`, so keep these directories together when working with an
@@ -25,8 +26,8 @@ individual project.
 
 ```text
 beamicom_scenic ─┐
-                 ├──> beamicom
-beamicom_phx ────┘
+beamicom_phx ────┼──> beamicom
+beamicom_v4l2 ───┘
 ```
 
 ## Quick start

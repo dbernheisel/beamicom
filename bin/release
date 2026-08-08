@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+project_dir="$repository_root/beamicom_v4l2"
+workflow="beamicom_v4l2_release.yml"
+release_branch=${RELEASE_BRANCH:-main}
+publish=false
+resume=false
+
+usage() {
+  cat <<'USAGE'
+Usage: bin/release [--resume] [--publish]
+
+Build and release the beamicom_v4l2 precompiled NIFs using the flow recommended
+by RustlerPrecompiled:
+
+  1. validate the version, repository, and local test suite
+  2. create and push beamicom_v4l2-v<VERSION>
+  3. wait for the GitHub Actions precompiled-NIF build
+  4. download all artifacts and generate the checksum manifest
+  5. unpack the Hex package for inspection
+
+Options:
+  --resume   Reuse an existing local/remote release tag after CI was started.
+  --publish  Publish the validated package to Hex after generating checksums.
+  -h, --help Show this help.
+
+Set RELEASE_BRANCH to release from a branch other than main.
+USAGE
+}
+
+fail() {
+  echo "release: $*" >&2
+  exit 1
+}
+
+for argument in "$@"; do
+  case "$argument" in
+    --resume) resume=true ;;
+    --publish) publish=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; fail "unknown argument: $argument" ;;
+  esac
+done
+
+for command in git gh mise sed; do
+  command -v "$command" >/dev/null 2>&1 || fail "$command is required"
+done
+
+version=$(sed -n 's/^  @version "\([^"]*\)"/\1/p' "$project_dir/mix.exs")
+[[ -n "$version" ]] || fail "could not read @version from beamicom_v4l2/mix.exs"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || \
+  fail "invalid semantic version: $version"
+
+tag="beamicom_v4l2-v$version"
+checksum="$project_dir/checksum-Elixir.BeamicomV4L2.Native.exs"
+
+hex_path_dependencies() {
+  sed -n '/{:[A-Za-z0-9_]*,.*path:/p' "$project_dir/mix.exs"
+}
+
+cd "$repository_root"
+
+branch=$(git branch --show-current)
+[[ "$branch" == "$release_branch" ]] || \
+  fail "expected branch $release_branch, currently on ${branch:-detached HEAD}"
+
+if [[ "$publish" == true && -n "$(hex_path_dependencies)" ]]; then
+  fail "Hex publication is unsafe while mix.exs contains path dependencies; publish beamicom to Hex and use a Hex dependency first"
+fi
+
+if [[ "$resume" == false ]]; then
+  [[ -z "$(git status --porcelain)" ]] || fail "working tree must be clean"
+  git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1 && \
+    fail "tag $tag already exists locally; use --resume after CI has been started"
+  git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && \
+    fail "tag $tag already exists on origin; use --resume after CI has been started"
+
+  echo "==> Testing beamicom_v4l2 $version"
+  (
+    cd "$project_dir"
+    BEAMICOM_V4L2_BUILD=true mise exec -- mix deps.get
+    BEAMICOM_V4L2_BUILD=true mise exec -- mix format --check-formatted
+    BEAMICOM_V4L2_BUILD=true mise exec -- mix test
+    mise exec -- mix test.rust
+  )
+
+  echo "==> Tagging and pushing $tag"
+  git tag --annotate "$tag" --message "beamicom_v4l2 $version"
+  git push origin "HEAD:refs/heads/$release_branch" "refs/tags/$tag"
+else
+  git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1 || \
+    fail "local tag $tag does not exist"
+  [[ "$(git rev-list -n 1 "$tag")" == "$(git rev-parse HEAD)" ]] || \
+    fail "$tag does not point at HEAD"
+  git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 || \
+    fail "$tag does not exist on origin"
+fi
+
+echo "==> Waiting for $workflow"
+run_id=""
+for _attempt in {1..60}; do
+  run_id=$(
+    gh run list \
+      --workflow "$workflow" \
+      --branch "$tag" \
+      --event push \
+      --limit 1 \
+      --json databaseId \
+      --jq '.[0].databaseId // empty'
+  )
+  [[ -n "$run_id" ]] && break
+  sleep 5
+done
+[[ -n "$run_id" ]] || fail "could not find the GitHub Actions run for $tag"
+gh run watch "$run_id" --exit-status
+
+echo "==> Generating RustlerPrecompiled checksums"
+(
+  cd "$project_dir"
+  mise exec -- mix rustler_precompiled.download BeamicomV4L2.Native --all --print
+)
+[[ -s "$checksum" ]] || fail "checksum manifest was not generated: $checksum"
+
+echo "==> Building and unpacking the Hex package"
+package_dir=$(mktemp -d "${TMPDIR:-/tmp}/beamicom_v4l2-$version.XXXXXX")
+(
+  cd "$project_dir"
+  mise exec -- mix hex.build --unpack --output "$package_dir"
+)
+echo "Unpacked package: $package_dir"
+
+if [[ "$publish" == true ]]; then
+  echo "==> Publishing beamicom_v4l2 $version to Hex"
+  (cd "$project_dir" && mise exec -- mix hex.publish)
+else
+  echo
+  echo "Release artifacts and checksums are ready. Inspect the unpacked package, then run:"
+  echo "  bin/release --resume --publish"
+  if [[ -n "$(hex_path_dependencies)" ]]; then
+    echo
+    echo "Hex publication remains blocked because beamicom is currently a path-only dependency."
+  fi
+fi
