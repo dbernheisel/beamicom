@@ -16,6 +16,10 @@ defmodule BeamicomV4L2 do
           | {:output, Path.t()}
           | {:fps, pos_integer()}
           | {:scale, 1..8}
+          | {:speed, number()}
+          | {:audio, boolean()}
+          | {:audio_slices, pos_integer()}
+          | {:audio_command, [String.t()]}
           | {:controls, map()}
           | {:name, GenServer.name()}
 

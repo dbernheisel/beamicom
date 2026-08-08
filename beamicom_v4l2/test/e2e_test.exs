@@ -36,6 +36,7 @@ defmodule BeamicomV4L2E2ETest do
                output: output,
                fps: 60,
                scale: @scale,
+               audio: false,
                name: BeamicomV4L2.Player
              )
 

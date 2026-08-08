@@ -15,7 +15,7 @@ defmodule BeamicomV4L2.Player do
   require Logger
 
   alias Beamicom.NES.{Output, Palette, Runtime}
-  alias BeamicomV4L2.Stream
+  alias BeamicomV4L2.{Audio, Stream}
 
   @buttons ~w(up down left right a b start select)a
   @default_controls %{
@@ -73,16 +73,19 @@ defmodule BeamicomV4L2.Player do
     output = Keyword.get(options, :output, "/dev/video-beamicom")
     fps = Keyword.get(options, :fps, 60)
     scale = Keyword.get(options, :scale, 3)
+    speed = Keyword.get(options, :speed, 1.0)
     controls = Map.merge(@default_controls, Map.new(Keyword.get(options, :controls, %{})))
 
     with :ok <- regular_file(rom),
          :ok <- valid_scale(scale),
          {:ok, renderer} <- start_renderer(framebuffer, fps, scale),
          :ok <- Output.subscribe_video(),
+         audio <- start_audio(options, speed),
          {:ok, runtime} <-
            Runtime.start_link(
              rom: rom,
-             speed: Keyword.get(options, :speed, 1.0),
+             speed: speed,
+             audio_slices: Keyword.get(options, :audio_slices, 2),
              name: Keyword.get(options, :runtime_name, BeamicomV4L2.Runtime)
            ),
          {:ok, stream} <-
@@ -99,6 +102,7 @@ defmodule BeamicomV4L2.Player do
          renderer: renderer,
          runtime: runtime,
          stream: stream,
+         audio: audio,
          controls: controls,
          held: %{1 => MapSet.new(), 2 => MapSet.new()},
          scale: scale,
@@ -116,6 +120,7 @@ defmodule BeamicomV4L2.Player do
       rom: state.rom,
       frame: state.frame,
       scale: state.scale,
+      audio: audio_status(state.audio),
       controls: Map.new(state.held, fn {port, held} -> {port, MapSet.to_list(held)} end),
       stream: Stream.status(state.stream)
     }
@@ -177,6 +182,16 @@ defmodule BeamicomV4L2.Player do
     {:stop, {:framebuffer_renderer_exit, status}, state}
   end
 
+  def handle_info({:EXIT, pid, reason}, %{audio: %{pid: pid}} = state) do
+    error = inspect(reason)
+
+    if reason not in [:normal, :shutdown] do
+      Logger.warning("audio playback stopped: #{error}; video will continue")
+    end
+
+    {:noreply, %{state | audio: %{enabled: true, pid: nil, error: error}}}
+  end
+
   def handle_info({:EXIT, pid, reason}, state) when pid in [state.runtime, state.stream],
     do: {:stop, {:child_exit, reason}, state}
 
@@ -184,6 +199,9 @@ defmodule BeamicomV4L2.Player do
 
   @impl true
   def terminate(_reason, state) do
+    if is_pid(state.audio.pid) and Process.alive?(state.audio.pid),
+      do: GenServer.stop(state.audio.pid)
+
     if is_pid(state.stream) and Process.alive?(state.stream), do: GenServer.stop(state.stream)
     if is_pid(state.runtime) and Process.alive?(state.runtime), do: GenServer.stop(state.runtime)
     if is_port(state.renderer) and Port.info(state.renderer), do: Port.close(state.renderer)
@@ -229,6 +247,46 @@ defmodule BeamicomV4L2.Player do
          )}
     end
   end
+
+  defp start_audio(options, speed) do
+    if Keyword.get(options, :audio, true) do
+      audio_options = [speed: speed]
+
+      audio_options =
+        case Keyword.fetch(options, :audio_command) do
+          {:ok, command} -> Keyword.put(audio_options, :command, command)
+          :error -> audio_options
+        end
+
+      case Audio.start_link(audio_options) do
+        {:ok, pid} ->
+          %{enabled: true, pid: pid, error: nil}
+
+        {:error, reason} ->
+          error = inspect(reason)
+          Logger.warning("audio playback disabled: #{error}")
+          %{enabled: true, pid: nil, error: error}
+
+        :ignore ->
+          %{enabled: true, pid: nil, error: "audio player declined to start"}
+      end
+    else
+      %{enabled: false, pid: nil, error: nil}
+    end
+  end
+
+  defp audio_status(%{enabled: false}), do: %{enabled: false, running: false, error: nil}
+
+  defp audio_status(%{pid: pid} = audio) when is_pid(pid) do
+    try do
+      Map.merge(%{enabled: true, error: audio.error}, Audio.status(pid))
+    catch
+      :exit, _reason -> %{enabled: true, running: false, error: audio.error || "audio stopped"}
+    end
+  end
+
+  defp audio_status(audio),
+    do: %{enabled: audio.enabled, running: false, error: audio.error}
 
   defp regular_file(path) do
     case File.stat(path) do
