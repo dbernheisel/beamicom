@@ -49,6 +49,11 @@ defmodule BeamicomPhxWeb.WatchLive do
       assign(socket,
         held: MapSet.new(),
         mode: mode,
+        controller_url:
+          if(mode == :client,
+            do: Application.get_env(:beamicom_phx, :controller_url),
+            else: nil
+          ),
         rom_name: nil,
         saves: Saves.list()
       )
@@ -75,6 +80,7 @@ defmodule BeamicomPhxWeb.WatchLive do
       id="game"
       phx-hook="PreventGameKeyScroll"
       phx-window-keyup="keyup"
+      data-controller-url={@controller_url}
       class="crt-room"
     >
       <div class="crt">
@@ -110,12 +116,11 @@ defmodule BeamicomPhxWeb.WatchLive do
           </div>
         </div>
       </div>
-      <p :if={@mode == :server} class="crt__controls">
+      <p class="crt__controls">
         Arrows = D-pad &nbsp;·&nbsp; X = A &nbsp;·&nbsp; Z = B &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
       </p>
 
       <div
-        :if={@mode == :server}
         id="gamepad"
         class="gamepad"
         phx-hook="Gamepad"

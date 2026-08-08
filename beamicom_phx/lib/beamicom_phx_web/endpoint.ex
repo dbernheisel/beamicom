@@ -15,6 +15,12 @@ defmodule BeamicomPhxWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  socket "/controller", BeamicomPhxWeb.ControllerSocket,
+    # Client-mode pages may be served by a different local Phoenix node. The
+    # controller protocol itself is still a normal Phoenix Channel websocket.
+    websocket: [check_origin: false],
+    longpoll: false
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),

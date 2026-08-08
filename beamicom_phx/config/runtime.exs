@@ -33,10 +33,22 @@ port =
     {_, :client} -> 4046
   end
 
-config :beamicom_phx, BeamicomPhxWeb.Endpoint, http: [port: port]
+http =
+  case System.get_env("BEAMICOM_IP") do
+    nil ->
+      [port: port]
 
-# Beamicom mode: "server" runs the emulator and streams it; "client" (Phase 2)
-# relays a remote server. Watch-only Phase 1 supports server mode only.
+    address ->
+      case :inet.parse_address(String.to_charlist(address)) do
+        {:ok, ip} -> [port: port, ip: ip]
+        {:error, _} -> raise ArgumentError, "invalid BEAMICOM_IP #{inspect(address)}"
+      end
+  end
+
+config :beamicom_phx, BeamicomPhxWeb.Endpoint, http: http
+
+# Beamicom mode: "server" runs the emulator and streams it; "client" relays a
+# remote server's A/V and sends browser controller input back over a Channel.
 # Explicit map (not String.to_atom) — never intern atoms from env/user input.
 config :beamicom_phx, :mode, mode
 
@@ -83,9 +95,27 @@ if mode == :server and config_env() != :test do
 end
 
 if mode == :client and config_env() != :test do
+  server_url = System.get_env("BEAMICOM_SERVER_URL", "http://127.0.0.1:4044")
+  server_uri = URI.parse(server_url)
+
+  unless server_uri.scheme in ["http", "https"] and is_binary(server_uri.host) do
+    raise ArgumentError,
+          "invalid BEAMICOM_SERVER_URL #{inspect(server_url)}, expected http(s)://host[:port]"
+  end
+
+  controller_uri = %URI{
+    server_uri
+    | scheme: if(server_uri.scheme == "https", do: "wss", else: "ws"),
+      path: "/controller",
+      query: nil,
+      fragment: nil
+  }
+
   config :beamicom_phx,
          :rtp_listen,
          String.to_integer(System.get_env("BEAMICOM_RTP_LISTEN", "5000"))
+
+  config :beamicom_phx, :controller_url, URI.to_string(controller_uri)
 end
 
 if config_env() == :dev do

@@ -21,9 +21,13 @@ export default {
       el.addEventListener("pointerdown", e => {
         e.preventDefault()
         try { el.setPointerCapture(e.pointerId) } catch (_) {}
+        window.dispatchEvent(new CustomEvent("beamicom:button", {detail: {button, down: true}}))
         this.pushEvent("button_down", {button})
       })
-      const release = () => this.pushEvent("button_up", {button})
+      const release = () => {
+        window.dispatchEvent(new CustomEvent("beamicom:button", {detail: {button, down: false}}))
+        this.pushEvent("button_up", {button})
+      }
       el.addEventListener("pointerup", release)
       el.addEventListener("pointercancel", release)
     }
