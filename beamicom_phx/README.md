@@ -95,8 +95,13 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
 
 - **Video** — CRT-styled 4:3 WebRTC stream, unmuted on first key/pointer press
   (browsers block autoplay audio).
-- **Controller** — keyboard bindings and an on-screen touch gamepad. In client
-  mode, input is relayed to the server selected by `BEAMICOM_SERVER_URL`.
+- **Controller** — keyboard bindings, an on-screen touch gamepad, and physical
+  USB/Bluetooth controllers through the browser Gamepad API. The first connected
+  physical controller uses its standard D-pad/left stick, A/B, Select, and Start
+  mapping. In client mode, input is relayed to the server selected by
+  `BEAMICOM_SERVER_URL`. Player 1 remains local to the server; the first connected
+  client becomes Player 2. Additional clients wait in a FIFO queue and are
+  notified when they move up or become Player 2.
 
 | Key | NES button |
 |-----|------------|

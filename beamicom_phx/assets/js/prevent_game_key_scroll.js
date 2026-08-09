@@ -11,27 +11,78 @@ const keyButtons = {
 
 export default {
   mounted() {
-    this.held = new Set()
+    this.heldBySource = {
+      keyboard: new Set(),
+      pointer: new Set(),
+      physical: new Set(),
+    }
     this.controllerUrl = this.el.dataset.controllerUrl
+    this.notificationSound = new Audio("/sounds/you-are-playing.wav")
+    this.notificationSound.preload = "auto"
+    this.lastNotificationSoundAt = Number.NEGATIVE_INFINITY
+    this.playNotificationSound = () => {
+      const now = performance.now()
+      if (now - this.lastNotificationSoundAt < 750) return
+
+      this.lastNotificationSoundAt = now
+      this.notificationSound.currentTime = 0
+      const playback = this.notificationSound.play()
+      if (playback) playback.catch(() => {})
+    }
+    this.setControllerStatus = message => {
+      const status = document.getElementById("player-status")
+      const notification = document.getElementById("player-notification")
+      if (!status || !notification || !message) return
+
+      status.textContent = message
+      clearTimeout(this.controllerStatusTimer)
+      cancelAnimationFrame(this.controllerStatusFrame)
+      notification.classList.remove("is-visible")
+
+      this.controllerStatusFrame = requestAnimationFrame(() => {
+        notification.classList.add("is-visible")
+        this.playNotificationSound()
+        this.controllerStatusTimer = setTimeout(() => {
+          notification.classList.remove("is-visible")
+        }, 4000)
+      })
+    }
+    this.handleEvent("player_notification_sound", () => this.playNotificationSound())
 
     if (this.controllerUrl) {
       this.controllerSocket = new Socket(this.controllerUrl)
       this.controllerSocket.connect()
-      this.controllerChannel = this.controllerSocket.channel("controller:1", {})
+      this.controllerChannel = this.controllerSocket.channel("controller:lobby", {})
       this.controllerChannel.join()
-        .receive("ok", () => this.sendButtons())
+        .receive("ok", response => {
+          this.setControllerStatus(response.message)
+          if (response.player) this.sendButtons()
+        })
         .receive("error", response => console.error("controller channel rejected", response))
+
+      this.controllerChannel.on("announcement", response => {
+        this.setControllerStatus(response.message)
+      })
+      this.controllerChannel.on("player_assignment", response => {
+        this.setControllerStatus(response.message)
+        this.sendButtons()
+      })
+      this.controllerChannel.on("queue_position", response => {
+        this.setControllerStatus(response.message)
+      })
     }
 
-    this.setButton = (button, down) => {
+    this.setButton = (source, button, down) => {
       if (!button) return
-      down ? this.held.add(button) : this.held.delete(button)
+      const held = this.heldBySource[source]
+      down ? held.add(button) : held.delete(button)
       this.sendButtons()
     }
 
     this.sendButtons = () => {
       if (this.controllerChannel) {
-        this.controllerChannel.push("buttons", {buttons: [...this.held]})
+        const held = new Set(Object.values(this.heldBySource).flatMap(set => [...set]))
+        this.controllerChannel.push("buttons", {buttons: [...held]})
       }
     }
 
@@ -42,16 +93,22 @@ export default {
     this.handler = e => {
       if (gameKeys.has(e.key)) e.preventDefault()
       if (e.repeat) return
-      this.setButton(keyButtons[e.key.toLowerCase()], true)
+      this.setButton("keyboard", keyButtons[e.key.toLowerCase()], true)
       this.pushEvent("keydown", {key: e.key})
     }
     window.addEventListener("keydown", this.handler)
 
-    this.keyup = e => this.setButton(keyButtons[e.key.toLowerCase()], false)
+    this.keyup = e => this.setButton("keyboard", keyButtons[e.key.toLowerCase()], false)
     window.addEventListener("keyup", this.keyup)
 
-    this.gamepad = e => this.setButton(e.detail.button, e.detail.down)
-    window.addEventListener("beamicom:button", this.gamepad)
+    this.pointer = e => this.setButton("pointer", e.detail.button, e.detail.down)
+    window.addEventListener("beamicom:button", this.pointer)
+
+    this.physicalGamepad = e => {
+      this.heldBySource.physical = new Set(e.detail.buttons || [])
+      this.sendButtons()
+    }
+    window.addEventListener("beamicom:gamepad-state", this.physicalGamepad)
 
     // The Live.Player <video> ships with `controls`, so when it has focus it
     // swallows game keys (Enter/Space/arrows) for media shortcuts instead of
@@ -86,13 +143,17 @@ export default {
   },
   destroyed() {
     clearInterval(this.videoTimer)
-    this.held.clear()
+    clearTimeout(this.controllerStatusTimer)
+    cancelAnimationFrame(this.controllerStatusFrame)
+    this.notificationSound.pause()
+    Object.values(this.heldBySource).forEach(held => held.clear())
     this.sendButtons()
     if (this.controllerChannel) this.controllerChannel.leave()
     if (this.controllerSocket) this.controllerSocket.disconnect()
     window.removeEventListener("keydown", this.handler)
     window.removeEventListener("keyup", this.keyup)
-    window.removeEventListener("beamicom:button", this.gamepad)
+    window.removeEventListener("beamicom:button", this.pointer)
+    window.removeEventListener("beamicom:gamepad-state", this.physicalGamepad)
     window.removeEventListener("keydown", this.unmute)
     window.removeEventListener("pointerdown", this.unmute)
   },

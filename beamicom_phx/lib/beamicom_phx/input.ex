@@ -33,6 +33,18 @@ defmodule BeamicomPhx.Input do
   @doc "The NES button for an on-screen control name (e.g. \"a\", \"up\"), or nil if unknown."
   def button_from_name(name) when is_binary(name), do: Map.get(@button_names, name)
 
+  @doc "Validate browser button names and return them as a button set."
+  def buttons_from_names(names) when is_list(names) do
+    Enum.reduce_while(names, {:ok, MapSet.new()}, fn name, {:ok, buttons} ->
+      case button_from_name(name) do
+        nil -> {:halt, {:error, :invalid_button}}
+        button -> {:cont, {:ok, MapSet.put(buttons, button)}}
+      end
+    end)
+  end
+
+  def buttons_from_names(_names), do: {:error, :invalid_button}
+
   @doc """
   Apply a key event to the currently-held button set. `dir` is `:down` or `:up`.
   Returns `{new_held, buttons_list}` (the list to pass to `press/2`), or `:ignore`

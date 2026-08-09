@@ -77,6 +77,13 @@ defmodule BeamicomPhx.InputTest do
     test "apply_button ignores unknown buttons" do
       assert Input.apply_button(MapSet.new(), :down, :turbo) == :ignore
     end
+
+    test "buttons_from_names validates a complete browser gamepad state" do
+      assert {:ok, buttons} = Input.buttons_from_names(["right", "a", "start", "a"])
+      assert MapSet.equal?(buttons, MapSet.new([:right, :a, :start]))
+      assert Input.buttons_from_names(["a", "turbo"]) == {:error, :invalid_button}
+      assert Input.buttons_from_names("a") == {:error, :invalid_button}
+    end
   end
 
   describe "press/2" do

@@ -193,7 +193,10 @@ const Crt = {
   setEnabled(on) {
     this.enabled = on
     this.el.style.visibility = on ? "" : "hidden"
-    if (this.toggleBtn) this.toggleBtn.textContent = on ? "CRT filter: on" : "CRT filter: off"
+    if (this.toggleBtn) {
+      this.toggleBtn.setAttribute("aria-pressed", String(on))
+      this.toggleBtn.setAttribute("aria-label", `Turn CRT filter ${on ? "off" : "on"}`)
+    }
   },
 
   draw() {

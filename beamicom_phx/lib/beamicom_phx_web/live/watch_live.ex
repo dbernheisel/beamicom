@@ -37,6 +37,7 @@ defmodule BeamicomPhxWeb.WatchLive do
         # Both modes watch the gallery (read-only for clients); saving/loading is
         # gated to server mode in the render and the event handlers.
         Saves.subscribe()
+        if mode == :server, do: BeamicomPhx.PlayerQueue.subscribe()
         Player.attach(socket, id: "videoPlayer", signaling: signaling)
       else
         socket
@@ -48,12 +49,17 @@ defmodule BeamicomPhxWeb.WatchLive do
     socket =
       assign(socket,
         held: MapSet.new(),
+        keyboard_held: MapSet.new(),
+        pointer_held: MapSet.new(),
+        gamepad_held: MapSet.new(),
         mode: mode,
         controller_url:
           if(mode == :client,
             do: Application.get_env(:beamicom_phx, :controller_url),
             else: nil
           ),
+        player_notification: nil,
+        player_notification_token: nil,
         rom_name: nil,
         saves: Saves.list()
       )
@@ -83,6 +89,30 @@ defmodule BeamicomPhxWeb.WatchLive do
       data-controller-url={@controller_url}
       class="crt-room"
     >
+      <div
+        id="player-notification-slot"
+        class="player-notification-slot"
+        phx-update={if(@mode == :client, do: "ignore", else: nil)}
+      >
+        <div
+          id="player-notification"
+          class={[
+            "player-notification",
+            @mode == :server && @player_notification && "is-visible"
+          ]}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <span class="player-notification__badge" aria-hidden="true">P2</span>
+          <span id="player-status">
+            {if(@mode == :client,
+              do: "Joining the Player 2 queue…",
+              else: @player_notification || ""
+            )}
+          </span>
+        </div>
+      </div>
       <div class="crt">
         <div class="crt__cabinet">
           <div class="crt__bezel">
@@ -99,7 +129,17 @@ defmodule BeamicomPhxWeb.WatchLive do
           </div>
           <div class="crt__plate">
             <div class="crt__buttons">
-              <button type="button" id="crt-toggle" class="crt__btn">CRT filter: on</button>
+              <button
+                type="button"
+                id="crt-toggle"
+                class="crt__btn crt__filter-toggle"
+                aria-label="Toggle CRT filter"
+                aria-pressed="true"
+                title="Toggle CRT filter"
+              >
+                <span>CRT filter</span>
+                <span class="crt__filter-led" aria-hidden="true"></span>
+              </button>
               <button
                 :if={@mode == :server}
                 type="button"
@@ -119,7 +159,6 @@ defmodule BeamicomPhxWeb.WatchLive do
       <p class="crt__controls">
         Arrows = D-pad &nbsp;·&nbsp; X = A &nbsp;·&nbsp; Z = B &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
       </p>
-
       <div
         id="gamepad"
         class="gamepad"
@@ -204,43 +243,90 @@ defmodule BeamicomPhxWeb.WatchLive do
 
   @impl true
   def handle_event("keydown", %{"key" => key}, socket) do
-    {:noreply, commit(socket, Input.apply_key(socket.assigns.held, :down, key))}
+    {:noreply,
+     commit_source(
+       socket,
+       :keyboard_held,
+       Input.apply_key(socket.assigns.keyboard_held, :down, key)
+     )}
   end
 
   def handle_event("keyup", %{"key" => key}, socket) do
-    {:noreply, commit(socket, Input.apply_key(socket.assigns.held, :up, key))}
+    {:noreply,
+     commit_source(
+       socket,
+       :keyboard_held,
+       Input.apply_key(socket.assigns.keyboard_held, :up, key)
+     )}
   end
 
   # On-screen controller (pointer down/up via the Gamepad JS hook) — same path as keys.
   def handle_event("button_down", %{"button" => name}, socket) do
-    {:noreply, commit(socket, button_event(socket, :down, name))}
+    {:noreply, commit_source(socket, :pointer_held, button_event(socket, :down, name))}
   end
 
   def handle_event("button_up", %{"button" => name}, socket) do
-    {:noreply, commit(socket, button_event(socket, :up, name))}
+    {:noreply, commit_source(socket, :pointer_held, button_event(socket, :up, name))}
+  end
+
+  def handle_event("gamepad_buttons", %{"buttons" => names}, socket) do
+    case Input.buttons_from_names(names) do
+      {:ok, held} ->
+        {:noreply, commit_source(socket, :gamepad_held, {held, MapSet.to_list(held)})}
+
+      {:error, _reason} ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
   def handle_info(:saves_changed, socket), do: {:noreply, assign(socket, saves: Saves.list())}
 
+  def handle_info({:player_notification, message}, socket) do
+    token = make_ref()
+    Process.send_after(self(), {:hide_player_notification, token}, 4_000)
+
+    socket =
+      socket
+      |> assign(
+        player_notification: message,
+        player_notification_token: token
+      )
+      |> push_event("player_notification_sound", %{})
+
+    {:noreply, socket}
+  end
+
+  def handle_info(
+        {:hide_player_notification, token},
+        %{assigns: %{player_notification_token: token}} = socket
+      ) do
+    {:noreply, assign(socket, player_notification: nil, player_notification_token: nil)}
+  end
+
+  def handle_info({:hide_player_notification, _stale_token}, socket), do: {:noreply, socket}
+
   defp button_event(socket, dir, name) do
     case Input.button_from_name(name) do
       nil -> :ignore
-      button -> Input.apply_button(socket.assigns.held, dir, button)
+      button -> Input.apply_button(socket.assigns.pointer_held, dir, button)
     end
   end
 
-  # Push the held set to the emulator and re-render the controller, but only when
-  # the set actually changed (browsers fire keydown repeatedly while a key is held).
-  defp commit(socket, :ignore), do: socket
+  # Keep each browser input source independent, then send their union. Releasing
+  # a gamepad button must not cancel the same button held on the keyboard/touch UI.
+  defp commit_source(socket, _source, :ignore), do: socket
 
-  defp commit(socket, {held, buttons}) do
-    if MapSet.equal?(held, socket.assigns.held) do
-      socket
-    else
-      Input.press(1, buttons)
-      assign(socket, held: held)
-    end
+  defp commit_source(socket, source, {source_held, _buttons}) do
+    socket = assign(socket, source, source_held)
+
+    held =
+      socket.assigns.keyboard_held
+      |> MapSet.union(socket.assigns.pointer_held)
+      |> MapSet.union(socket.assigns.gamepad_held)
+
+    unless MapSet.equal?(held, socket.assigns.held), do: Input.press(1, MapSet.to_list(held))
+    assign(socket, held: held)
   end
 
   # Space-joined held button names for the controller's data-held attribute; the

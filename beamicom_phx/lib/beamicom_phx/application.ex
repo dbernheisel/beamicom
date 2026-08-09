@@ -30,9 +30,15 @@ defmodule BeamicomPhx.Application do
   # frames, so it no longer depends on a ROM being present at boot.
   defp emulator_children do
     case Application.get_env(:beamicom_phx, :mode, :server) do
-      :server -> [BeamicomPhx.Emulator] ++ ei_children() ++ rtp_broadcast_children()
-      :client -> [{BeamicomPhx.AV.Relay, listen_port: BeamicomPhx.RtpConfig.listen_port()}]
-      _ -> []
+      :server ->
+        [BeamicomPhx.Emulator] ++
+          ei_children() ++ [BeamicomPhx.PlayerQueue] ++ rtp_broadcast_children()
+
+      :client ->
+        [{BeamicomPhx.AV.Relay, listen_port: BeamicomPhx.RtpConfig.listen_port()}]
+
+      _ ->
+        []
     end
   end
 

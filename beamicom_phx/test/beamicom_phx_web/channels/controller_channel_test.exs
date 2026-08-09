@@ -8,34 +8,74 @@ defmodule BeamicomPhxWeb.ControllerChannelTest do
   @endpoint BeamicomPhxWeb.Endpoint
 
   test "relays complete controller state to EI" do
-    {:ok, _reply, socket} =
+    :ok = BeamicomPhx.PlayerQueue.subscribe()
+
+    {:ok, reply, socket} =
       BeamicomPhxWeb.ControllerSocket
       |> socket("controller-test", %{})
-      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:1")
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
 
-    assert Client.ready?(socket.assigns.client)
+    assert reply == %{player: 2, message: "Player 2 has joined"}
+    assert_receive {:player_notification, "Player 2 has joined"}
+    assert Client.ready?(BeamicomPhx.EIClient)
 
     ref = push(socket, "buttons", %{"buttons" => ["right", "a"]})
     assert_reply ref, :ok
-    assert :sys.get_state(socket.assigns.client).held[1] == MapSet.new([:right, :a])
+    assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new([:right, :a])
 
     ref = push(socket, "buttons", %{"buttons" => []})
     assert_reply ref, :ok
-    assert :sys.get_state(socket.assigns.client).held[1] == MapSet.new()
+    assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new()
   end
 
-  test "rejects invalid ports and buttons" do
-    assert {:error, %{reason: "controller must be 1 or 2"}} =
+  test "rejects unknown topics and invalid buttons" do
+    assert {:error, %{reason: "unknown controller channel"}} =
              BeamicomPhxWeb.ControllerSocket
-             |> socket("invalid-port", %{})
+             |> socket("invalid-topic", %{})
              |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:3")
 
     {:ok, _reply, socket} =
       BeamicomPhxWeb.ControllerSocket
       |> socket("invalid-buttons", %{})
-      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:1")
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
 
     ref = push(socket, "buttons", %{"buttons" => ["turbo"]})
     assert_reply ref, :error, %{reason: "invalid buttons"}
+  end
+
+  test "queues later clients and promotes the oldest waiter" do
+    :ok = BeamicomPhx.PlayerQueue.subscribe()
+
+    {:ok, %{player: 2}, player} =
+      BeamicomPhxWeb.ControllerSocket
+      |> socket("player", %{})
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
+
+    assert_receive {:player_notification, "Player 2 has joined"}
+
+    {:ok, waiting_reply, waiting} =
+      BeamicomPhxWeb.ControllerSocket
+      |> socket("waiting", %{})
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
+
+    assert waiting_reply.player == nil
+    assert waiting_reply.position == 1
+
+    ref = push(waiting, "buttons", %{"buttons" => ["a"]})
+    assert_reply ref, :error, %{reason: "waiting for Player 2"}
+
+    Process.unlink(player.channel_pid)
+    close(player)
+
+    assert_receive {:player_notification, "Player 2 has left"}
+
+    assert_push "player_assignment", %{
+      player: 2,
+      message: "You are now Player 2"
+    }
+
+    ref = push(waiting, "buttons", %{"buttons" => ["a"]})
+    assert_reply ref, :ok
+    assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new([:a])
   end
 end

@@ -9,6 +9,14 @@
 /* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
 @source "../../_build/dev/phoenix-colocated/beamicom_phx/*/";
 
+@font-face {
+  font-family: "Nintendo NES";
+  src: url("/fonts/nintendo-nes-font.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */
 @plugin "../vendor/heroicons";
@@ -110,18 +118,79 @@
    image come from the crt-lottes WebGL filter (assets/js/crt.js) rendered onto
    .crt__glass, an opaque canvas covering the still-playing video. */
 .crt-room {
+  width: 100%;
   min-height: 100dvh;
   display: grid;
   grid-auto-rows: min-content;
-  place-content: center;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   justify-items: center;
   gap: clamp(1rem, 3vh, 2rem);
-  padding: clamp(1.5rem, 5vh, 4rem) 1rem;
+  padding: 0 0 clamp(1.5rem, 5vh, 4rem);
   background: radial-gradient(80% 60% at 50% 42%, #23201c 0%, #131211 45%, #0a0a0b 100%);
+}
+
+/* A reserved row keeps notifications above the television instead of covering
+   the game. The banner travels inside the clipped row, so the CRT never jumps. */
+.player-notification-slot {
+  width: 100%;
+  height: clamp(4rem, 9vw, 5.25rem);
+  overflow: hidden;
+}
+
+.player-notification {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.8rem, 2.5vw, 1.5rem);
+  padding: 0.9rem clamp(1rem, 5vw, 4rem);
+  border-block: 5px solid #161616;
+  background:
+    linear-gradient(90deg, #b82028 0 12px, transparent 12px calc(100% - 12px), #b82028 calc(100% - 12px)),
+    #f1ead8;
+  color: #171717;
+  box-shadow:
+    inset 0 4px 0 #fff9e9,
+    inset 0 -4px 0 #c9c0ac,
+    0 6px 0 rgba(0, 0, 0, 0.35);
+  font-family: "Nintendo NES", ui-monospace, monospace;
+  font-size: clamp(0.72rem, 2.2vw, 1.2rem);
+  line-height: 1.45;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+  transform: translateY(-115%);
+  transition: transform 280ms steps(6, end);
+  will-change: transform;
+}
+
+.player-notification.is-visible {
+  transform: translateY(0);
+}
+
+.player-notification__badge {
+  flex: 0 0 auto;
+  padding: 0.42rem 0.5rem 0.34rem;
+  border: 3px solid #171717;
+  background: #b82028;
+  color: #fff9e9;
+  box-shadow: 3px 3px 0 #171717;
+  line-height: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-notification {
+    transition: none;
+  }
 }
 
 .crt {
   position: relative;
+  width: min(100vw, calc(100dvh * 4 / 3));
+  aspect-ratio: 4 / 3;
 }
 
 /* soft light the screen throws into the room */
@@ -136,8 +205,12 @@
 }
 
 .crt__cabinet {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
   padding: clamp(16px, 2.4vw, 34px);
-  border-radius: 28px;
+  border-radius: 0;
   background: linear-gradient(180deg, #e7e1d2 0%, #d7d0be 6%, #c6bfab 60%, #b0a893 100%);
   box-shadow:
     inset 0 3px 2px rgba(255, 255, 255, 0.65),
@@ -148,6 +221,12 @@
 }
 
 .crt__bezel {
+  flex: 1 1 auto;
+  min-height: 0;
+  container-type: size;
+  display: grid;
+  place-items: center;
+  width: 100%;
   padding: clamp(14px, 1.8vw, 26px);
   border-radius: 22px;
   background: linear-gradient(160deg, #2c2b29, #171615 60%, #0c0c0b);
@@ -158,6 +237,8 @@
 
 .crt__screen {
   position: relative;
+  width: min(100cqw, calc(100cqh * 4 / 3));
+  aspect-ratio: 4 / 3;
   overflow: hidden;
   border-radius: 16px / 20px;
   background: #000;
@@ -168,9 +249,9 @@
 
 .crt__screen video {
   display: block;
-  width: min(78vw, 680px);
-  aspect-ratio: 4 / 3;
-  object-fit: fill;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   background: #000;
   border-radius: 14px / 18px;
 }
@@ -205,6 +286,26 @@
 
 .crt__btn:active {
   box-shadow: inset 0 2px 4px rgba(80, 68, 48, 0.4);
+}
+
+.crt__filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.crt__filter-led {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffaaa0, #eb3320 55%, #831408);
+  box-shadow: 0 0 8px 2px rgba(225, 41, 21, 0.85), inset 0 0 2px rgba(0, 0, 0, 0.4);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.crt__filter-toggle[aria-pressed="false"] .crt__filter-led {
+  background: radial-gradient(circle at 35% 30%, #8e554d, #5b211a 60%, #35120e);
+  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.75);
 }
 
 /* the crt-lottes filter output, stacked over the (still-decoding) video.
