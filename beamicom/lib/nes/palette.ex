@@ -87,13 +87,35 @@ defmodule Beamicom.NES.Palette do
   def rgb(index), do: elem(@master, index &&& 0x3F)
 
   @doc "Resolve a %Framebuffer{} to a width*height*3 RGB binary."
-  def to_rgb(%Beamicom.NES.Framebuffer{pixels: pixels, palette: palette, grayscale: gray}) do
+  def to_rgb(%Beamicom.NES.Framebuffer{
+        pixels: pixels,
+        palette: palette,
+        grayscale: gray,
+        width: width,
+        edge_mask: edge_mask
+      }) do
     mask = if gray, do: 0x30, else: 0x3F
 
-    for <<addr <- pixels>>, into: <<>> do
-      {r, g, b} = rgb(:binary.at(palette, addr) &&& mask)
-      <<r, g, b>>
-    end
+    rgb =
+      for <<addr <- pixels>>, into: <<>> do
+        {r, g, b} = rgb(:binary.at(palette, addr) &&& mask)
+        <<r, g, b>>
+      end
+
+    mask_edges(rgb, width, edge_mask)
+  end
+
+  defp mask_edges(rgb, _width, 0), do: rgb
+
+  defp mask_edges(rgb, width, pixels) do
+    edge = pixels * 3
+    middle = (width - pixels * 2) * 3
+    black = <<0::size(edge * 8)>>
+
+    for <<_left::binary-size(^edge), center::binary-size(^middle),
+          _right::binary-size(^edge) <- rgb>>,
+        into: <<>>,
+        do: <<black::binary, center::binary, black::binary>>
   end
 
   @doc """

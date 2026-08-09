@@ -97,6 +97,10 @@ defmodule Beamicom.NES.PPU do
             at_lo: 0,
             at_hi: 0,
             line_sprites: [],
+            # Runtime-selectable presentation/emulation enhancements. Both are
+            # disabled by default, preserving hardware behavior.
+            hide_horizontal_overscan: false,
+            unlimited_sprites: false,
             irq_ticks: 0,
             # Frame-synced rendered-scanline number captured at the per-scanline
             # IRQ tick, for the MMC5 scanline IRQ (reset to 0 at the pre-render line).
@@ -115,6 +119,13 @@ defmodule Beamicom.NES.PPU do
 
   @doc "Build a PPU over the cartridge's CHR data and nametable mirroring."
   def new(chr, mirroring), do: %__MODULE__{chr: chr, mirroring: mirroring}
+
+  @doc "Enable or disable a runtime-selectable PPU enhancement."
+  def set_enhancement(ppu, :hide_horizontal_overscan, enabled) when is_boolean(enabled),
+    do: %{ppu | hide_horizontal_overscan: enabled}
+
+  def set_enhancement(ppu, :unlimited_sprites, enabled) when is_boolean(enabled),
+    do: %{ppu | unlimited_sprites: enabled}
 
   # --- dot timing (spec §3): 341 dots/scanline, 262 scanlines/frame ---
   # Scanline 241 dot 1 raises vblank; the pre-render line 261 dot 1 clears
@@ -522,34 +533,37 @@ defmodule Beamicom.NES.PPU do
   defp sel(reg, bit), do: reg >>> bit &&& 1
 
   # --- sprite evaluation (spec §5.2 item 4) ---
-  # Scan the 64 OAM entries for those on this scanline, keeping the first 8 (OAM
-  # order = priority). A 9th sets the overflow flag. Sprite Y is stored one line
-  # early, so a sprite at OAM Y renders on scanlines Y+1..Y+height.
+  # Scan the 64 OAM entries for those on this scanline. Hardware mode keeps the
+  # first 8 in OAM priority order; the enhancement keeps all of them. A 9th sets
+  # the overflow flag in either mode. Sprite Y is stored one line early, so a
+  # sprite at OAM Y renders on scanlines Y+1..Y+height.
 
   defp eval_sprites(ppu) do
     height = if (ppu.ctrl &&& 0x20) != 0, do: 16, else: 8
-    {sprites, count} = scan_oam(ppu.oam, 0, ppu, height, [], 0)
+    limit = if ppu.unlimited_sprites, do: 64, else: 8
+    {sprites, count} = scan_oam(ppu.oam, 0, ppu, height, limit, [], 0)
     status = if count > 8, do: ppu.status ||| 0x20, else: ppu.status
     %{ppu | line_sprites: Enum.reverse(sprites), status: status}
   end
 
-  # Walk the 256-byte OAM binary four bytes (one sprite) at a time, keeping the
-  # first 8 that fall on this scanline (OAM order = priority); a 9th sets overflow.
-  defp scan_oam(<<>>, _i, _ppu, _height, acc, count), do: {acc, count}
+  # Walk the 256-byte OAM binary four bytes (one sprite) at a time. Hardware mode
+  # keeps the first 8 in range; enhanced mode keeps all 64. Either way, a 9th
+  # in-range entry sets overflow in eval_sprites/1.
+  defp scan_oam(<<>>, _i, _ppu, _height, _limit, acc, count), do: {acc, count}
 
-  defp scan_oam(<<y, tile, attr, x, rest::binary>>, i, ppu, height, acc, count) do
+  defp scan_oam(<<y, tile, attr, x, rest::binary>>, i, ppu, height, limit, acc, count) do
     row = ppu.scanline - y - 1
 
     cond do
       row < 0 or row >= height ->
-        scan_oam(rest, i + 1, ppu, height, acc, count)
+        scan_oam(rest, i + 1, ppu, height, limit, acc, count)
 
-      count < 8 ->
+      count < limit ->
         sprite = build_sprite(ppu, i, tile, attr, x, row, height)
-        scan_oam(rest, i + 1, ppu, height, [sprite | acc], count + 1)
+        scan_oam(rest, i + 1, ppu, height, limit, [sprite | acc], count + 1)
 
       true ->
-        scan_oam(rest, i + 1, ppu, height, acc, count + 1)
+        scan_oam(rest, i + 1, ppu, height, limit, acc, count + 1)
     end
   end
 
@@ -772,6 +786,7 @@ defmodule Beamicom.NES.PPU do
       number: ppu.frame,
       pixels: pixels,
       palette: palette,
+      edge_mask: if(ppu.hide_horizontal_overscan, do: 8, else: 0),
       grayscale: (ppu.mask &&& 0x01) != 0,
       emphasis: {(ppu.mask &&& 0x20) != 0, (ppu.mask &&& 0x40) != 0, (ppu.mask &&& 0x80) != 0}
     }

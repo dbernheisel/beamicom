@@ -16,6 +16,10 @@ defmodule Beamicom.NES.Framebuffer do
             height: 240,
             pixels: <<>>,
             palette: <<>>,
+            # Presentation-only horizontal overscan mask. The PPU still renders
+            # all 256 pixels; RGB consumers replace this many pixels at both
+            # edges with black.
+            edge_mask: 0,
             emphasis: {false, false, false},
             grayscale: false,
             region: :ntsc

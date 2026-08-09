@@ -18,6 +18,7 @@ defmodule Beamicom.NES.Runtime do
   # NTSC ~60.0988 fps.
   @period_ns round(1_000_000_000 / 60.0988)
   @cpu_cycles_per_frame round(1_789_773 / 60.0988)
+  @enhancements [:hide_horizontal_overscan, :unlimited_sprites]
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -27,6 +28,16 @@ defmodule Beamicom.NES.Runtime do
   def set_buttons(server \\ __MODULE__, port, buttons) do
     GenServer.cast(server, {:set_buttons, port, buttons})
   end
+
+  @doc "Enable or disable a supported enhancement while the emulator is running."
+  def set_enhancement(server \\ __MODULE__, enhancement, enabled)
+
+  def set_enhancement(server, enhancement, enabled)
+      when enhancement in @enhancements and is_boolean(enabled),
+      do: GenServer.call(server, {:set_enhancement, enhancement, enabled})
+
+  def set_enhancement(_server, _enhancement, _enabled),
+    do: {:error, :invalid_enhancement}
 
   @impl true
   def init(opts) do
@@ -41,6 +52,11 @@ defmodule Beamicom.NES.Runtime do
         {:ok, console} -> console
         :error -> Console.load(Keyword.fetch!(opts, :rom))
       end
+
+    console =
+      Enum.reduce(Keyword.get(opts, :enhancements, []), console, fn {enhancement, enabled}, acc ->
+        Console.set_enhancement(acc, enhancement, enabled)
+      end)
 
     pace = Keyword.get(opts, :pace, true)
     # Playback speed multiplier (1.0 = real-time NTSC). Below 1.0 paces frames
@@ -84,6 +100,11 @@ defmodule Beamicom.NES.Runtime do
   @impl true
   def handle_call(:snapshot, _from, state) do
     {:reply, {state.console, state.console.bus.ppu.frame_ready}, state}
+  end
+
+  def handle_call({:set_enhancement, enhancement, enabled}, _from, state) do
+    console = Console.set_enhancement(state.console, enhancement, enabled)
+    {:reply, :ok, %{state | console: console}}
   end
 
   @impl true

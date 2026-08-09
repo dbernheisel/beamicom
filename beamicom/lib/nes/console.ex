@@ -35,4 +35,10 @@ defmodule Beamicom.NES.Console do
   @doc "Set controller `port` (1 or 2) to the pressed buttons, e.g. [:a, :start]."
   def set_buttons(%__MODULE__{bus: bus} = console, port, buttons),
     do: %{console | bus: Bus.set_buttons(bus, port, Beamicom.NES.Controllers.mask(buttons))}
+
+  @doc "Enable or disable a PPU enhancement without resetting the console."
+  def set_enhancement(%__MODULE__{bus: bus} = console, enhancement, enabled) do
+    ppu = PPU.set_enhancement(bus.ppu, enhancement, enabled)
+    %{console | bus: %{bus | ppu: ppu}}
+  end
 end

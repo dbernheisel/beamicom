@@ -71,4 +71,25 @@ defmodule Beamicom.NES.PPUSpriteTest do
     assert (ppu.status &&& 0x40) == 0
     assert :binary.at(ppu.frame_ready.pixels, 32 * 256 + 42) == 0x11
   end
+
+  test "unlimited-sprites enhancement renders past eight but preserves overflow" do
+    visible = for i <- 0..8, into: <<>>, do: <<30, 1, 0, i * 10>>
+    oam = visible <> <<0::size((256 - byte_size(visible)) * 8)>>
+
+    hardware =
+      %{PPU.new(chr(), :horizontal) | mask: 0x14, oam: oam}
+      |> run_to_post_render()
+
+    enhanced =
+      PPU.new(chr(), :horizontal)
+      |> PPU.set_enhancement(:unlimited_sprites, true)
+      |> then(&%{&1 | mask: 0x14, oam: oam})
+      |> run_to_post_render()
+
+    ninth = 32 * 256 + 82
+    assert :binary.at(hardware.frame_ready.pixels, ninth) == 0
+    assert :binary.at(enhanced.frame_ready.pixels, ninth) == 0x11
+    assert (hardware.status &&& 0x20) != 0
+    assert (enhanced.status &&& 0x20) != 0
+  end
 end

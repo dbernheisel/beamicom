@@ -47,5 +47,14 @@ defmodule Beamicom.NES.OutputTest do
     assert sample_count in 700..750
     assert byte_size(pcm) == sample_count * 2
     assert %Framebuffer{width: 256, height: 240} = Output.latest()
+
+    assert :ok = Runtime.set_enhancement(:test_runtime, :hide_horizontal_overscan, true)
+    assert :ok = Runtime.set_enhancement(:test_runtime, :unlimited_sprites, true)
+    {console, _frame} = Runtime.snapshot(:test_runtime)
+    assert console.bus.ppu.hide_horizontal_overscan
+    assert console.bus.ppu.unlimited_sprites
+
+    assert {:error, :invalid_enhancement} =
+             Runtime.set_enhancement(:test_runtime, :unknown, true)
   end
 end

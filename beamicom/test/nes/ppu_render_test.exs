@@ -1,7 +1,7 @@
 defmodule Beamicom.NES.PPURenderTest do
   use ExUnit.Case, async: true
 
-  alias Beamicom.NES.{PPU, Framebuffer}
+  alias Beamicom.NES.{PPU, Framebuffer, Palette}
 
   @moduledoc """
   Deterministic background-render test (spec §5.2 item 1, §6). Places a known
@@ -58,5 +58,20 @@ defmodule Beamicom.NES.PPURenderTest do
     ppu = PPU.run(ppu, 89_342 * 3)
     # attribute 2 (0b10) << 2 | pattern 1 = 0b1001 = 9.
     assert :binary.at(ppu.frame_ready.pixels, 0) == 9
+  end
+
+  test "horizontal overscan enhancement blacks out eight pixels on both sides" do
+    ppu =
+      PPU.new(chr(), :horizontal)
+      |> PPU.set_enhancement(:hide_horizontal_overscan, true)
+      |> then(&%{&1 | mask: 0x0A, vram: nt(%{0 => 1})})
+      |> PPU.run(89_342 * 3)
+
+    assert %Framebuffer{width: 256, edge_mask: 8} = ppu.frame_ready
+    rgb = Palette.to_rgb(ppu.frame_ready)
+
+    assert binary_part(rgb, 0, 8 * 3) == <<0::size(8 * 3 * 8)>>
+    refute binary_part(rgb, 8 * 3, 3) == <<0, 0, 0>>
+    assert binary_part(rgb, (256 - 8) * 3, 8 * 3) == <<0::size(8 * 3 * 8)>>
   end
 end

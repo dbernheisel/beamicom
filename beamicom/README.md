@@ -58,6 +58,27 @@ Beamicom.NES.Runtime.set_buttons(1, [:a, :start])
 Beamicom.NES.Output.latest()   # => %Beamicom.NES.Framebuffer{}
 ```
 
+### Runtime enhancements
+
+Optional display and PPU enhancements can be enabled at startup or changed
+without resetting the running game:
+
+```elixir
+{:ok, _} =
+  Beamicom.NES.Runtime.start_link(
+    rom: "roms/smb3.nes",
+    enhancements: [hide_horizontal_overscan: true]
+  )
+
+Beamicom.NES.Runtime.set_enhancement(:unlimited_sprites, true)
+Beamicom.NES.Runtime.set_enhancement(:hide_horizontal_overscan, false)
+```
+
+`:hide_horizontal_overscan` blacks out the leftmost and rightmost eight pixels
+while retaining the 256×240 framebuffer. `:unlimited_sprites` renders every
+in-range OAM sprite instead of the hardware's first eight per scanline; the PPU
+overflow flag continues to report more than eight sprites.
+
 ### Terminal input
 
 `Beamicom.TerminalInput` is a reusable Linux terminal adapter for interactive
