@@ -83,8 +83,9 @@ defmodule BeamicomV4L2.Audio do
     :ok
   end
 
-  defp default_command(speed) do
-    ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f s16le -ar #{@rate} -ac 1 -i pipe:0) ++
+  @doc false
+  def default_command(speed) do
+    ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f s16le -ar #{@rate} -ch_layout mono -i pipe:0) ++
       atempo(speed)
   end
 

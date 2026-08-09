@@ -25,6 +25,13 @@ defmodule BeamicomV4L2.AudioTest do
              Audio.start_link(command: ["definitely-missing-audio-player"])
   end
 
+  test "configures ffplay's raw PCM input as mono" do
+    command = Audio.default_command(1.0)
+
+    assert ["-ch_layout", "mono"] in Enum.chunk_every(command, 2, 1, :discard)
+    refute "-ac" in command
+  end
+
   test "reports an external player failure to its owner" do
     log =
       capture_log(fn ->
