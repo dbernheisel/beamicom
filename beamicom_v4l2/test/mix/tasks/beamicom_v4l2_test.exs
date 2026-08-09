@@ -11,11 +11,14 @@ defmodule Mix.Tasks.Beamicom.V4l2Test do
                "/tmp/controller.sock",
                "--scale",
                "4",
+               "--input",
+               "/dev/input/event7",
                "--no-audio"
              ])
 
     assert opts.rom == Path.expand("game.nes")
     assert opts.socket == "/tmp/controller.sock"
+    assert opts.input == "/dev/input/event7"
     assert opts.player_options[:scale] == 4
     refute opts.player_options[:audio]
   end

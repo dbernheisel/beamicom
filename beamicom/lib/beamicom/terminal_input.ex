@@ -7,9 +7,9 @@ defmodule Beamicom.TerminalInput do
   refreshes that timeout. The parser is incremental so split ANSI arrow-key
   sequences work correctly.
 
-  `run/2` temporarily puts `/dev/tty` into raw, no-echo mode and always restores
-  its previous settings. Clients can avoid a compile-time dependency by passing
-  `:on_buttons` and `:on_quit` callbacks.
+  `run/1` uses OTP's native raw terminal mode so key presses can be read directly
+  from standard input without an external `stty` process. Clients can avoid a
+  compile-time dependency by passing `:on_buttons` and `:on_quit` callbacks.
   """
 
   use GenServer
@@ -39,31 +39,15 @@ defmodule Beamicom.TerminalInput do
   def feed(server, bytes) when is_binary(bytes), do: GenServer.cast(server, {:bytes, bytes})
 
   @doc "Read the controlling terminal until Q, Escape, EOF, or the quit callback fires."
-  def run(server, opts \\ []) do
-    with_raw_terminal(opts, fn device -> read(server, device) end)
+  def run(server) do
+    with_raw_terminal(fn device -> read(server, device) end)
   end
 
-  @doc "Run a callback with the controlling terminal open in raw, no-echo mode."
-  def with_raw_terminal(opts \\ [], callback) when is_function(callback, 1) do
-    tty = Keyword.get(opts, :tty, "/dev/tty")
-
-    with {:ok, previous} <- stty(tty, ["-g"]),
-         {:ok, _output} <- stty(tty, ["raw", "-echo"]) do
-      try do
-        case File.open(tty, [:read, :binary]) do
-          {:ok, device} ->
-            try do
-              callback.(device)
-            after
-              File.close(device)
-            end
-
-          {:error, reason} ->
-            {:error, {:open_terminal, reason}}
-        end
-      after
-        _ = stty(tty, [String.trim(previous)])
-      end
+  @doc "Start OTP's native raw terminal mode and run a callback with standard input."
+  def with_raw_terminal(callback) when is_function(callback, 1) do
+    case :shell.start_interactive({:noshell, :raw}) do
+      :ok -> callback.(:stdio)
+      {:error, reason} -> {:error, {:raw_terminal, reason}}
     end
   end
 
@@ -207,38 +191,6 @@ defmodule Beamicom.TerminalInput do
 
       {:error, reason} ->
         {:error, {:read_terminal, reason}}
-    end
-  end
-
-  defp stty(tty, args) do
-    case System.find_executable("stty") do
-      nil -> {:error, :stty_not_found}
-      executable -> run_stty(executable, tty, args)
-    end
-  end
-
-  defp run_stty(executable, tty, args) do
-    device_flag = if match?({:unix, :darwin}, :os.type()), do: "-f", else: "-F"
-
-    port =
-      Port.open({:spawn_executable, executable}, [
-        :binary,
-        :exit_status,
-        args: [device_flag, tty | args]
-      ])
-
-    collect_port(port, "")
-  end
-
-  defp collect_port(port, output) do
-    receive do
-      {^port, {:data, data}} -> collect_port(port, output <> data)
-      {^port, {:exit_status, 0}} -> {:ok, output}
-      {^port, {:exit_status, status}} -> {:error, {:stty, status, String.trim(output)}}
-    after
-      5_000 ->
-        Port.close(port)
-        {:error, :stty_timeout}
     end
   end
 end

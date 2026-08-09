@@ -12,7 +12,7 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
 
   alias Beamicom.EI.{Client, Server}
   alias Beamicom.TerminalInput
-  alias BeamicomV4L2.Player
+  alias BeamicomV4L2.{EvdevInput, Player}
 
   @switches [
     socket: :string,
@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     fps: :integer,
     scale: :integer,
     speed: :float,
+    input: :string,
     no_audio: :boolean,
     help: :boolean
   ]
@@ -53,6 +54,7 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     %{
       rom: Path.expand(rom),
       socket: opts |> Keyword.get(:socket, Beamicom.EI.default_path()) |> Path.expand(),
+      input: opts[:input],
       player_options: [
         framebuffer: Keyword.get(opts, :framebuffer, "/dev/fb0"),
         output: Keyword.get(opts, :output, "/dev/video-beamicom"),
@@ -102,7 +104,7 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
         Mix.shell().info("EI controller socket: #{opts.socket}")
 
         try do
-          run_terminal(opts.socket, player, server)
+          run_input(opts, player, server)
         after
           stop_process(server)
         end
@@ -112,36 +114,91 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     end
   end
 
-  defp run_terminal(path, player, server) do
-    {:ok, client} = Client.start_link(path: path, name: "beamicom-v4l2-terminal")
+  defp run_input(opts, player, server) do
+    {:ok, client} = Client.start_link(path: opts.socket, name: "beamicom-v4l2-local-input")
     Process.unlink(client)
     :ok = Client.await_ready(client)
     task = self()
-
-    {:ok, input} =
-      TerminalInput.start_link(
-        on_buttons: fn port, buttons -> Client.set_buttons(client, port, buttons) end,
-        on_quit: fn -> send(task, :quit) end
-      )
 
     Mix.shell().info("Arrows move; X=A, Z=B, Enter=Start, Space=Select, Q/Escape quits")
 
     try do
       case TerminalInput.with_raw_terminal(fn device ->
-             reader = Task.async(fn -> TerminalInput.read(input, device) end)
+             case run_evdev(opts.input, device, client, task, player, server) do
+               {:error, reason} when is_nil(opts.input) ->
+                 Mix.shell().info(
+                   "Keyboard event input unavailable (#{reason}); " <>
+                     "falling back to terminal key-repeat input"
+                 )
 
-             try do
-               await(player, server, reader)
-             after
-               Task.shutdown(reader, :brutal_kill)
+                 run_terminal(device, client, task, player, server)
+
+               {:error, reason} ->
+                 {:error, reason}
+
+               result ->
+                 result
              end
            end) do
         {:error, reason} -> Mix.raise("terminal input failed: #{inspect(reason)}")
         _ -> :ok
       end
     after
-      stop_process(input)
       stop_process(client)
+    end
+  end
+
+  defp run_evdev(path, terminal, client, task, player, server) do
+    EvdevInput.with_keyboard(path, fn device, selected ->
+      Mix.shell().info("Keyboard input: #{selected} (independent press/release enabled)")
+      drainer = Task.async(fn -> drain_terminal(terminal) end)
+
+      try do
+        run_reader(
+          EvdevInput,
+          device,
+          [
+            on_buttons: fn port, buttons -> Client.set_buttons(client, port, buttons) end,
+            on_quit: fn -> send(task, :quit) end
+          ],
+          player,
+          server
+        )
+      after
+        Task.shutdown(drainer, :brutal_kill)
+      end
+    end)
+  end
+
+  defp run_terminal(device, client, task, player, server) do
+    run_reader(
+      TerminalInput,
+      device,
+      [
+        on_buttons: fn port, buttons -> Client.set_buttons(client, port, buttons) end,
+        on_quit: fn -> send(task, :quit) end
+      ],
+      player,
+      server
+    )
+  end
+
+  defp run_reader(module, device, input_options, player, server) do
+    {:ok, input} = module.start_link(input_options)
+    reader = Task.async(fn -> module.read(input, device) end)
+
+    try do
+      await(player, server, reader)
+    after
+      Task.shutdown(reader, :brutal_kill)
+      stop_process(input)
+    end
+  end
+
+  defp drain_terminal(device) do
+    case IO.binread(device, 64) do
+      bytes when is_binary(bytes) -> drain_terminal(device)
+      _eof_or_error -> :ok
     end
   end
 
@@ -182,6 +239,7 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
       --fps FPS           output frame rate (default: 60)
       --scale SCALE       integer framebuffer scale, 1 through 8 (default: 3)
       --speed SPEED       emulator speed multiplier (default: 1.0)
+      --input PATH        Linux keyboard event device (default: auto-detect)
       --no-audio          disable local ffplay audio
     """
   end

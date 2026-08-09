@@ -37,9 +37,9 @@ defmodule BeamicomV4L2.MixProject do
   defp rust_checks(_arguments) do
     manifest = "native/beamicom_v4l2_nif/Cargo.toml"
 
-    run_rust!(~w(fmt --manifest-path #{manifest} --check))
-    run_rust!(~w(clippy --manifest-path #{manifest} --all-targets -- -D warnings))
-    run_rust!(~w(test --manifest-path #{manifest}))
+    run_rust!(~w[fmt --manifest-path #{manifest} --check])
+    run_rust!(~w[clippy --manifest-path #{manifest} --all-targets -- -D warnings])
+    run_rust!(~w[test --manifest-path #{manifest}])
   end
 
   defp run_rust!(arguments) do
@@ -47,7 +47,10 @@ defmodule BeamicomV4L2.MixProject do
       System.cmd("mise", ["exec", "--", "cargo" | arguments], stderr_to_stdout: true)
 
     IO.write(output)
-    if status != 0, do: Mix.raise("cargo #{hd(arguments)} failed with status #{status}")
+
+    if status != 0 do
+      Mix.raise("cargo #{hd(arguments)} failed with status #{status}")
+    end
   end
 
   defp package do

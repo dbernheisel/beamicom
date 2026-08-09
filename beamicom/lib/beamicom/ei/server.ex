@@ -76,8 +76,9 @@ defmodule Beamicom.EI.Server do
     end
   end
 
-  def handle_info({tag, socket}, state) when tag in [:tcp_closed],
-    do: {:noreply, disconnect(socket, state)}
+  def handle_info({tag, socket}, state) when tag in [:tcp_closed] do
+    {:noreply, disconnect(socket, state)}
+  end
 
   def handle_info({:tcp_error, socket, _}, state), do: {:noreply, disconnect(socket, state)}
   def handle_info({:accept_error, :closed}, state), do: {:noreply, state}

@@ -24,4 +24,6 @@ defmodule BeamicomV4L2.Native do
 
   def stop(_resource), do: :erlang.nif_error(:nif_not_loaded)
   def status(_resource), do: :erlang.nif_error(:nif_not_loaded)
+  def keyboard_open(_paths), do: :erlang.nif_error(:nif_not_loaded)
+  def keyboard_read(_resource), do: :erlang.nif_error(:nif_not_loaded)
 end

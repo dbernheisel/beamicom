@@ -221,6 +221,14 @@ shared `Beamicom.EI.Client`. The wire format is the standard binary EI protocol.
 The server advertises two devices with the `ei_button` capability. Changes
 commit on `ei_device.frame`; disconnecting releases that client's held buttons.
 
+For local keyboard control on Linux, the launcher auto-detects a readable evdev
+keyboard so presses and releases—and multiple held buttons—are tracked
+independently. Select a specific keyboard when needed with
+`--input /dev/input/by-id/...-event-kbd`. If no readable event device exists,
+the launcher falls back to terminal key-repeat input and prints a warning; that
+fallback cannot reliably distinguish overlapping held keys because terminals do
+not report key releases.
+
 ```elixir
 {:ok, client} = Beamicom.EI.Client.start_link(path: Beamicom.EI.default_path())
 :ok = Beamicom.EI.Client.await_ready(client)

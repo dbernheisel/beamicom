@@ -1,7 +1,7 @@
 use crate::pixel::{self, Channel, Layout};
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
 use std::ptr;
@@ -21,6 +21,9 @@ const V4L2_CAP_VIDEO_OUTPUT: u32 = 0x0000_0002;
 const V4L2_CAP_READWRITE: u32 = 0x0100_0000;
 const V4L2_CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 const V4L2_PIX_FMT_YUYV: u32 = u32::from_le_bytes(*b"YUYV");
+const EV_KEY: u8 = 0x01;
+const KEY_MAX: usize = 0x2ff;
+const KEYBOARD_KEYS: [usize; 8] = [16, 44, 45, 103, 105, 106, 108, 57];
 
 const IOC_WRITE: u64 = 1;
 const IOC_READ: u64 = 2;
@@ -166,6 +169,14 @@ struct V4l2StreamParm {
 const VIDIOC_QUERYCAP: libc::Ioctl = ioc(IOC_READ, b'V', 0, size_of::<V4l2Capability>());
 const VIDIOC_S_FMT: libc::Ioctl = ioc(IOC_READ | IOC_WRITE, b'V', 5, size_of::<V4l2Format>());
 const VIDIOC_S_PARM: libc::Ioctl = ioc(IOC_READ | IOC_WRITE, b'V', 22, size_of::<V4l2StreamParm>());
+const BITS_PER_LONG: usize = libc::c_ulong::BITS as usize;
+const KEY_WORDS: usize = (KEY_MAX + 1).div_ceil(BITS_PER_LONG);
+const EVIOCGBIT_KEY: libc::Ioctl = ioc(
+    IOC_READ,
+    b'E',
+    0x20 + EV_KEY,
+    size_of::<[libc::c_ulong; KEY_WORDS]>(),
+);
 
 pub(crate) struct Control {
     pub(crate) running: AtomicBool,
@@ -236,6 +247,82 @@ fn open(path: &str, flags: libc::c_int) -> Result<File, String> {
     }
     // SAFETY: descriptor is newly opened and ownership transfers to File.
     Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+pub(crate) fn open_keyboard(paths: &[String]) -> Result<(File, String), String> {
+    let mut last_error = "no keyboard event device found".to_owned();
+
+    for path in paths {
+        match open(path, libc::O_RDONLY) {
+            Ok(device) if keyboard_capable(&device) => return Ok((device, path.clone())),
+            Ok(_device) => last_error = format!("{path} is not a keyboard event device"),
+            Err(error) => last_error = error,
+        }
+    }
+
+    Err(last_error)
+}
+
+fn keyboard_capable(device: &File) -> bool {
+    let mut keys = [0 as libc::c_ulong; KEY_WORDS];
+
+    if ioctl(device.as_raw_fd(), EVIOCGBIT_KEY, &mut keys).is_err() {
+        // Regular files are useful for ABI-level NIF tests but have no evdev ioctl.
+        return device.metadata().is_ok_and(|metadata| metadata.is_file());
+    }
+
+    KEYBOARD_KEYS
+        .iter()
+        .all(|code| keys[code / BITS_PER_LONG] & (1 << (code % BITS_PER_LONG)) != 0)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct InputEvent {
+    seconds: libc::c_long,
+    microseconds: libc::c_long,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+pub(crate) fn read_input_event(device: &File) -> Result<Option<(u16, u16, i32)>, String> {
+    let mut descriptor = libc::pollfd {
+        fd: device.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
+    loop {
+        // A finite wait lets a killed BEAM reader release its dirty scheduler promptly.
+        // SAFETY: descriptor points to one valid pollfd for the duration of the call.
+        let result = unsafe { libc::poll(ptr::from_mut(&mut descriptor), 1, 250) };
+        if result == 0 {
+            return Ok(None);
+        }
+        if result > 0 {
+            break;
+        }
+
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(format!("cannot poll keyboard: {error}"));
+        }
+    }
+
+    let mut event = InputEvent::default();
+    // SAFETY: event is initialized and the byte slice covers exactly its storage.
+    let bytes = unsafe {
+        slice::from_raw_parts_mut(
+            ptr::from_mut(&mut event).cast::<u8>(),
+            size_of::<InputEvent>(),
+        )
+    };
+    let mut reader = device;
+    reader
+        .read_exact(bytes)
+        .map_err(|error| format!("cannot read keyboard: {error}"))?;
+    Ok(Some((event.type_, event.code, event.value)))
 }
 
 impl Stream {
@@ -554,5 +641,9 @@ mod tests {
         #[cfg(target_pointer_width = "32")]
         assert_eq!(size_of::<V4l2Format>(), 204);
         assert_eq!(size_of::<V4l2StreamParm>(), 204);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(size_of::<InputEvent>(), 24);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(size_of::<InputEvent>(), 16);
     }
 }

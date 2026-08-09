@@ -74,8 +74,8 @@ clients. It accepts callbacks rather than depending on a client project:
 Beamicom.TerminalInput.run(input)
 ```
 
-It parses ANSI arrows plus X/Z, Enter, and Space, and restores `/dev/tty` after
-raw-mode input. Since standard terminals have no key-up events, held buttons
+It uses OTP's native raw terminal mode and parses ANSI arrows plus X/Z, Enter,
+and Space. Since standard terminals have no key-up events, held buttons
 auto-release unless refreshed by keyboard repeat.
 
 ### EI Unix-socket input
