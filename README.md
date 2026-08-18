@@ -1,6 +1,6 @@
 # Beamicom
 
-Beamicom is a cycle-aware NES emulator written in Elixir. This repository keeps
+Beamicom is an NES emulator written in Elixir. This repository keeps
 the headless emulation core and several clients together: Scenic and Linux
 device clients, a local AV1/Opus stream, and a Phoenix application that streams
 the console to a web browser.
