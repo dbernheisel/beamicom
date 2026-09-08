@@ -265,6 +265,45 @@ defmodule Beamicom.GB.APUTest do
     end
   end
 
+  test "batched noise clocks match scalar LFSR steps and arbitrarily split ticks" do
+    cases = [
+      {0, 0, 70_224},
+      {0, 7, 70_224},
+      {3, 2, 70_224},
+      {6, 6, 70_224},
+      {13, 7, (112 <<< 13) + 123}
+    ]
+
+    for width7 <- [false, true], {shift, divisor, dots} <- cases do
+      width = if width7, do: 0x08, else: 0
+
+      apu =
+        powered()
+        |> APU.write(0xFF21, 0xF0)
+        |> APU.write(0xFF22, shift <<< 4 ||| width ||| divisor)
+        |> APU.write(0xFF23, 0x80)
+
+      period = elem({8, 16, 32, 48, 64, 80, 96, 112}, divisor) <<< shift
+      expected_steps = div(dots, period)
+      expected_lfsr = reference_lfsr(0x7FFF, expected_steps, width7)
+      expected_timer = period - rem(dots, period)
+      batched = APU.tick(apu, dots)
+
+      chunked =
+        Stream.cycle([1, 7, 31, 96, 257])
+        |> Enum.reduce_while({apu, dots}, fn chunk, {apu, remaining} ->
+          count = min(chunk, remaining)
+          next = {APU.tick(apu, count), remaining - count}
+          if count == remaining, do: {:halt, next}, else: {:cont, next}
+        end)
+        |> elem(0)
+
+      assert batched.ch4.lfsr == expected_lfsr
+      assert batched.ch4.timer == expected_timer
+      assert chunked == batched
+    end
+  end
+
   test "NR51 routes channels independently into left and right signed PCM" do
     apu =
       powered()
@@ -471,6 +510,15 @@ defmodule Beamicom.GB.APUTest do
   end
 
   defp sweep_registers(apu), do: {elem(apu.registers, 3), elem(apu.registers, 4)}
+
+  defp reference_lfsr(lfsr, 0, _width7), do: lfsr
+
+  defp reference_lfsr(lfsr, steps, width7) do
+    feedback = bxor(lfsr, lfsr >>> 1) &&& 1
+    lfsr = lfsr >>> 1 ||| feedback <<< 14
+    lfsr = if width7, do: (lfsr &&& bxor(0x40, 0x7FFF)) ||| feedback <<< 6, else: lfsr
+    reference_lfsr(lfsr, steps - 1, width7)
+  end
 
   defp step_machine(machine, 0), do: machine
 

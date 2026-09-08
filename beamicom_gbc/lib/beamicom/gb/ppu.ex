@@ -66,7 +66,9 @@ defmodule Beamicom.GB.PPU do
             dot: 1,
             mode: 1,
             vram_byte: 2,
-            tile_pixel: 4}
+            tile_pixel: 4,
+            cgb_pixel_no_priority: 4,
+            cgb_pixel_with_priority: 4}
 
   @enforce_keys [:vram, :oam]
   defstruct vram: @blank_vram,
@@ -764,36 +766,71 @@ defmodule Beamicom.GB.PPU do
 
   defp compose_cgb_sprites(colors, sprites, vram, line, height, lcdc, bg, obj) do
     objects = cgb_sprite_overlay(sprites, vram, line, height, @blank_line)
-    compose_cgb_pixel(0, colors, objects, lcdc, bg, obj, [])
+
+    colors
+    |> compose_cgb_pixels(objects, lcdc, bg, obj)
+    |> IO.iodata_to_binary()
   end
 
-  defp compose_cgb_pixel(@width, _colors, _objects, _lcdc, _bg, _obj, acc),
-    do: acc |> :lists.reverse() |> IO.iodata_to_binary()
+  defp compose_cgb_pixels(colors, objects, lcdc, bg, obj) when (lcdc &&& 0x01) == 0,
+    do: compose_cgb_pixels_no_priority(colors, objects, bg, obj)
 
-  defp compose_cgb_pixel(x, colors, objects, lcdc, bg, obj, acc) do
-    metadata = :binary.at(colors, x)
-    bg_color = metadata &&& 0x03
-    bg_index = (metadata >>> 2 &&& 0x07) * 4 + bg_color
-    object = :binary.at(objects, x)
+  defp compose_cgb_pixels(colors, objects, _lcdc, bg, obj),
+    do: compose_cgb_pixels_with_priority(colors, objects, bg, obj)
 
-    rgb =
-      case object do
-        0 ->
-          elem(bg, bg_index)
+  defp compose_cgb_pixels_no_priority(<<>>, <<>>, _bg, _obj), do: []
 
-        _object
-        when bg_color != 0 and (lcdc &&& 0x01) != 0 and (metadata &&& 0x20) != 0 ->
-          elem(bg, bg_index)
-
-        _object when bg_color != 0 and (lcdc &&& 0x01) != 0 and (object &&& 0x20) != 0 ->
-          elem(bg, bg_index)
-
-        object ->
-          elem(obj, (object >>> 2 &&& 0x07) * 4 + (object &&& 0x03))
-      end
-
-    compose_cgb_pixel(x + 1, colors, objects, lcdc, bg, obj, [rgb | acc])
+  defp compose_cgb_pixels_no_priority(
+         <<m0, m1, m2, m3, m4, m5, m6, m7, colors::binary>>,
+         <<o0, o1, o2, o3, o4, o5, o6, o7, objects::binary>>,
+         bg,
+         obj
+       ) do
+    [
+      cgb_pixel_no_priority(m0, o0, bg, obj),
+      cgb_pixel_no_priority(m1, o1, bg, obj),
+      cgb_pixel_no_priority(m2, o2, bg, obj),
+      cgb_pixel_no_priority(m3, o3, bg, obj),
+      cgb_pixel_no_priority(m4, o4, bg, obj),
+      cgb_pixel_no_priority(m5, o5, bg, obj),
+      cgb_pixel_no_priority(m6, o6, bg, obj),
+      cgb_pixel_no_priority(m7, o7, bg, obj)
+      | compose_cgb_pixels_no_priority(colors, objects, bg, obj)
+    ]
   end
+
+  defp cgb_pixel_no_priority(metadata, 0, bg, _obj), do: elem(bg, metadata &&& 0x1F)
+  defp cgb_pixel_no_priority(_metadata, object, _bg, obj), do: elem(obj, object &&& 0x1F)
+
+  defp compose_cgb_pixels_with_priority(<<>>, <<>>, _bg, _obj), do: []
+
+  defp compose_cgb_pixels_with_priority(
+         <<m0, m1, m2, m3, m4, m5, m6, m7, colors::binary>>,
+         <<o0, o1, o2, o3, o4, o5, o6, o7, objects::binary>>,
+         bg,
+         obj
+       ) do
+    [
+      cgb_pixel_with_priority(m0, o0, bg, obj),
+      cgb_pixel_with_priority(m1, o1, bg, obj),
+      cgb_pixel_with_priority(m2, o2, bg, obj),
+      cgb_pixel_with_priority(m3, o3, bg, obj),
+      cgb_pixel_with_priority(m4, o4, bg, obj),
+      cgb_pixel_with_priority(m5, o5, bg, obj),
+      cgb_pixel_with_priority(m6, o6, bg, obj),
+      cgb_pixel_with_priority(m7, o7, bg, obj)
+      | compose_cgb_pixels_with_priority(colors, objects, bg, obj)
+    ]
+  end
+
+  defp cgb_pixel_with_priority(metadata, 0, bg, _obj), do: elem(bg, metadata &&& 0x1F)
+
+  defp cgb_pixel_with_priority(metadata, object, bg, _obj)
+       when (metadata &&& 0x03) != 0 and
+              ((metadata &&& 0x20) != 0 or (object &&& 0x20) != 0),
+       do: elem(bg, metadata &&& 0x1F)
+
+  defp cgb_pixel_with_priority(_metadata, object, _bg, obj), do: elem(obj, object &&& 0x1F)
 
   # Resolve each selected object's eight-pixel row once, in OAM priority order.
   # One metadata byte records occupancy, palette, priority, and color so the RGB

@@ -424,15 +424,21 @@ defmodule Beamicom.GB.APU do
   defp advance_noise(%Noise{} = ch, dots) when dots < ch.timer, do: %{ch | timer: ch.timer - dots}
 
   defp advance_noise(%Noise{} = ch, dots) do
-    ch = step_lfsr(ch)
-    advance_noise(%{ch | timer: noise_period(ch)}, dots - ch.timer)
+    period = noise_period(ch)
+    after_first = dots - ch.timer
+    steps = 1 + div(after_first, period)
+    remainder = rem(after_first, period)
+    timer = if remainder == 0, do: period, else: period - remainder
+    %{ch | timer: timer, lfsr: advance_lfsr(ch.lfsr, steps, ch.width7)}
   end
 
-  defp step_lfsr(ch) do
-    feedback = bxor(ch.lfsr, ch.lfsr >>> 1) &&& 1
-    lfsr = ch.lfsr >>> 1 ||| feedback <<< 14
-    lfsr = if ch.width7, do: (lfsr &&& bxor(0x40, 0x7FFF)) ||| feedback <<< 6, else: lfsr
-    %{ch | lfsr: lfsr}
+  defp advance_lfsr(lfsr, 0, _width7), do: lfsr
+
+  defp advance_lfsr(lfsr, steps, width7) do
+    feedback = bxor(lfsr, lfsr >>> 1) &&& 1
+    lfsr = lfsr >>> 1 ||| feedback <<< 14
+    lfsr = if width7, do: (lfsr &&& bxor(0x40, 0x7FFF)) ||| feedback <<< 6, else: lfsr
+    advance_lfsr(lfsr, steps - 1, width7)
   end
 
   defp clock_sequencer_units(apu, step) do
