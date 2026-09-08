@@ -5,4 +5,5 @@
 /build/
 /native/beamicom_v4l2_nif/target/
 /priv/native/
+/tmp/
 /checksum-*.exs

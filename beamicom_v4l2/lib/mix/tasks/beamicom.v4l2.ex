@@ -80,31 +80,39 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     case Player.start_link([rom: opts.rom] ++ opts.player_options) do
       {:ok, player} ->
         Process.unlink(player)
+        ports = player |> Player.status() |> Map.fetch!(:controls) |> Map.keys() |> Enum.sort()
 
         try do
-          start_input(opts, player)
+          start_input(opts, player, ports)
         after
           stop_process(player)
         end
 
       {:error, reason} ->
-        Mix.raise("could not start V4L2 player: #{inspect(reason)}")
+        Mix.raise("could not start V4L2 player: #{format_start_error(reason)}")
     end
   end
 
-  defp start_input(opts, player) do
+  defp start_input(opts, player, ports) do
     case Server.start_link(
            path: opts.socket,
+           ports: ports,
            on_buttons: fn port, buttons -> Player.set_buttons(player, port, buttons) end
          ) do
       {:ok, server} ->
         Process.unlink(server)
 
-        Mix.shell().info("Playing #{opts.rom}")
-        Mix.shell().info("EI controller socket: #{opts.socket}")
-
         try do
-          run_input(opts, player, server)
+          Mix.shell().info("Playing #{opts.rom}")
+          status = Player.status(player)
+
+          Mix.shell().info(
+            "System: #{status.system} (#{status.video.scaled_width}x#{status.video.scaled_height})"
+          )
+
+          Mix.shell().info("EI controller socket: #{opts.socket}")
+
+          run_input(opts, player, server, ports)
         after
           stop_process(server)
         end
@@ -114,15 +122,22 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     end
   end
 
-  defp run_input(opts, player, server) do
-    {:ok, client} = Client.start_link(path: opts.socket, name: "beamicom-v4l2-local-input")
-    Process.unlink(client)
-    :ok = Client.await_ready(client)
-    task = self()
+  defp run_input(opts, player, server, ports) do
+    {:ok, client} =
+      Client.start_link(
+        path: opts.socket,
+        ports: ports,
+        name: "beamicom-v4l2-local-input"
+      )
 
-    Mix.shell().info("Arrows move; X=A, Z=B, Enter=Start, Space=Select, Q/Escape quits")
+    Process.unlink(client)
 
     try do
+      :ok = Client.await_ready(client)
+      task = self()
+
+      Mix.shell().info("Arrows move; X=A, Z=B, Enter=Start, Space=Select, Q/Escape quits")
+
       case TerminalInput.with_raw_terminal(fn device ->
              case run_evdev(opts.input, device, client, task, player, server) do
                {:error, reason} when is_nil(opts.input) ->
@@ -228,6 +243,14 @@ defmodule Mix.Tasks.Beamicom.V4l2 do
     if Process.alive?(pid), do: GenServer.stop(pid)
     :ok
   end
+
+  defp format_start_error({:unsupported_media_extension, ""}),
+    do: "ROM needs a .nes, .gb, or .gbc extension"
+
+  defp format_start_error({:unsupported_media_extension, extension}),
+    do: "unsupported ROM extension #{inspect(extension)}; expected .nes, .gb, or .gbc"
+
+  defp format_start_error(reason), do: inspect(reason)
 
   defp usage do
     """

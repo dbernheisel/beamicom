@@ -21,10 +21,12 @@ cd beamicom_v4l2
 BEAMICOM_V4L2_BUILD=true mix deps.get
 ```
 
-Start the player and its Unix-domain controller socket:
+Start an NES, Game Boy, or Game Boy Color ROM and its Unix-domain controller
+socket. The system is selected once from the extension before devices open:
 
 ```sh
 BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 /absolute/path/to/game.nes
+BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 /tmp/ucity_compat.gbc
 ```
 
 The command stays in the foreground and prints the socket path. By default it
@@ -45,11 +47,12 @@ At the IEx prompt, boot a legally obtained ROM:
 ```
 
 Audio begins automatically through the host's default SDL audio device. It is
-fed directly from the emulator as signed 16-bit, 44.1 kHz mono PCM; the video
-preview command below does not need to play or capture audio itself.
+fed directly from the emulator as signed 16-bit, 44.1 kHz PCM: mono for NES and
+stereo for GB/GBC. The video preview command below does not need to play or
+capture audio itself.
 
-The game now runs at 60 fps and uses Scenic-style nearest-neighbor 3× scaling.
-Its 768×720 video is drawn in the top-left of `/dev/fb0` and that game region is
+The game uses nearest-neighbor 3× scaling. NES output is 768×720; GB/GBC output
+is 480×432. The selected game region is drawn in the top-left of `/dev/fb0` and
 published as `/dev/video-beamicom`. View it from another terminal:
 
 ```sh
@@ -104,6 +107,15 @@ mix test.rust
 `mix test.rust` uses mise to run `cargo fmt --check`, Clippy with warnings
 denied, and the Rust unit tests—the same checks that gate precompiled releases.
 
+An opt-in compatibility test exercises uCity through the GBC runtime, RGB video
+conversion, and typed stereo audio envelope without requiring Linux video
+devices. The external audio-player adapter is covered separately by unit tests:
+
+```sh
+BEAMICOM_UCITY_ROM=/tmp/ucity_compat.gbc \
+  BEAMICOM_V4L2_BUILD=true mix test --include ucity test/ucity_compat_test.exs
+```
+
 `BEAMICOM_V4L2_BUILD=true` tells `rustler_precompiled` to compile the local crate.
 Package consumers do not set it; they download a checksum-verified NIF from the
 matching GitHub release instead.
@@ -132,8 +144,10 @@ Or launch it directly from IEx:
 BeamicomV4L2.status(player)
 #=> %{
 #=>   rom: "/absolute/path/to/game.nes",
+#=>   system: :nes,
 #=>   frame: 120,
 #=>   scale: 3,
+#=>   video: %{width: 256, height: 240, scaled_width: 768, scaled_height: 720},
 #=>   audio: %{
 #=>     enabled: true, running: true, error: nil, chunks: 240, samples: 88200
 #=>   },
@@ -183,8 +197,8 @@ audio_command = [
 BeamicomV4L2.play("path/to/game.nes", audio_command: audio_command)
 ```
 
-The command receives raw signed 16-bit little-endian, 44.1 kHz mono PCM on
-standard input.
+The command receives raw signed 16-bit little-endian, 44.1 kHz PCM on standard
+input. Custom commands must expect one channel for NES and two for GB/GBC.
 
 V4L2 devices carry video only, so `/dev/video-beamicom` cannot contain an audio
 track. To produce one A/V recording or network stream, route Beamicom audio to
@@ -218,8 +232,9 @@ the container or streaming protocol provides the combined A/V output.
 Unix-domain socket. Its terminal controller, Phoenix, and Scenic all use the
 shared `Beamicom.EI.Client`. The wire format is the standard binary EI protocol.
 
-The server advertises two devices with the `ei_button` capability. Changes
-commit on `ei_device.frame`; disconnecting releases that client's held buttons.
+For NES the server advertises two devices with the `ei_button` capability. For
+GB/GBC it advertises only controller port 1. Changes commit on
+`ei_device.frame`; disconnecting releases that client's held buttons.
 
 For local keyboard control on Linux, the launcher auto-detects a readable evdev
 keyboard so presses and releases—and multiple held buttons—are tracked
@@ -230,10 +245,14 @@ fallback cannot reliably distinguish overlapping held keys because terminals do
 not report key releases.
 
 ```elixir
-{:ok, client} = Beamicom.EI.Client.start_link(path: Beamicom.EI.default_path())
+ports = if BeamicomV4L2.status(player).system == :gbc, do: [1], else: [1, 2]
+{:ok, client} = Beamicom.EI.Client.start_link(path: Beamicom.EI.default_path(), ports: ports)
 :ok = Beamicom.EI.Client.await_ready(client)
 :ok = Beamicom.EI.Client.set_buttons(client, 1, [:right, :a])
 ```
+
+When connecting directly to a GB/GBC launcher, pass `ports: [1]`. NES clients
+may omit `:ports`; its default is `[1, 2]`.
 
 Select another path when launching if needed:
 
@@ -245,7 +264,8 @@ The reusable EI server, client, and codec live in core Beamicom without a NIF.
 
 #### Direct API
 
-The player tracks held buttons independently for controller ports 1 and 2.
+The NES player tracks held buttons independently for controller ports 1 and 2.
+GB/GBC exposes port 1 only; direct or EI requests for port 2 are rejected.
 Browser-style key names and Scenic-style key atoms use this default mapping:
 
 | Input | NES button |
@@ -284,7 +304,7 @@ another program already renders into `/dev/fb0` and only mirroring is needed.
 
 The destination must expose single-plane `V4L2_CAP_VIDEO_OUTPUT` and
 `V4L2_CAP_READWRITE`, and accept YUYV at the configured game-region resolution
-(768×720 by default).
+(768×720 for NES or 480×432 for GB/GBC at the default scale).
 Physical webcams are generally capture-only, so the E2E setup uses a
 `v4l2loopback` virtual device.
 

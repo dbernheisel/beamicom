@@ -8,7 +8,6 @@ defmodule Beamicom.EI.Server do
   @device2 @base + 4
   @button2 @base + 5
   @button_cap 1
-  @empty %{1 => MapSet.new(), 2 => MapSet.new()}
 
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name)
@@ -20,6 +19,13 @@ defmodule Beamicom.EI.Server do
   def init(opts) do
     path = Path.expand(Keyword.get(opts, :path, Beamicom.EI.default_path()))
     callback = Keyword.fetch!(opts, :on_buttons)
+    ports = Keyword.get(opts, :ports, [1, 2])
+
+    unless ports in [[1], [1, 2]] do
+      raise ArgumentError, ":ports must be [1] or [1, 2]"
+    end
+
+    empty = Map.new(ports, &{&1, MapSet.new()})
     File.mkdir_p!(Path.dirname(path))
     remove_stale(path)
 
@@ -34,7 +40,17 @@ defmodule Beamicom.EI.Server do
 
     File.chmod!(path, 0o600)
     accept(listener)
-    {:ok, %{path: path, listener: listener, callback: callback, clients: %{}, published: @empty}}
+
+    {:ok,
+     %{
+       path: path,
+       listener: listener,
+       callback: callback,
+       clients: %{},
+       ports: ports,
+       empty: empty,
+       published: empty
+     }}
   end
 
   def handle_call(:path, _, state), do: {:reply, state.path, state}
@@ -49,8 +65,9 @@ defmodule Beamicom.EI.Server do
       context: nil,
       interfaces: %{},
       objects: %{0 => :handshake},
-      held: @empty,
-      pending: @empty,
+      ports: state.ports,
+      held: state.empty,
+      pending: state.empty,
       serial: 0
     }
 
@@ -122,7 +139,7 @@ defmodule Beamicom.EI.Server do
   # seat bind
   defp dispatch(s, {@seat, 1, <<caps::unsigned-native-64>>}, c) do
     if Bitwise.band(caps, @button_cap) != 0 do
-      c = Enum.reduce(1..2, c, fn port, acc -> advertise_device(s, acc, port) end)
+      c = Enum.reduce(c.ports, c, fn port, acc -> advertise_device(s, acc, port) end)
       {c, true}
     else
       {c, true}
@@ -135,16 +152,23 @@ defmodule Beamicom.EI.Server do
   defp dispatch(_s, {id, 2, _args}, c) when id in [@device1, @device2] do
     port = if id == @device1, do: 1, else: 2
 
-    {%{
-       c
-       | held: Map.put(c.held, port, MapSet.new()),
-         pending: Map.put(c.pending, port, MapSet.new())
-     }, true}
+    if Map.has_key?(c.held, port) do
+      {%{
+         c
+         | held: Map.put(c.held, port, MapSet.new()),
+           pending: Map.put(c.pending, port, MapSet.new())
+       }, true}
+    else
+      {c, false}
+    end
   end
 
   defp dispatch(_s, {id, 3, _args}, c) when id in [@device1, @device2] do
     port = if id == @device1, do: 1, else: 2
-    {%{c | held: Map.put(c.held, port, c.pending[port])}, true}
+
+    if Map.has_key?(c.held, port),
+      do: {%{c | held: Map.put(c.held, port, c.pending[port])}, true},
+      else: {c, false}
   end
 
   # button request
@@ -152,11 +176,14 @@ defmodule Beamicom.EI.Server do
        when id in [@button1, @button2] and value in [0, 1] do
     port = if id == @button1, do: 1, else: 2
 
-    case Codes.button(code) do
-      nil ->
+    case {Map.has_key?(c.pending, port), Codes.button(code)} do
+      {false, _button} ->
         {c, false}
 
-      button ->
+      {_supported, nil} ->
+        {c, false}
+
+      {true, button} ->
         buttons =
           if value == 1,
             do: MapSet.put(c.pending[port], button),
@@ -188,14 +215,14 @@ defmodule Beamicom.EI.Server do
 
   defp publish(state) do
     current =
-      Map.new(1..2, fn port ->
+      Map.new(state.ports, fn port ->
         {port,
          Enum.reduce(state.clients, MapSet.new(), fn {_, c}, set ->
            MapSet.union(set, c.held[port])
          end)}
       end)
 
-    Enum.each(1..2, fn port ->
+    Enum.each(state.ports, fn port ->
       if current[port] != state.published[port],
         do: state.callback.(port, Enum.sort(MapSet.to_list(current[port])))
     end)

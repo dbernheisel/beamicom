@@ -21,12 +21,12 @@ that can run NES, Game Boy, and Game Boy Color ROMs.
 | [`beamicom_scenic`](./beamicom_scenic/) | NES desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
 | [`beamicom_phx`](./beamicom_phx/) | NES/GB/GBC Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
 | [`beamicom_stream`](./beamicom_stream/) | Local NES/GB/GBC AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
-| [`beamicom_v4l2`](./beamicom_v4l2/) | NES Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
+| [`beamicom_v4l2`](./beamicom_v4l2/) | NES/GB/GBC Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
 
-Both cores depend on the sibling host contract. The stream and Phoenix clients
-directly depend on both cores and the host; the Scenic and V4L2 clients remain
-NES-only. These are sibling path dependencies, so keep the directories together
-when working with an individual project.
+Both cores depend on the sibling host contract. The stream, Phoenix, and V4L2
+clients directly depend on both cores and the host; Scenic remains NES-only.
+These are sibling path dependencies, so keep the directories together when
+working with an individual project.
 
 ```text
 beamicom ─────────> beamicom_host
@@ -35,7 +35,7 @@ beamicom_stream ──> beamicom
 beamicom_stream ──> beamicom_gbc
 beamicom_stream ──> beamicom_host
 beamicom_scenic ──> beamicom
-beamicom_v4l2 ────> beamicom
+beamicom_v4l2 ────> beamicom, beamicom_gbc, beamicom_host
 beamicom_phx ─────> beamicom
 beamicom_phx ─────> beamicom_gbc
 beamicom_phx ─────> beamicom_host

@@ -1,7 +1,7 @@
 defmodule BeamicomV4L2 do
   @moduledoc """
-  Runs a Beamicom ROM on the Linux framebuffer and publishes that display as a
-  V4L2 virtual camera.
+  Runs an NES, Game Boy, or Game Boy Color ROM on the Linux framebuffer and
+  publishes that display as a V4L2 virtual camera.
 
   The supervised player owns the emulator runtime, framebuffer renderer, native
   V4L2 stream, and controller state. Use `BeamicomV4L2.Stream` directly only
@@ -20,6 +20,7 @@ defmodule BeamicomV4L2 do
           | {:audio, boolean()}
           | {:audio_slices, pos_integer()}
           | {:audio_command, [String.t()]}
+          | {:load_options, keyword()}
           | {:controls, map()}
           | {:name, GenServer.name()}
 
@@ -36,19 +37,19 @@ defmodule BeamicomV4L2 do
   @spec stop(GenServer.server()) :: :ok
   def stop(player \\ Player), do: GenServer.stop(player)
 
-  @spec key_down(term(), 1 | 2) :: :ok | :ignore
+  @spec key_down(term(), pos_integer()) :: :ok | :ignore
   def key_down(key, port \\ 1), do: Player.key_event(Player, key, :down, port)
 
-  @spec key_up(term(), 1 | 2) :: :ok | :ignore
+  @spec key_up(term(), pos_integer()) :: :ok | :ignore
   def key_up(key, port \\ 1), do: Player.key_event(Player, key, :up, port)
 
-  @spec press(atom(), 1 | 2) :: :ok | :ignore
+  @spec press(atom(), pos_integer()) :: :ok | :ignore
   def press(button, port \\ 1), do: Player.button_event(Player, button, :down, port)
 
-  @spec release(atom(), 1 | 2) :: :ok | :ignore
+  @spec release(atom(), pos_integer()) :: :ok | :ignore
   def release(button, port \\ 1), do: Player.button_event(Player, button, :up, port)
 
-  @spec set_buttons([atom()], 1 | 2) :: :ok | {:error, :invalid_buttons}
+  @spec set_buttons([atom()], pos_integer()) :: :ok | {:error, :invalid_buttons}
   def set_buttons(buttons, port \\ 1), do: Player.set_buttons(Player, port, buttons)
 
   @doc false

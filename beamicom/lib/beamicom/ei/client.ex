@@ -20,6 +20,11 @@ defmodule Beamicom.EI.Client do
 
   def init(opts) do
     path = Path.expand(Keyword.get(opts, :path, Beamicom.EI.default_path()))
+    ports = Keyword.get(opts, :ports, [1, 2])
+
+    unless ports in [[1], [1, 2]] do
+      raise ArgumentError, ":ports must be [1] or [1, 2]"
+    end
 
     case :gen_tcp.connect({:local, path}, 0, [:binary, packet: 0, active: :once], 2_000) do
       {:ok, socket} ->
@@ -29,9 +34,10 @@ defmodule Beamicom.EI.Client do
            name: Keyword.get(opts, :name, "beamicom"),
            buffer: <<>>,
            objects: %{0 => :handshake},
+           ports: ports,
            devices: %{},
            buttons: %{},
-           held: %{1 => MapSet.new(), 2 => MapSet.new()},
+           held: Map.new(ports, &{&1, MapSet.new()}),
            ready: MapSet.new(),
            last_serial: 0,
            origin: System.monotonic_time(:microsecond)
@@ -42,12 +48,13 @@ defmodule Beamicom.EI.Client do
     end
   end
 
-  def handle_call(:ready?, _, state), do: {:reply, MapSet.size(state.ready) == 2, state}
+  def handle_call(:ready?, _, state),
+    do: {:reply, MapSet.equal?(state.ready, MapSet.new(state.ports)), state}
 
-  def handle_call({:set, port, buttons}, _, state) when port in [1, 2] do
+  def handle_call({:set, port, buttons}, _, state) do
     valid = is_list(buttons) and Enum.all?(buttons, &(&1 in Codes.buttons()))
 
-    if valid and MapSet.member?(state.ready, port) do
+    if valid and port in state.ports and MapSet.member?(state.ready, port) do
       wanted = MapSet.new(buttons)
       previous = state.held[port]
       Enum.each(MapSet.difference(wanted, previous), &send_button(state, port, &1, 1))
@@ -163,12 +170,7 @@ defmodule Beamicom.EI.Client do
   defp dispatch({id, 6, <<>>}, state) when is_map_key(state.objects, id), do: state
 
   defp dispatch({id, 7, <<serial::unsigned-native-32>>}, state) do
-    port =
-      case Enum.sort(Map.keys(state.devices)) do
-        [] -> 1
-        [1] -> 2
-        _ -> nil
-      end
+    port = Enum.find(state.ports, &(not Map.has_key?(state.devices, &1)))
 
     if port do
       %{

@@ -1,6 +1,6 @@
 defmodule BeamicomV4L2.Audio do
   @moduledoc """
-  Plays Beamicom's signed 16-bit mono PCM stream through an external player.
+  Plays Beamicom's typed PCM stream through an external player.
 
   The default player is `ffplay`. A custom command can be supplied for tests or
   for routing audio into a system-specific sink.
@@ -9,7 +9,10 @@ defmodule BeamicomV4L2.Audio do
   use GenServer
   require Logger
 
-  @rate 44_100
+  alias Beamicom.Host.{AudioChunk, Output}
+  alias Beamicom.NES.Output, as: NESOutput
+
+  @default_audio %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []) do
@@ -27,18 +30,34 @@ defmodule BeamicomV4L2.Audio do
 
   @impl true
   def init(options) do
-    command = Keyword.get(options, :command, default_command(Keyword.get(options, :speed, 1.0)))
+    output = Keyword.get(options, :output, NESOutput)
+    audio = Keyword.get(options, :audio, @default_audio)
+
+    command =
+      Keyword.get(
+        options,
+        :command,
+        default_command(Keyword.get(options, :speed, 1.0), audio)
+      )
 
     with [executable | arguments] when is_binary(executable) <- command,
-         path when is_binary(path) <- System.find_executable(executable) do
+         path when is_binary(path) <- System.find_executable(executable),
+         :ok <- subscribe(output) do
       port =
         Port.open(
           {:spawn_executable, path},
           [:binary, :exit_status, :use_stdio, :stderr_to_stdout, args: arguments]
         )
 
-      :ok = Beamicom.NES.Output.subscribe_audio()
-      {:ok, %{port: port, executable: executable, chunks: 0, samples: 0, log: ""}}
+      {:ok,
+       %{
+         port: port,
+         executable: executable,
+         chunks: 0,
+         samples: 0,
+         log: "",
+         audio: audio
+       }}
     else
       [] -> {:stop, {:invalid_audio_command, command}}
       nil -> {:stop, {:audio_executable_not_found, List.first(command)}}
@@ -52,6 +71,16 @@ defmodule BeamicomV4L2.Audio do
   end
 
   @impl true
+  def handle_info({:audio_chunk, %AudioChunk{} = chunk}, state) do
+    if compatible?(chunk, state.audio) and Port.command(state.port, chunk.data) do
+      {:noreply, %{state | chunks: state.chunks + 1, samples: state.samples + chunk.frame_count}}
+    else
+      {:stop, :invalid_audio_chunk, state}
+    end
+  end
+
+  # Keep accepting the original notification for callers that explicitly use
+  # the audio process with a legacy NES publisher.
   def handle_info({:audio, sample_count, pcm}, state)
       when is_integer(sample_count) and is_binary(pcm) do
     if Port.command(state.port, pcm) do
@@ -84,10 +113,23 @@ defmodule BeamicomV4L2.Audio do
   end
 
   @doc false
-  def default_command(speed) do
-    ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f s16le -ar #{@rate} -ch_layout mono -i pipe:0) ++
+  def default_command(speed, audio \\ @default_audio) do
+    layout = if audio.channels == 1, do: "mono", else: "stereo"
+
+    ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
       atempo(speed)
   end
+
+  defp subscribe(NESOutput), do: NESOutput.subscribe_audio_chunks()
+  defp subscribe(output), do: Output.subscribe_audio(output)
+
+  defp compatible?(chunk, audio) do
+    chunk.sample_rate == audio.sample_rate and chunk.channels == audio.channels and
+      chunk.sample_format == audio.sample_format and
+      byte_size(chunk.data) == chunk.frame_count * chunk.channels * 2
+  end
+
+  defp format(:s16le), do: "s16le"
 
   defp atempo(speed) when speed >= 1.0, do: []
   defp atempo(speed) when speed >= 0.5, do: ["-af", "atempo=#{speed}"]

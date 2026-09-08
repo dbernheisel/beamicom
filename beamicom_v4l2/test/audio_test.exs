@@ -2,6 +2,7 @@ defmodule BeamicomV4L2.AudioTest do
   use ExUnit.Case, async: false
 
   alias BeamicomV4L2.Audio
+  alias Beamicom.Host.{AudioChunk, Output}
   import ExUnit.CaptureLog
 
   setup do
@@ -30,6 +31,36 @@ defmodule BeamicomV4L2.AudioTest do
 
     assert ["-ch_layout", "mono"] in Enum.chunk_every(command, 2, 1, :discard)
     refute "-ac" in command
+  end
+
+  test "configures and consumes typed Game Boy stereo PCM" do
+    output = start_supervised!({Output, []})
+
+    audio =
+      start_supervised!(
+        {Audio,
+         command: ["cat"],
+         output: output,
+         audio: %{sample_rate: 44_100, channels: 2, sample_format: :s16le}}
+      )
+
+    pcm = <<100::signed-little-16, -100::signed-little-16>>
+
+    Output.publish_audio(output, %AudioChunk{
+      system: :gbc,
+      sample_rate: 44_100,
+      channels: 2,
+      sample_format: :s16le,
+      frame_count: 1,
+      data: pcm
+    })
+
+    assert eventually(fn -> Audio.status(audio).samples == 1 end)
+
+    command =
+      Audio.default_command(1.0, %{sample_rate: 44_100, channels: 2, sample_format: :s16le})
+
+    assert ["-ch_layout", "stereo"] in Enum.chunk_every(command, 2, 1, :discard)
   end
 
   test "reports an external player failure to its owner" do

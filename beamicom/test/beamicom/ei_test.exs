@@ -40,4 +40,21 @@ defmodule Beamicom.EITest do
     stop_supervised(Client)
     assert_receive {2, []}
   end
+
+  test "can advertise only handheld port one" do
+    path = Path.join(System.tmp_dir!(), "bei-#{System.unique_integer([:positive])}.sock")
+    on_exit(fn -> File.rm(path) end)
+    owner = self()
+
+    start_supervised!(
+      {Server,
+       path: path, ports: [1], on_buttons: fn port, buttons -> send(owner, {port, buttons}) end}
+    )
+
+    client = start_supervised!({Client, path: path, ports: [1]})
+    assert :ok = Client.await_ready(client)
+    assert :ok = Client.set_buttons(client, 1, [:a])
+    assert_receive {1, [:a]}
+    assert {:error, :not_ready} = Client.set_buttons(client, 2, [:a])
+  end
 end

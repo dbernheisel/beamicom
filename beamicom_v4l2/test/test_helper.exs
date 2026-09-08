@@ -1,1 +1,1 @@
-ExUnit.start(exclude: [:e2e])
+ExUnit.start(exclude: [:e2e, :ucity])
