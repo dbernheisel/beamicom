@@ -57,6 +57,8 @@ config :logger, :default_formatter,
 config :phoenix, :json_library, Jason
 
 config :mime, :types, %{
+  "application/x-gameboy-color-rom" => ["gbc"],
+  "application/x-gameboy-rom" => ["gb"],
   "application/x-nes-rom" => ["nes"]
 }
 

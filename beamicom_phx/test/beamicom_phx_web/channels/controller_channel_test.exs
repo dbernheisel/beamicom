@@ -4,6 +4,7 @@ defmodule BeamicomPhxWeb.ControllerChannelTest do
   import Phoenix.ChannelTest
 
   alias Beamicom.EI.Client
+  alias Beamicom.NES.{Controllers, Runtime}
 
   @endpoint BeamicomPhxWeb.Endpoint
 
@@ -26,6 +27,54 @@ defmodule BeamicomPhxWeb.ControllerChannelTest do
     ref = push(socket, "buttons", %{"buttons" => []})
     assert_reply ref, :ok
     assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new()
+  end
+
+  @tag :integration
+  test "routes the active remote seat to Game Boy port one" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "beamicom-channel-#{System.unique_integer([:positive, :monotonic])}.gbc"
+      )
+
+    File.write!(path, Beamicom.GB.DiagnosticROM.build_cgb())
+
+    on_exit(fn ->
+      BeamicomPhx.Emulator.stop()
+      File.rm(path)
+    end)
+
+    assert :ok = BeamicomPhx.Emulator.load(path)
+
+    {:ok, %{player: 2}, socket} =
+      BeamicomPhxWeb.ControllerSocket
+      |> socket("gbc-controller", %{})
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
+
+    ref = push(socket, "buttons", %{"buttons" => ["right", "a"]})
+    assert_reply ref, :ok
+
+    %{session: %{runtime: runtime}} = :sys.get_state(BeamicomPhx.Emulator)
+    assert BeamicomStream.Runtime.snapshot(runtime).bus.buttons == 0x11
+    assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new()
+  end
+
+  @tag :integration
+  test "preserves Player 2 routing for a running NES" do
+    on_exit(&BeamicomPhx.Emulator.stop/0)
+    assert :ok = BeamicomPhx.Emulator.load("test/support/fixtures/01.basics.nes")
+
+    {:ok, %{player: 2}, socket} =
+      BeamicomPhxWeb.ControllerSocket
+      |> socket("nes-controller", %{})
+      |> subscribe_and_join(BeamicomPhxWeb.ControllerChannel, "controller:lobby")
+
+    ref = push(socket, "buttons", %{"buttons" => ["right", "a"]})
+    assert_reply ref, :ok
+
+    %{session: %{runtime: runtime}} = :sys.get_state(BeamicomPhx.Emulator)
+    {console, _frame} = Runtime.snapshot(runtime)
+    assert console.bus.pad2.buttons == Controllers.mask([:right, :a])
   end
 
   test "rejects unknown topics and invalid buttons" do

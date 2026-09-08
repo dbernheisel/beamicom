@@ -2,8 +2,9 @@ defmodule BeamicomPhx.PlayerQueue do
   @moduledoc """
   Owns the single remote controller seat and its FIFO waiting queue.
 
-  Player 1 is local to the server. The first remote controller receives Player 2;
-  later controllers wait until that channel disconnects.
+  Player 1 is local to the server. For NES, the first remote controller receives
+  Player 2; Game Boy has one controller, so the active remote seat is aggregated
+  into its Player 1 input. Later controllers wait until that seat disconnects.
   """
 
   use GenServer

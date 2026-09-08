@@ -36,7 +36,7 @@ defmodule BeamicomPhxWeb.ControllerChannel do
   def handle_in("buttons", %{"buttons" => names}, socket) when is_list(names) do
     with {:ok, buttons} <- decode_buttons(names),
          2 <- socket.assigns.controller,
-         :ok <- BeamicomPhx.Input.press(2, buttons) do
+         :ok <- BeamicomPhx.Input.press_remote(buttons) do
       {:reply, :ok, socket}
     else
       nil -> {:reply, {:error, %{reason: "waiting for Player 2"}}, socket}

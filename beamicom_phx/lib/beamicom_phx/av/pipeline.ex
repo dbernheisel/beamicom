@@ -12,8 +12,16 @@ defmodule BeamicomPhx.AV.Pipeline do
   """
   use Membrane.Pipeline
 
+  alias Beamicom.NES.System, as: NESSystem
+  alias BeamicomStream.AV.{AudioSource, VideoSource}
+
   @impl true
   def handle_init(_ctx, opts) do
+    profile = Keyword.get_lazy(opts, :profile, &default_profile/0)
+    video = profile.video
+    audio = profile.audio
+    period_ns = round(1_000_000_000 / video.frame_rate)
+
     sink = %Membrane.WebRTC.Sink{
       signaling: Keyword.fetch!(opts, :egress_signaling),
       tracks: [:audio, :video],
@@ -25,7 +33,12 @@ defmodule BeamicomPhx.AV.Pipeline do
       child(:sink, sink),
 
       # Video: RGB -> I420 -> AV1 (SVT, real-time) -> RTP payload -> sink
-      child(:video_src, BeamicomStream.AV.VideoSource)
+      child(:video_src, %VideoSource{
+        output: profile.output,
+        width: video.width,
+        height: video.height,
+        period_ns: period_ns
+      })
       |> child(:scaler, %Membrane.FFmpeg.SWScale.Converter{format: :I420})
       # Bandwidth is a non-issue at 256x240 over LAN, so favor quality: a low CRF
       # (vs the plugin's default 35) and a slower preset (vs 10). NES pixel art also
@@ -34,7 +47,7 @@ defmodule BeamicomPhx.AV.Pipeline do
         real_time_coding: true,
         encoder_mode: 8,
         rate_control: {:crf, 20},
-        approx_framerate: {60, 1},
+        approx_framerate: {round(video.frame_rate * 1_000), 1_000},
         config_parameters: %{"scm" => "2"}
       })
       |> child(:av1_pay, BeamicomStream.AV.Av1Payloader)
@@ -42,10 +55,15 @@ defmodule BeamicomPhx.AV.Pipeline do
       |> get_child(:sink),
 
       # Audio: 44.1k s16le -> 48k -> Opus -> RTP payload -> sink
-      child(:audio_src, BeamicomStream.AV.AudioSource)
+      child(:audio_src, %AudioSource{
+        output: profile.output,
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        sample_format: audio.sample_format
+      })
       |> child(:resampler, %Membrane.FFmpeg.SWResample.Converter{
         output_stream_format: %Membrane.RawAudio{
-          channels: 1,
+          channels: audio.channels,
           sample_rate: 48_000,
           sample_format: :s16le
         }
@@ -56,6 +74,24 @@ defmodule BeamicomPhx.AV.Pipeline do
       |> get_child(:sink)
     ]
 
-    {[spec: spec], %{}}
+    owner_ref = if owner = opts[:owner], do: Process.monitor(owner)
+    {[spec: spec], %{owner_ref: owner_ref}}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _owner, _reason}, _ctx, %{owner_ref: ref} = state),
+    do: {[terminate: :normal], state}
+
+  def handle_info(_message, _ctx, state), do: {[], state}
+
+  defp default_profile do
+    capabilities = NESSystem.capabilities()
+
+    %{
+      system: :nes,
+      output: Beamicom.NES.Output,
+      video: capabilities.video,
+      audio: capabilities.audio
+    }
   end
 end

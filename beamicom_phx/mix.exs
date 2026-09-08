@@ -68,6 +68,8 @@ defmodule BeamicomPhx.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:beamicom, path: "../beamicom"},
+      {:beamicom_gbc, path: "../beamicom_gbc"},
+      {:beamicom_host, path: "../beamicom_host"},
       {:beamicom_stream, path: "../beamicom_stream"},
       # Membrane A/V pipeline + WebRTC to the browser
       {:membrane_core, "~> 1.3"},

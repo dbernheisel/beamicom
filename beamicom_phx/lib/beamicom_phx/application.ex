@@ -23,16 +23,16 @@ defmodule BeamicomPhx.Application do
     result
   end
 
-  # server mode => run the emulator supervisor (Beamicom.NES.Output is started by
-  # the :beamicom app; the Runtime is loaded on demand via BeamicomPhx.Emulator,
-  # at boot from BEAMICOM_ROM or later from a drag-and-dropped ROM). The RtpBroadcast
-  # pipeline (when a relay target is set) subscribes to Output and simply waits for
-  # frames, so it no longer depends on a ROM being present at boot.
+  # Server mode runs the session coordinator and its temporary runtime/output/
+  # broadcaster supervisor. NES borrows Beamicom.NES.Output; Game Boy owns a
+  # private Host.Output for the lifetime of that family session.
   defp emulator_children do
     case Application.get_env(:beamicom_phx, :mode, :server) do
       :server ->
-        [BeamicomPhx.Emulator] ++
-          ei_children() ++ [BeamicomPhx.PlayerQueue] ++ rtp_broadcast_children()
+        [
+          {DynamicSupervisor, name: BeamicomPhx.RuntimeSupervisor, strategy: :one_for_one},
+          BeamicomPhx.Emulator
+        ] ++ ei_children() ++ [BeamicomPhx.PlayerQueue]
 
       :client ->
         [{BeamicomPhx.AV.Relay, listen_port: BeamicomPhx.RtpConfig.listen_port()}]
@@ -54,7 +54,7 @@ defmodule BeamicomPhx.Application do
              [
                name: BeamicomPhx.EIServer,
                path: path,
-               on_buttons: &Beamicom.NES.Runtime.set_buttons/2
+               on_buttons: &BeamicomPhx.Emulator.press/2
              ]
            ]}
       },
@@ -75,22 +75,6 @@ defmodule BeamicomPhx.Application do
       BeamicomPhx.Emulator.load(rom)
     else
       _ -> :ok
-    end
-  end
-
-  defp rtp_broadcast_children do
-    case BeamicomPhx.RtpConfig.target() do
-      nil ->
-        []
-
-      target ->
-        [
-          %{
-            id: BeamicomStream.AV.RtpBroadcast,
-            start:
-              {Membrane.Pipeline, :start_link, [BeamicomStream.AV.RtpBroadcast, [target: target]]}
-          }
-        ]
     end
   end
 

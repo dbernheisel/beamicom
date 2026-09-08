@@ -247,6 +247,11 @@
     0 0 0 1px rgba(0, 0, 0, 0.9);
 }
 
+.crt[data-system="gbc"] .crt__screen {
+  width: min(100cqw, calc(100cqh * 10 / 9));
+  aspect-ratio: 10 / 9;
+}
+
 .crt__screen video {
   display: block;
   width: 100%;

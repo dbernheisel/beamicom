@@ -8,7 +8,7 @@ defmodule BeamicomPhx.Saves do
   the `"saves"` PubSub topic so every connected `WatchLive` refreshes its grid.
   """
 
-  alias Beamicom.NES.{Runtime, ShareImage}
+  alias Beamicom.NES.ShareImage
 
   @topic "saves"
 
@@ -37,30 +37,34 @@ defmodule BeamicomPhx.Saves do
   Returns `{:ok, url}` or `{:error, reason}`.
   """
   def capture do
-    if BeamicomPhx.Emulator.loaded?() do
-      case Runtime.snapshot() do
-        {console, frame} when not is_nil(frame) ->
-          File.mkdir_p!(dir())
-          name = "save-#{System.system_time(:millisecond)}.png"
-          File.write!(Path.join(dir(), name), ShareImage.to_png(console, frame))
-          Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
-          {:ok, "/saves/" <> name}
-
-        _ ->
-          {:error, :no_frame}
-      end
-    else
-      {:error, :not_loaded}
+    case BeamicomPhx.Emulator.snapshot() do
+      {:ok, {_console, nil}} -> {:error, :no_frame}
+      {:ok, {console, frame}} -> capture_nes(console, frame)
+      {:error, _reason} = error -> error
     end
   end
 
   @doc "Load a save (by URL or basename) into the running emulator."
   def load(url) do
-    path = Path.join(dir(), Path.basename(url))
+    case BeamicomPhx.Emulator.system() do
+      :gbc ->
+        {:error, :unsupported_system}
 
-    with {:ok, png} <- File.read(path),
-         {:ok, console} <- ShareImage.load_image(png, []) do
-      BeamicomPhx.Emulator.load_console(console)
+      _nes_or_empty ->
+        path = Path.join(dir(), Path.basename(url))
+
+        with {:ok, png} <- File.read(path),
+             {:ok, console} <- ShareImage.load_image(png, []) do
+          BeamicomPhx.Emulator.load_console(console)
+        end
     end
+  end
+
+  defp capture_nes(console, frame) do
+    File.mkdir_p!(dir())
+    name = "save-#{System.system_time(:millisecond)}.png"
+    File.write!(Path.join(dir(), name), ShareImage.to_png(console, frame))
+    Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
+    {:ok, "/saves/" <> name}
   end
 end

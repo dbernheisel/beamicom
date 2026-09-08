@@ -11,7 +11,8 @@ defmodule BeamicomStream.AV.AudioSourceTest do
       output: self(),
       channels: 2,
       sample_rate: 44_100,
-      sample_format: :s16le
+      sample_format: :s16le,
+      pts_offset_ns: 0
     }
 
     first = chunk(441, :binary.copy(<<1, 0, 2, 0>>, 441))
@@ -38,7 +39,8 @@ defmodule BeamicomStream.AV.AudioSourceTest do
       output: self(),
       channels: 2,
       sample_rate: 44_100,
-      sample_format: :s16le
+      sample_format: :s16le,
+      pts_offset_ns: 0
     }
 
     for mismatch <- [

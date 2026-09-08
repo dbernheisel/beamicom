@@ -14,7 +14,8 @@ defmodule BeamicomStream.AV.VideoSource do
     output: [spec: term(), default: Beamicom.NES.Output],
     width: [spec: pos_integer(), default: 256],
     height: [spec: pos_integer(), default: 240],
-    period_ns: [spec: pos_integer(), default: @nes_period_ns]
+    period_ns: [spec: pos_integer(), default: @nes_period_ns],
+    pts_offset_ns: [spec: non_neg_integer(), default: 0]
   )
 
   def_output_pad(:output,
@@ -31,7 +32,10 @@ defmodule BeamicomStream.AV.VideoSource do
        reader: reader(opts.output),
        width: opts.width,
        height: opts.height,
-       period_ns: opts.period_ns
+       period_ns: opts.period_ns,
+       pts_epoch_ns: opts.pts_offset_ns,
+       last_number: nil,
+       last_pts: nil
      }}
   end
 
@@ -71,9 +75,11 @@ defmodule BeamicomStream.AV.VideoSource do
   defp push_latest(%{reader: :nes} = state) do
     case NESOutput.latest() do
       %Framebuffer{} = frame ->
+        {pts, state} = timestamp(frame.number, state.period_ns, state)
+
         buffer = %Membrane.Buffer{
           payload: Palette.to_rgb(frame),
-          pts: frame.number * state.period_ns
+          pts: pts
         }
 
         {[buffer: {:output, buffer}], state}
@@ -87,7 +93,13 @@ defmodule BeamicomStream.AV.VideoSource do
     case Output.latest_video(state.output) do
       %VideoFrame{} = frame ->
         period_ns = frame.duration_ns || state.period_ns
-        buffer = %Membrane.Buffer{payload: rgb_payload(frame), pts: frame.number * period_ns}
+        {pts, state} = timestamp(frame.number, period_ns, state)
+
+        buffer = %Membrane.Buffer{
+          payload: rgb_payload(frame),
+          pts: pts
+        }
+
         {[buffer: {:output, buffer}], state}
 
       nil ->
@@ -100,4 +112,20 @@ defmodule BeamicomStream.AV.VideoSource do
 
   defp subscribe(:nes, _output), do: NESOutput.subscribe_video_frames()
   defp subscribe(:host, output), do: Output.subscribe_video(output)
+
+  defp timestamp(number, period_ns, %{last_number: nil} = state) do
+    pts = state.pts_epoch_ns + number * period_ns
+    {pts, %{state | last_number: number, last_pts: pts}}
+  end
+
+  defp timestamp(number, period_ns, %{last_number: last} = state) when number > last do
+    pts = state.pts_epoch_ns + number * period_ns
+    {pts, %{state | last_number: number, last_pts: pts}}
+  end
+
+  defp timestamp(number, period_ns, state) do
+    pts = state.last_pts + period_ns
+    epoch = pts - number * period_ns
+    {pts, %{state | pts_epoch_ns: epoch, last_number: number, last_pts: pts}}
+  end
 end

@@ -23,4 +23,42 @@ defmodule BeamicomPhx.AV.PipelineTest do
 
     Membrane.Pipeline.terminate(pipeline)
   end
+
+  test "builds the 160x144 stereo Game Boy profile" do
+    output = start_supervised!({Beamicom.Host.Output, name: nil})
+    {:ok, core} = BeamicomStream.Core.resolve("diagnostic.gbc")
+    signaling = Membrane.WebRTC.Signaling.new()
+
+    profile = %{
+      system: :gbc,
+      output: output,
+      video: core.capabilities.video,
+      audio: core.capabilities.audio
+    }
+
+    {:ok, _supervisor, pipeline} =
+      Membrane.Pipeline.start_link(BeamicomPhx.AV.Pipeline,
+        egress_signaling: signaling,
+        profile: profile
+      )
+
+    ref = Process.monitor(pipeline)
+    refute_receive {:DOWN, ^ref, :process, ^pipeline, _}, 1_500
+    Membrane.Pipeline.terminate(pipeline)
+  end
+
+  test "terminates when its owning browser process exits" do
+    owner = spawn(fn -> receive do: (:stop -> :ok) end)
+    signaling = Membrane.WebRTC.Signaling.new()
+
+    {:ok, _supervisor, pipeline} =
+      Membrane.Pipeline.start_link(BeamicomPhx.AV.Pipeline,
+        egress_signaling: signaling,
+        owner: owner
+      )
+
+    ref = Process.monitor(pipeline)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pipeline, _reason}, 1_500
+  end
 end

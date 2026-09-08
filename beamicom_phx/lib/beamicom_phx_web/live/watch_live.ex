@@ -1,15 +1,15 @@
 defmodule BeamicomPhxWeb.WatchLive do
   @moduledoc """
   Watch page: one WebRTC-streamed view of the server's running game. On the
-  connected mount it creates a shared `Membrane.WebRTC.Signaling`, starts a
-  linked A/V pipeline whose `WebRTC.Sink` uses that signaling, and attaches the
-  `Live.Player` (which uses the same signaling) — so browser and Sink negotiate
-  over the LiveView socket. The pipeline is linked to this process, so it is torn
-  down automatically when the browser disconnects.
+  connected mount it creates a shared `Membrane.WebRTC.Signaling`, starts an
+  A/V pipeline whose `WebRTC.Sink` uses that signaling, and attaches the
+  `Live.Player` (which uses the same signaling). The pipeline monitors this
+  LiveView and is also terminated explicitly during orderly disconnects.
   """
   use BeamicomPhxWeb, :live_view
 
-  alias BeamicomPhx.{Input, Saves}
+  alias BeamicomPhx.{Emulator, Input, Saves}
+  alias BeamicomStream.Core
   alias Membrane.WebRTC.Live.Player
 
   # The on-screen controller graphic, inlined so the Gamepad JS hook can reach its
@@ -21,27 +21,10 @@ defmodule BeamicomPhxWeb.WatchLive do
   def mount(_params, _session, socket) do
     mode = Application.get_env(:beamicom_phx, :mode, :server)
 
-    socket =
-      if connected?(socket) do
-        signaling = Membrane.WebRTC.Signaling.new()
-
-        case mode do
-          :client ->
-            BeamicomPhx.AV.Relay.add_browser(socket.id, self(), signaling)
-
-          _server ->
-            {:ok, _supervisor, _pipeline} =
-              Membrane.Pipeline.start_link(BeamicomPhx.AV.Pipeline, egress_signaling: signaling)
-        end
-
-        # Both modes watch the gallery (read-only for clients); saving/loading is
-        # gated to server mode in the render and the event handlers.
-        Saves.subscribe()
-        if mode == :server, do: BeamicomPhx.PlayerQueue.subscribe()
-        Player.attach(socket, id: "videoPlayer", signaling: signaling)
-      else
-        socket
-      end
+    profile =
+      if mode == :server and not connected?(socket),
+        do: Emulator.profile(),
+        else: nil
 
     # `held` = controller buttons currently down (the NES controller is stateful, so
     # we resend the whole set on every change). Server mode also accepts a dropped
@@ -53,6 +36,10 @@ defmodule BeamicomPhxWeb.WatchLive do
         pointer_held: MapSet.new(),
         gamepad_held: MapSet.new(),
         mode: mode,
+        signaling: nil,
+        av_pipeline: nil,
+        av_profile: profile,
+        system: profile_system(profile),
         controller_url:
           if(mode == :client,
             do: Application.get_env(:beamicom_phx, :controller_url),
@@ -60,14 +47,17 @@ defmodule BeamicomPhxWeb.WatchLive do
           ),
         player_notification: nil,
         player_notification_token: nil,
-        rom_name: nil,
+        rom_name: profile_name(profile),
         saves: Saves.list()
       )
+
+    socket = if connected?(socket), do: connect_player(socket), else: socket
 
     socket =
       if mode == :server do
         allow_upload(socket, :rom,
-          accept: ["application/x-nes-rom", ".nes"],
+          accept: [".nes", ".gb", ".gbc"],
+          max_file_size: 16_000_000,
           max_entries: 1,
           auto_upload: true,
           progress: &handle_rom_progress/3
@@ -113,7 +103,7 @@ defmodule BeamicomPhxWeb.WatchLive do
           </span>
         </div>
       </div>
-      <div class="crt">
+      <div class="crt" data-system={@system}>
         <div class="crt__cabinet">
           <div class="crt__bezel">
             <div class="crt__screen">
@@ -123,6 +113,8 @@ defmodule BeamicomPhxWeb.WatchLive do
                 phx-hook="Crt"
                 phx-update="ignore"
                 class="crt__glass"
+                data-video-width={video_dimension(@av_profile, :width)}
+                data-video-height={video_dimension(@av_profile, :height)}
                 aria-hidden="true"
               ></canvas>
             </div>
@@ -145,6 +137,12 @@ defmodule BeamicomPhxWeb.WatchLive do
                 type="button"
                 class="crt__btn"
                 phx-click="save_state"
+                disabled={@system == :gbc}
+                title={
+                  if @system == :gbc,
+                    do: "Game Boy save states are not supported yet",
+                    else: "Save state"
+                }
               >
                 Save
               </button>
@@ -167,12 +165,12 @@ defmodule BeamicomPhxWeb.WatchLive do
       >
         {raw(controller_svg())}
       </div>
-      <form :if={@mode == :server} phx-change="validate">
+      <form :if={@mode == :server} id="rom-upload" phx-change="validate">
         <label class="crt__rom" phx-drop-target={@uploads.rom.ref}>
           <.live_file_input upload={@uploads.rom} class="crt__rom-input" />
           {if @rom_name,
-            do: "▸ #{@rom_name} — drop a .nes to change",
-            else: "Drop a .nes ROM here to load"}
+            do: "▸ #{@rom_name} — drop a .nes, .gb, or .gbc to change",
+            else: "Drop a .nes, .gb, or .gbc ROM here to load"}
         </label>
       </form>
 
@@ -183,7 +181,8 @@ defmodule BeamicomPhxWeb.WatchLive do
           class={["save-thumb", @mode != :server && "save-thumb--readonly"]}
           phx-click={@mode == :server && "load_save"}
           phx-value-url={url}
-          title={if @mode == :server, do: "Load this save", else: "Saves (view only)"}
+          disabled={@system == :gbc}
+          title={save_title(@mode, @system)}
         >
           <img src={url} alt="save state" />
         </button>
@@ -192,28 +191,21 @@ defmodule BeamicomPhxWeb.WatchLive do
     """
   end
 
-  # A dropped/selected .nes finished uploading: copy it out of the temp dir and
-  # (re)load the emulator. All viewers pick up the new game via the shared Output.
+  # Load synchronously while Phoenix still owns its private upload path. The
+  # display name selects the core, so no predictable shared-temporary staging
+  # path is needed.
   defp handle_rom_progress(:rom, %{done?: false}, socket), do: {:noreply, socket}
 
   defp handle_rom_progress(:rom, entry, socket) do
-    name = entry.client_name || ""
-    dest = Path.join(System.tmp_dir!(), "beamicom_current_rom.nes")
+    name = Path.basename(entry.client_name || "")
 
-    path =
-      consume_uploaded_entry(socket, entry, fn %{path: tmp} ->
-        File.cp!(tmp, dest)
-        {:ok, dest}
-      end)
+    case Core.resolve(name) do
+      {:ok, _core} ->
+        load_uploaded_rom(socket, entry, name)
 
-    socket =
-      case BeamicomPhx.Emulator.load(path) do
-        :ok -> assign(socket, rom_name: name)
-        {:error, _reason} -> put_flash(socket, :error, "Couldn't load #{name}")
-      end
-
-    File.rm(dest)
-    {:noreply, socket}
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Unsupported ROM type")}
+    end
   end
 
   @impl true
@@ -224,15 +216,27 @@ defmodule BeamicomPhxWeb.WatchLive do
   # refreshes via handle_info(:saves_changed, …).
   def handle_event("save_state", _params, %{assigns: %{mode: :server}} = socket) do
     case Saves.capture() do
-      {:ok, _url} -> {:noreply, socket}
-      {:error, _reason} -> {:noreply, put_flash(socket, :error, "Nothing to save yet")}
+      {:ok, _url} ->
+        {:noreply, socket}
+
+      {:error, :unsupported_system} ->
+        {:noreply, put_flash(socket, :error, "Game Boy save states are not supported yet")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Nothing to save yet")}
     end
   end
 
   def handle_event("load_save", %{"url" => url}, %{assigns: %{mode: :server}} = socket) do
     case Saves.load(url) do
-      :ok -> {:noreply, socket}
-      _ -> {:noreply, put_flash(socket, :error, "Couldn't load that save")}
+      :ok ->
+        {:noreply, socket}
+
+      {:error, :unsupported_system} ->
+        {:noreply, put_flash(socket, :error, "Game Boy save states are not supported yet")}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Couldn't load that save")}
     end
   end
 
@@ -282,6 +286,27 @@ defmodule BeamicomPhxWeb.WatchLive do
   @impl true
   def handle_info(:saves_changed, socket), do: {:noreply, assign(socket, saves: Saves.list())}
 
+  def handle_info(
+        {:emulator_profile, %{system: system} = profile},
+        %{assigns: %{mode: :server, system: system}} = socket
+      ),
+      do: {:noreply, assign(socket, rom_name: profile_name(profile))}
+
+  def handle_info(
+        {:emulator_profile, _profile},
+        %{assigns: %{mode: :server}} = socket
+      ) do
+    # A WebRTC Player's signaling handshake is one-shot. Remount the entire
+    # LiveView on a format-family transition so both the Player and its sink get
+    # a fresh signaling object; changing assigns under the same child id does not.
+    epoch = System.unique_integer([:positive, :monotonic])
+    {:noreply, push_navigate(socket, to: ~p"/?stream_epoch=#{epoch}")}
+  end
+
+  def handle_info({:emulator_loaded, profile}, socket) do
+    {:noreply, assign(socket, rom_name: profile_name(profile))}
+  end
+
   def handle_info({:player_notification, message}, socket) do
     token = make_ref()
     Process.send_after(self(), {:hide_player_notification, token}, 4_000)
@@ -305,6 +330,12 @@ defmodule BeamicomPhxWeb.WatchLive do
   end
 
   def handle_info({:hide_player_notification, _stale_token}, socket), do: {:noreply, socket}
+
+  @impl true
+  def terminate(_reason, socket) do
+    stop_browser_pipeline(socket.assigns[:av_pipeline])
+    :ok
+  end
 
   defp button_event(socket, dir, name) do
     case Input.button_from_name(name) do
@@ -335,4 +366,113 @@ defmodule BeamicomPhxWeb.WatchLive do
 
   # The inlined controller SVG (compile-time constant, kept out of assigns).
   defp controller_svg, do: @controller_svg
+
+  defp connect_player(%{assigns: %{mode: :client}} = socket) do
+    signaling = Membrane.WebRTC.Signaling.new()
+    BeamicomPhx.AV.Relay.add_browser(socket.id, self(), signaling)
+    Saves.subscribe()
+
+    socket
+    |> assign(signaling: signaling)
+    |> Player.attach(id: "videoPlayer", signaling: signaling)
+  end
+
+  defp connect_player(%{assigns: %{mode: :server}} = socket) do
+    Emulator.subscribe()
+    profile = Emulator.profile()
+    signaling = Membrane.WebRTC.Signaling.new()
+    Saves.subscribe()
+    BeamicomPhx.PlayerQueue.subscribe()
+
+    socket =
+      case start_browser_pipeline(profile, signaling) do
+        {:ok, pipeline} ->
+          assign(socket,
+            av_pipeline: pipeline,
+            av_profile: profile,
+            system: profile_system(profile),
+            rom_name: profile_name(profile)
+          )
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Couldn't start video: #{inspect(reason)}")
+      end
+
+    socket
+    |> assign(signaling: signaling)
+    |> Player.attach(id: "videoPlayer", signaling: signaling)
+  end
+
+  defp start_browser_pipeline(nil, _signaling), do: {:ok, nil}
+
+  defp start_browser_pipeline(profile, signaling) do
+    case Membrane.Pipeline.start_link(BeamicomPhx.AV.Pipeline,
+           egress_signaling: signaling,
+           profile: profile,
+           owner: self()
+         ) do
+      {:ok, supervisor, pipeline} ->
+        Process.unlink(supervisor)
+        {:ok, pipeline}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp stop_browser_pipeline(nil), do: :ok
+
+  defp stop_browser_pipeline(pipeline) do
+    try do
+      Membrane.Pipeline.terminate(pipeline)
+    catch
+      :exit, _reason -> :ok
+    end
+  end
+
+  defp profile_system(nil), do: nil
+  defp profile_system(profile), do: profile.system
+  defp profile_name(nil), do: nil
+  defp profile_name(profile), do: profile.rom_name
+
+  defp video_dimension(nil, :width), do: 256
+  defp video_dimension(nil, :height), do: 240
+  defp video_dimension(profile, dimension), do: Map.fetch!(profile.video, dimension)
+
+  defp save_title(:server, :gbc), do: "NES saves cannot be loaded while Game Boy is active"
+  defp save_title(:server, _system), do: "Load this save"
+  defp save_title(_mode, _system), do: "Saves (view only)"
+
+  defp load_uploaded_rom(socket, entry, name) do
+    live_view = socket.root_pid
+
+    result =
+      consume_uploaded_entry(socket, entry, fn %{path: path} ->
+        {:ok, Emulator.load(path, rom_name: name, notify_from: live_view)}
+      end)
+
+    socket =
+      case result do
+        {:ok, :ok} -> finish_uploaded_load(socket, name)
+        :ok -> finish_uploaded_load(socket, name)
+        {:ok, {:error, _reason}} -> put_flash(socket, :error, "Couldn't load #{name}")
+        {:error, _reason} -> put_flash(socket, :error, "Couldn't load #{name}")
+      end
+
+    {:noreply, socket}
+  end
+
+  defp finish_uploaded_load(socket, name) do
+    profile = Emulator.profile()
+
+    if profile_system(profile) == socket.assigns.system do
+      assign(socket, rom_name: name)
+    else
+      epoch = System.unique_integer([:positive, :monotonic])
+
+      socket
+      |> assign(rom_name: name, system: profile_system(profile))
+      |> redirect(to: ~p"/?stream_epoch=#{epoch}")
+    end
+  end
 end

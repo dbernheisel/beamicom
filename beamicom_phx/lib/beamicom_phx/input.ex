@@ -1,14 +1,10 @@
 defmodule BeamicomPhx.Input do
   @moduledoc """
-  Controller input boundary. Maps browser key names to NES buttons and forwards
-  the currently-held set to the emulator.
+  Controller input boundary. Maps browser key names to console buttons and
+  forwards the currently-held set to the emulator.
 
-  Phase 1 (server mode): the browser connects to the node running the emulator, so
-  `press/2` calls `Beamicom.NES.Runtime.set_buttons/3` locally. When no Runtime is
-  running (client mode — Phase 2 — or tests) it is a no-op.
-
-  ponytail: no node-to-node forwarding yet. When the Phase-2 client node lands,
-  the `nil`-Runtime branch forwards the press to the upstream server instead.
+  Server browsers call the local emulator directly so each LiveView remains an
+  independent held-input source. A client-only node forwards through EI.
   """
 
   # Browser KeyboardEvent.key -> NES button. Letters matched case-insensitively.
@@ -79,8 +75,37 @@ defmodule BeamicomPhx.Input do
   atoms). No-op when no local emulator Runtime is running.
   """
   def press(port, buttons) when is_integer(port) and is_list(buttons) do
+    case Process.whereis(BeamicomPhx.Emulator) do
+      nil -> forward(port, buttons)
+      _emulator -> press_local(port, buttons)
+    end
+  end
+
+  @doc "Set the remote browser seat, mapped atomically to NES P2 or Game Boy P1."
+  def press_remote(buttons) when is_list(buttons) do
+    case Process.whereis(BeamicomPhx.Emulator) do
+      nil -> forward(2, buttons)
+      _emulator -> press_remote_local(buttons)
+    end
+  end
+
+  defp press_local(port, buttons) do
+    case BeamicomPhx.Emulator.press(port, buttons) do
+      {:error, :not_loaded} -> forward(port, buttons)
+      result -> result
+    end
+  end
+
+  defp press_remote_local(buttons) do
+    case BeamicomPhx.Emulator.press_remote(buttons) do
+      {:error, :not_loaded} -> forward(2, buttons)
+      result -> result
+    end
+  end
+
+  defp forward(port, buttons) do
     case Process.whereis(BeamicomPhx.EIClient) do
-      nil -> Beamicom.NES.Runtime.set_buttons(port, buttons)
+      nil -> :ok
       client -> Beamicom.EI.Client.set_buttons(client, port, buttons)
     end
   end

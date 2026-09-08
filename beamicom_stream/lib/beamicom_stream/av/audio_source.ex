@@ -15,7 +15,8 @@ defmodule BeamicomStream.AV.AudioSource do
     output: [spec: term(), default: Beamicom.NES.Output],
     channels: [spec: 1 | 2, default: 1],
     sample_rate: [spec: pos_integer(), default: @sample_rate],
-    sample_format: [spec: atom(), default: :s16le]
+    sample_format: [spec: atom(), default: :s16le],
+    pts_offset_ns: [spec: non_neg_integer(), default: 0]
   )
 
   def_output_pad(:output,
@@ -34,7 +35,8 @@ defmodule BeamicomStream.AV.AudioSource do
        output: opts.output,
        channels: opts.channels,
        sample_rate: opts.sample_rate,
-       sample_format: opts.sample_format
+       sample_format: opts.sample_format,
+       pts_offset_ns: opts.pts_offset_ns
      }}
   end
 
@@ -62,7 +64,7 @@ defmodule BeamicomStream.AV.AudioSource do
       ) do
     buffer = %Membrane.Buffer{
       payload: chunk.data,
-      pts: div(state.count * 1_000_000_000, state.sample_rate)
+      pts: state.pts_offset_ns + div(state.count * 1_000_000_000, state.sample_rate)
     }
 
     {[buffer: {:output, buffer}], %{state | count: state.count + chunk.frame_count}}

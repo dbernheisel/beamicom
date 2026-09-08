@@ -1,14 +1,18 @@
 # BeamicomPhx
 
-Web client for the [`beamicom`](../beamicom/README.md) NES
-emulator. A Phoenix LiveView app that streams a running console's audio/video
-to the browser over WebRTC and relays controller input back.
+Browser client for the [`beamicom`](../beamicom/README.md) NES and
+[`beamicom_gbc`](../beamicom_gbc/README.md) Game Boy emulator cores. A Phoenix
+LiveView app streams the active console's audio/video over WebRTC and relays
+controller input back through the shared host/stream boundaries.
 
-It is one of the three projects in the combined
+It is one of the projects in the combined
 [Beamicom repository](../README.md):
 
 ```
 beamicom/          # core emulator (headless)
+beamicom_gbc/      # DMG/Game Boy Color core
+beamicom_host/     # system-neutral A/V and input contracts
+beamicom_stream/   # shared runtime and Membrane sources
 beamicom_scenic/   # desktop client — Scenic/OpenGL window
 beamicom_phx/      # this project — browser client
 ```
@@ -26,10 +30,12 @@ The app runs in one of two modes set by the `BEAMICOM_MODE` env var (default: `s
 
 ## Setup
 
-The local `beamicom` path dependency is already included in the repository:
+The local core and host path dependencies are already included in the repository:
 
 ```
 beamicom/         # core dependency
+beamicom_gbc/     # Game Boy core dependency
+beamicom_host/    # neutral host contracts
 beamicom_stream/  # shared Membrane A/V and RTP components
 beamicom_phx/     # this project
 ```
@@ -46,12 +52,14 @@ mix setup           # deps + assets
 ### Server mode
 
 ```sh
-BEAMICOM_ROM=roms/game.nes mix phx.server
+BEAMICOM_ROM=roms/game.gbc mix phx.server
 ```
 
-`BEAMICOM_ROM` is required in server mode — the emulator starts at boot with
-that ROM. You can swap ROMs at runtime by dragging a `.nes` file onto the drop
-zone in the browser.
+`BEAMICOM_ROM` is required when starting the non-test application in server
+mode and accepts a `.nes`, `.gb`, or `.gbc` ROM. You can swap among those
+formats at runtime from the browser. Format-dependent stream changes remount
+the browser player so WebRTC negotiates the active dimensions and channel
+layout.
 
 Default port: **4044**.
 
@@ -78,14 +86,16 @@ mix phx.server
 Default port: **4046**. Open `http://CLIENT_IP:4046`. A/V arrives over RTP on
 UDP ports 5000 (AV1 video) and 5002 (Opus audio); controls go from the browser
 to `ws://SERVER_IP:4044/controller/websocket` as a standard Phoenix Channel and
-are forwarded by the server to Beamicom's EI Unix-socket input server. Allow
-those ports through any host firewall. `BEAMICOM_RTP_LISTEN` changes the base
-UDP port; audio always uses base + 2.
+are forwarded through the server's system-aware input boundary. Allow those
+ports through any host firewall. `BEAMICOM_RTP_LISTEN` changes the base UDP
+port; audio always uses base + 2.
 
 `BEAMICOM_IP=0.0.0.0` makes the development endpoint reachable from other
-machines; omit it when both processes and the browser run on one host. The
-controller channel is intended for a trusted local network and does not require
-authentication.
+machines; omit it when both processes and the browser run on one host. Server
+mode has no authentication for controller access or ROM uploads, and an upload
+replaces the global emulator for every viewer. Treat it as a trusted-network
+service; do not expose server mode publicly without authentication and
+authorization.
 
 The reusable RGB/PCM sources, AV1 packetizer, RTP timestamp/serialization code,
 and AV1/Opus UDP broadcaster live in `beamicom_stream`. This project keeps the
@@ -93,17 +103,18 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
 
 ## Browser UI
 
-- **Video** — CRT-styled 4:3 WebRTC stream, unmuted on first key/pointer press
-  (browsers block autoplay audio).
+- **Video** — CRT-styled WebRTC stream using 4:3 for NES and 10:9 for Game Boy,
+  unmuted on first key/pointer press (browsers block autoplay audio).
 - **Controller** — keyboard bindings, an on-screen touch gamepad, and physical
   USB/Bluetooth controllers through the browser Gamepad API. The first connected
   physical controller uses its standard D-pad/left stick, A/B, Select, and Start
   mapping. In client mode, input is relayed to the server selected by
   `BEAMICOM_SERVER_URL`. Player 1 remains local to the server; the first connected
-  client becomes Player 2. Additional clients wait in a FIFO queue and are
-  notified when they move up or become Player 2.
+  client becomes Player 2 for NES. Game Boy has one controller, so browser
+  inputs are aggregated into Player 1 and a disconnected browser releases only
+  its own held buttons. Additional clients still use the FIFO seat queue.
 
-| Key | NES button |
+| Key | Console button |
 |-----|------------|
 | Arrow keys | D-pad |
 | X | A |
@@ -111,6 +122,10 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
 | Enter | Start |
 | Shift | Select |
 
-- **ROM drop zone** *(server mode only)* — drag a `.nes` file onto the labelled
+- **ROM drop zone** *(server mode only)* — drag a `.nes`, `.gb`, or `.gbc` file onto the labelled
   area at the bottom of the page to (re)load the emulator. All connected
   browsers pick up the new game immediately.
+
+- **Save gallery** — NES share-image capture/load remains supported. Game Boy
+  save states are not implemented yet; those controls are disabled and forged
+  save requests return an explicit unsupported-system result.

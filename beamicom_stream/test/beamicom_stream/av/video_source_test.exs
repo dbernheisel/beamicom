@@ -23,17 +23,61 @@ defmodule BeamicomStream.AV.VideoSourceTest do
       reader: :nes,
       width: 256,
       height: 240,
-      period_ns: round(1_000_000_000 / 60.0988)
+      period_ns: round(1_000_000_000 / 60.0988),
+      pts_epoch_ns: 0,
+      last_number: nil,
+      last_pts: nil
     }
 
     :sys.suspend(Output)
 
     try do
-      assert {[buffer: {:output, %Membrane.Buffer{} = buffer}], ^state} =
+      assert {[buffer: {:output, %Membrane.Buffer{} = buffer}], next_state} =
                VideoSource.handle_info({:frame, 1}, nil, state)
 
       assert buffer.payload == <<84, 84, 84>>
       assert buffer.pts == 42 * round(1_000_000_000 / 60.0988)
+      assert next_state.last_number == 42
+    after
+      :sys.resume(Output)
+    end
+  end
+
+  test "rebases a reset frame counter without moving PTS backwards" do
+    period = 10
+
+    frame = %Framebuffer{
+      number: 1,
+      width: 1,
+      height: 1,
+      pixels: <<0>>,
+      palette: <<0::size(32 * 8)>>
+    }
+
+    Output.publish(frame)
+    _state = :sys.get_state(Output)
+
+    state = %{
+      owner: nil,
+      output: Output,
+      reader: :nes,
+      width: 256,
+      height: 240,
+      period_ns: period,
+      pts_epoch_ns: 100,
+      last_number: 500,
+      last_pts: 5_100
+    }
+
+    :sys.suspend(Output)
+
+    try do
+      assert {[buffer: {:output, buffer}], next_state} =
+               VideoSource.handle_info({:frame, 1}, nil, state)
+
+      assert buffer.pts == 5_110
+      assert next_state.pts_epoch_ns == 5_100
+      assert next_state.last_number == 1
     after
       :sys.resume(Output)
     end

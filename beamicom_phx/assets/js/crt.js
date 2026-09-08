@@ -16,22 +16,22 @@
 //   License: Public Domain — "Please take and use, change, or whatever."
 //
 // Changes from the original: translated Vulkan-GLSL → GLSL ES 3.00 for WebGL2,
-// unused tunables trimmed, and `res` driven by the emulated NES resolution.
+// unused tunables trimmed, and `res` driven by the active core's resolution.
 
 const VERT = `#version 300 es
 in vec2 a_pos;
 void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`
 
 // Ported from Timothy Lottes' public-domain CRT shader to GLSL ES 3.00.
-// `res` is the *emulated* resolution (NES 256x240) — it drives scanline count,
+// `res` is the emulated resolution — it drives scanline count,
 // deliberately decoupled from the upscaled video texture's real dimensions.
 const FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D tex;
 uniform vec2 resolution;   // output canvas size in device pixels
+uniform vec2 sourceResolution;
 out vec4 fragColor;
 
-const vec2 res = vec2(256.0, 240.0);
 const float hardScan = -8.0;              // scanline hardness: -8 soft, -16 hard
 const float hardPix = -3.0;               // horizontal pixel hardness
 const vec2 warp = vec2(1.0/32.0, 1.0/24.0); // screen curvature
@@ -45,11 +45,11 @@ vec3 ToSrgb(vec3 c){return vec3(ToSrgb1(c.r),ToSrgb1(c.g),ToSrgb1(c.b));}
 
 // Nearest emulated sample. Off-screen positions read black.
 vec3 Fetch(vec2 pos, vec2 off){
-  pos = floor(pos*res + off)/res;
+  pos = floor(pos*sourceResolution + off)/sourceResolution;
   if(max(abs(pos.x-0.5), abs(pos.y-0.5)) > 0.5) return vec3(0.0);
   return ToLinear(texture(tex, pos).rgb);
 }
-vec2 Dist(vec2 pos){ pos = pos*res; return -((pos - floor(pos)) - vec2(0.5)); }
+vec2 Dist(vec2 pos){ pos = pos*sourceResolution; return -((pos - floor(pos)) - vec2(0.5)); }
 float Gaus(float pos, float scale){ return exp2(scale*pos*pos); }
 
 vec3 Horz3(vec2 pos, float off){
@@ -142,6 +142,13 @@ const Crt = {
     }
     gl.useProgram(prog)
     this.resLoc = gl.getUniformLocation(prog, "resolution")
+    this.sourceResLoc = gl.getUniformLocation(prog, "sourceResolution")
+    this.sourceWidth = 0
+    this.sourceHeight = 0
+    this.setSourceGeometry(
+      Number(canvas.dataset.videoWidth || 256),
+      Number(canvas.dataset.videoHeight || 240)
+    )
 
     // Fullscreen quad (two triangles).
     const buf = gl.createBuffer()
@@ -199,9 +206,34 @@ const Crt = {
     }
   },
 
+  // The relay/client page has no local emulator profile. The decoded track's
+  // intrinsic dimensions are therefore authoritative there, and also keep the
+  // shader correct if an upstream server switches console families.
+  setSourceGeometry(width, height) {
+    if (!width || !height || (width === this.sourceWidth && height === this.sourceHeight)) return
+    this.sourceWidth = width
+    this.sourceHeight = height
+    this.el.dataset.videoWidth = String(width)
+    this.el.dataset.videoHeight = String(height)
+    this.gl.uniform2f(this.sourceResLoc, width, height)
+
+    const crt = this.el.closest(".crt")
+    if (crt) crt.dataset.system = width === 256 && height === 240 ? "nes" : "gbc"
+
+    const screen = this.el.closest(".crt__screen")
+    if (screen) {
+      const aspect = width === 256 && height === 240 ? "4 / 3" : `${width} / ${height}`
+      screen.style.aspectRatio = aspect
+      screen.style.width = `min(100cqw, calc(100cqh * ${aspect}))`
+    }
+  },
+
   draw() {
     if (!this.video) this.video = document.getElementById("videoPlayer")
     const {gl, video} = this
+    if (video?.videoWidth && video?.videoHeight) {
+      this.setSourceGeometry(video.videoWidth, video.videoHeight)
+    }
     if (this.enabled && video && video.readyState >= 2) {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
       gl.drawArrays(gl.TRIANGLES, 0, 6)

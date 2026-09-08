@@ -15,6 +15,7 @@ defmodule BeamicomStream.AV.RtpBroadcast do
     output = Keyword.get(opts, :output, Beamicom.NES.Output)
     video = Keyword.get(opts, :video, %{width: 256, height: 240, frame_rate: 60.0988})
     audio = Keyword.get(opts, :audio, %{sample_rate: 44_100, channels: 1, sample_format: :s16le})
+    pts_offset_ns = Keyword.get(opts, :pts_offset_ns, 0)
     period_ns = round(1_000_000_000 / video.frame_rate)
 
     spec = [
@@ -23,7 +24,8 @@ defmodule BeamicomStream.AV.RtpBroadcast do
         output: output,
         width: video.width,
         height: video.height,
-        period_ns: period_ns
+        period_ns: period_ns,
+        pts_offset_ns: pts_offset_ns
       })
       |> child(:scaler, %Membrane.FFmpeg.SWScale.Converter{format: :I420})
       |> child(:av1, %Membrane.AV1.Encoder{
@@ -45,7 +47,8 @@ defmodule BeamicomStream.AV.RtpBroadcast do
         output: output,
         channels: audio.channels,
         sample_rate: audio.sample_rate,
-        sample_format: audio.sample_format
+        sample_format: audio.sample_format,
+        pts_offset_ns: pts_offset_ns
       })
       |> child(:resampler, %Membrane.FFmpeg.SWResample.Converter{
         output_stream_format: %Membrane.RawAudio{

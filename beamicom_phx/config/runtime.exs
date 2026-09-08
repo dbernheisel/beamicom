@@ -63,8 +63,8 @@ config :beamicom_phx,
            "saves"
          ])
 
-# Absolute path to a .nes ROM the server should run. If unset in server mode,
-# the app still boots but the emulator does not start (log a warning).
+# Absolute path to a .nes, .gb, or .gbc ROM the server should run. It is
+# required outside tests when the application runs in server mode.
 if mode == :server and config_env() != :test do
   config :beamicom_phx,
          :rom,
