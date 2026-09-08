@@ -18,4 +18,8 @@ defmodule BeamicomStream.SDPTest do
     on_exit(fn -> File.rm(path) end)
     assert File.read!(path) == SDP.render({127, 0, 0, 1}, 5_100)
   end
+
+  test "describes stereo Opus for the Game Boy Color pipeline" do
+    assert SDP.render({127, 0, 0, 1}, 5_000, 2) =~ "a=rtpmap:111 opus/48000/2"
+  end
 end

@@ -16,7 +16,7 @@ defmodule BeamicomPhx.OutputSync do
       Enum.reduce_while(1..250, :timeout, fn _, _ ->
         state = :sys.get_state(Beamicom.NES.Output)
 
-        if MapSet.size(Map.fetch!(state, kind)) > 0 do
+        if map_size(Map.fetch!(state, kind)) > 0 do
           {:halt, :ok}
         else
           Process.sleep(2)

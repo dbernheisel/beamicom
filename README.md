@@ -2,8 +2,8 @@
 
 Beamicom is a multi-system emulator workspace written in Elixir. It contains
 separate headless NES and Game Boy/Game Boy Color cores, a small system-neutral
-host contract, and several NES clients: Scenic and Linux device front ends, a
-local AV1/Opus stream, and a Phoenix application that streams to a web browser.
+host contract, NES desktop/Linux/browser clients, and a local AV1/Opus stream
+that can run NES, Game Boy, and Game Boy Color ROMs.
 
 ## In action
 
@@ -16,24 +16,33 @@ local AV1/Opus stream, and a Phoenix application that streams to a web browser.
 | Project | Purpose | Start here |
 | --- | --- | --- |
 | [`beamicom_host`](./beamicom_host/) | Shared system, input, video/audio envelope, and coalesced-output contracts | [Host documentation](./beamicom_host/README.md) |
-| [`beamicom`](./beamicom/) | Dependency-free emulator core: CPU, PPU, APU, 16 mapper numbers, input, and audio/video output | [Core documentation](./beamicom/README.md) · [Mapper compatibility](./beamicom/MAPPERS.md) |
-| [`beamicom_gbc`](./beamicom_gbc/) | Dependency-free DMG/CGB core with SM83 CPU, mapped bus, cartridge controllers, and color PPU | [Game Boy core documentation](./beamicom_gbc/README.md) |
-| [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
-| [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client that streams audio/video over WebRTC and accepts browser controls | [Web setup and modes](./beamicom_phx/README.md) |
-| [`beamicom_stream`](./beamicom_stream/) | Headless local AV1/Opus RTP client with terminal controls and ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
-| [`beamicom_v4l2`](./beamicom_v4l2/) | Linux framebuffer/V4L2 client that boots ROMs and maps NES controls | [Build and usage](./beamicom_v4l2/README.md) |
+| [`beamicom`](./beamicom/) | Headless NES core: CPU, PPU, APU, mappers, input, and audio/video output | [Core documentation](./beamicom/README.md) · [Mapper compatibility](./beamicom/MAPPERS.md) |
+| [`beamicom_gbc`](./beamicom_gbc/) | Headless DMG/CGB core with an SM83 CPU, mapped devices, cartridge controllers, video, and audio | [Game Boy core documentation](./beamicom_gbc/README.md) |
+| [`beamicom_scenic`](./beamicom_scenic/) | NES desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
+| [`beamicom_phx`](./beamicom_phx/) | NES-only Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
+| [`beamicom_stream`](./beamicom_stream/) | Local NES/GB/GBC AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
+| [`beamicom_v4l2`](./beamicom_v4l2/) | NES Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
 
-Both cores depend on the sibling host contract. The current graphical and
-streaming clients consume the NES core through local path dependencies, so keep
-these directories together when working with an individual project.
+Both cores depend on the sibling host contract. The stream client directly
+depends on both cores and the host; the remaining clients are still NES-only.
+These are sibling path dependencies, so keep the directories together when
+working with an individual project.
 
 ```text
-beamicom_gbc ──────────────────────────────> beamicom_host
-beamicom_scenic ───────────────> beamicom ─> beamicom_host
-beamicom_v4l2 ─────────────────> beamicom ─> beamicom_host
-beamicom_stream ───────────────> beamicom ─> beamicom_host
-beamicom_phx ──> beamicom_stream ─> beamicom ─> beamicom_host
+beamicom ─────────> beamicom_host
+beamicom_gbc ─────> beamicom_host
+beamicom_stream ──> beamicom
+beamicom_stream ──> beamicom_gbc
+beamicom_stream ──> beamicom_host
+beamicom_scenic ──> beamicom
+beamicom_v4l2 ────> beamicom
+beamicom_phx ─────> beamicom
+beamicom_phx ─────> beamicom_stream
 ```
+
+The Phoenix/browser application remains NES-only. Its dependency on
+`beamicom_stream` shares Membrane A/V components; it does not add GB/GBC ROM
+loading or browser play.
 
 ## Quick start
 
@@ -60,6 +69,20 @@ mix deps.get
 iex -S mix
 ```
 
+Run a NES, Game Boy, or Game Boy Color ROM through the local RTP player:
+
+```sh
+cd beamicom_stream
+mix deps.get
+mix beamicom.stream /path/to/game.nes
+mix beamicom.stream /path/to/game.gb
+mix beamicom.stream /path/to/game.gbc
+```
+
+Use `--no-player` to send the stream without launching ffplay. See the stream
+README for RTP ports, prerequisites, terminal controls, and the programmatic
+Player API.
+
 Set up and launch the web client:
 
 ```sh
@@ -67,6 +90,11 @@ cd beamicom_phx
 mix setup
 BEAMICOM_ROM=/path/to/game.nes mix phx.server
 ```
+
+GB/GBC streaming exposes the current core; it is not a claim of full software
+compatibility. The core currently implements ROM-only cartridges plus MBC1,
+MBC2, MBC3, and MBC5, with known PPU/APU timing limitations documented in its
+README.
 
 See each project's README for prerequisites, usage, and controls. ROMs are not
 required to build the projects; provide your own legally obtained ROM when

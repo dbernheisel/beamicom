@@ -13,7 +13,7 @@ defmodule Mix.Tasks.Beamicom.Stream do
 
   alias Beamicom.TerminalInput
   alias Beamicom.EI.{Client, Server}
-  alias BeamicomStream.{Player, SDP}
+  alias BeamicomStream.{Core, Player, SDP}
 
   @switches [
     host: :string,
@@ -50,19 +50,34 @@ defmodule Mix.Tasks.Beamicom.Stream do
     port = Keyword.get(opts, :port, 5_000)
 
     with {:ok, ip} <- parse_ipv4(host),
-         true <- port in 1..65_533 do
-      {:ok,
-       %{
-         rom: Path.expand(rom),
-         host: ip,
-         port: port,
-         controller: Keyword.get(opts, :controller, 1),
-         player?: not Keyword.get(opts, :no_player, false),
-         ffplay: Keyword.get(opts, :ffplay, "ffplay")
-       }}
+         true <- port in 1..65_533,
+         {:ok, core} <- Core.resolve(rom) do
+      controller = Keyword.get(opts, :controller, 1)
+
+      if Map.has_key?(core.capabilities.input.ports, controller) do
+        {:ok,
+         %{
+           rom: Path.expand(rom),
+           system: core.id,
+           audio_channels: core.capabilities.audio.channels,
+           host: ip,
+           port: port,
+           controller: controller,
+           player?: not Keyword.get(opts, :no_player, false),
+           ffplay: Keyword.get(opts, :ffplay, "ffplay")
+         }}
+      else
+        {:error, "controller #{controller} is not supported for #{core.id}"}
+      end
     else
-      false -> {:error, "--port must be between 1 and 65533"}
-      {:error, _reason} -> {:error, "--host must be an IPv4 address"}
+      false ->
+        {:error, "--port must be between 1 and 65533"}
+
+      {:error, {:unsupported_media_extension, ext}} ->
+        {:error, "unsupported ROM extension: #{if(ext == "", do: "(none)", else: ext)}"}
+
+      {:error, _reason} ->
+        {:error, "--host must be an IPv4 address"}
     end
   end
 
@@ -70,12 +85,20 @@ defmodule Mix.Tasks.Beamicom.Stream do
     Mix.Task.run("app.start")
 
     with :ok <- ensure_rom(opts.rom),
-         {:ok, sdp} <- SDP.write_temp(opts.host, opts.port),
-         {:ok, ffplay} <- start_ffplay(opts, sdp) do
+         {:ok, sdp} <- SDP.write_temp(opts.host, opts.port, opts.audio_channels) do
       try do
-        start_and_wait(opts, ffplay, sdp)
+        case start_ffplay(opts, sdp) do
+          {:ok, ffplay} ->
+            try do
+              start_and_wait(opts, ffplay, sdp)
+            after
+              close_port(ffplay)
+            end
+
+          {:error, reason} ->
+            Mix.raise(format_error(reason))
+        end
       after
-        close_port(ffplay)
         File.rm(sdp)
       end
     else
@@ -240,6 +263,7 @@ defmodule Mix.Tasks.Beamicom.Stream do
 
   defp format_error({:rom_not_found, path}), do: "ROM does not exist: #{path}"
   defp format_error({:missing_executable, name}), do: "executable not found: #{name}"
+  defp format_error({:unsupported_media_extension, ext}), do: "unsupported ROM extension: #{ext}"
   defp format_error(reason), do: inspect(reason)
 
   defp usage do
@@ -248,7 +272,7 @@ defmodule Mix.Tasks.Beamicom.Stream do
 
       --host ADDRESS     local IPv4 destination (default: 127.0.0.1)
       --port PORT        video RTP port; audio uses PORT+2 (default: 5000)
-      --controller 1|2   NES controller port (default: 1)
+      --controller 1|2   controller port; Game Boy supports only 1 (default: 1)
       --no-player        do not launch ffplay
       --ffplay PATH      ffplay executable override
     """

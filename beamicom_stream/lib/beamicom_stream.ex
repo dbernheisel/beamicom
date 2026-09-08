@@ -1,5 +1,5 @@
 defmodule BeamicomStream do
-  @moduledoc "Headless AV1/Opus RTP client for the Beamicom NES emulator."
+  @moduledoc "Headless AV1/Opus RTP client for Beamicom NES and Game Boy cores."
 
   alias BeamicomStream.Player
 

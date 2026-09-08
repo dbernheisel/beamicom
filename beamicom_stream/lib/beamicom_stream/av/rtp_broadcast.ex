@@ -12,15 +12,25 @@ defmodule BeamicomStream.AV.RtpBroadcast do
   def handle_init(_ctx, opts) do
     {ip, port} = Keyword.fetch!(opts, :target)
     owner = Keyword.get(opts, :owner)
+    output = Keyword.get(opts, :output, Beamicom.NES.Output)
+    video = Keyword.get(opts, :video, %{width: 256, height: 240, frame_rate: 60.0988})
+    audio = Keyword.get(opts, :audio, %{sample_rate: 44_100, channels: 1, sample_format: :s16le})
+    period_ns = round(1_000_000_000 / video.frame_rate)
 
     spec = [
-      child(:video_src, %VideoSource{owner: owner})
+      child(:video_src, %VideoSource{
+        owner: owner,
+        output: output,
+        width: video.width,
+        height: video.height,
+        period_ns: period_ns
+      })
       |> child(:scaler, %Membrane.FFmpeg.SWScale.Converter{format: :I420})
       |> child(:av1, %Membrane.AV1.Encoder{
         real_time_coding: true,
         encoder_mode: 8,
         rate_control: {:crf, 20},
-        approx_framerate: {60, 1},
+        approx_framerate: {round(video.frame_rate * 1_000), 1_000},
         config_parameters: %{"scm" => "2"}
       })
       |> child(:av1_pay, Av1Payloader)
@@ -30,10 +40,16 @@ defmodule BeamicomStream.AV.RtpBroadcast do
         clock_rate: 90_000
       })
       |> child(:udp_video, %UDP.Sink{destination_address: ip, destination_port_no: port}),
-      child(:audio_src, %AudioSource{owner: owner})
+      child(:audio_src, %AudioSource{
+        owner: owner,
+        output: output,
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        sample_format: audio.sample_format
+      })
       |> child(:resampler, %Membrane.FFmpeg.SWResample.Converter{
         output_stream_format: %Membrane.RawAudio{
-          channels: 1,
+          channels: audio.channels,
           sample_rate: 48_000,
           sample_format: :s16le
         }

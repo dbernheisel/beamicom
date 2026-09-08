@@ -21,6 +21,8 @@ defmodule BeamicomStream.MixProject do
   defp deps do
     [
       {:beamicom, path: "../beamicom"},
+      {:beamicom_gbc, path: "../beamicom_gbc"},
+      {:beamicom_host, path: "../beamicom_host"},
       {:membrane_core, "~> 1.3"},
       {:membrane_ffmpeg_swscale_plugin, "~> 0.16"},
       {:membrane_ffmpeg_swresample_plugin, "~> 0.20"},

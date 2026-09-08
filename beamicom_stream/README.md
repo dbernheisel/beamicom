@@ -1,9 +1,9 @@
 # Beamicom Stream
 
-`beamicom_stream` is Beamicom's headless local client. It starts a ROM, encodes
-the emulator's RGB video as AV1 and PCM audio as Opus, and sends both tracks over
-RTP to a local player. It does not require Phoenix, a browser, a framebuffer, or
-V4L2.
+`beamicom_stream` is Beamicom's headless local client for NES, Game Boy, and
+Game Boy Color. It starts a ROM, converts the core's native frame format to RGB,
+encodes video as AV1 and PCM audio as Opus, and sends both tracks over RTP to a
+local player. It does not require Phoenix, a browser, a framebuffer, or V4L2.
 
 ## Setup
 
@@ -17,13 +17,14 @@ mise exec -- mix deps.get
 
 The Membrane AV1 and Opus plugins use precompiled native codec libraries on
 supported systems. `ffplay` is required for the default player. No ROM is
-included; supply a legally obtained `.nes` file.
+included; supply a legally obtained `.nes`, `.gb`, or `.gbc` file.
 
 ## Play a ROM
 
 ```sh
 cd beamicom_stream
 mise exec -- mix beamicom.stream /absolute/path/to/game.nes
+mise exec -- mix beamicom.stream /absolute/path/to/game.gbc
 ```
 
 The command creates a temporary SDP file, starts ffplay as the receiver, then
@@ -31,13 +32,14 @@ starts the Membrane pipeline and emulator. The SDP makes the two RTP tracks one
 logical playback session:
 
 - AV1 video uses UDP port 5000 and RTP payload type 96.
-- Opus mono audio uses UDP port 5002 and RTP payload type 111.
+- Opus audio uses UDP port 5002 and RTP payload type 111. NES is mono; Game Boy
+  and Game Boy Color preserve the core's stereo output.
 
 The temporary SDP and child processes are cleaned up when play ends.
 
 ### Controls
 
-| Key | NES control |
+| Key | NES / Game Boy control |
 | --- | --- |
 | Arrow keys | D-pad |
 | X | A |
@@ -51,6 +53,9 @@ The input reader therefore releases each button 120 ms after its last key press;
 normal keyboard repeat keeps a held direction active. Space represents Select.
 For exact press/release semantics, call the Player API or add an evdev adapter.
 The terminal is restored from raw/no-echo mode on normal task cleanup.
+
+`--controller 2` is available for NES. Game Boy and Game Boy Color expose the
+single built-in controller on port 1.
 
 ## Options
 
