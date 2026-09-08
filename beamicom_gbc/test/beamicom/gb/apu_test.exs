@@ -104,6 +104,60 @@ defmodule Beamicom.GB.APUTest do
     refute overflowed.ch1.enabled
   end
 
+  test "expired zero-period sweep reloads eight without changing frequency registers" do
+    apu = sweep_ready(0, 1, 0x200)
+    registers = sweep_registers(apu)
+
+    swept = APU.clock_frame_sequencer(apu)
+
+    assert swept.ch1.sweep_timer == 8
+    assert {swept.ch1.frequency, swept.ch1.sweep_shadow} == {0x200, 0x200}
+    assert sweep_registers(swept) == registers
+  end
+
+  test "expired zero-shift sweep leaves frequency registers unchanged" do
+    apu = sweep_ready(1, 0, 0x200)
+    registers = sweep_registers(apu)
+
+    swept = APU.clock_frame_sequencer(apu)
+
+    assert swept.ch1.enabled
+    assert {swept.ch1.frequency, swept.ch1.sweep_shadow} == {0x200, 0x200}
+    assert sweep_registers(swept) == registers
+  end
+
+  test "first sweep calculation overflow disables without committing frequency" do
+    apu = sweep_ready(1, 1, 0x600)
+    registers = sweep_registers(apu)
+
+    swept = APU.clock_frame_sequencer(apu)
+
+    refute swept.ch1.enabled
+    assert {swept.ch1.frequency, swept.ch1.sweep_shadow} == {0x600, 0x600}
+    assert sweep_registers(swept) == registers
+  end
+
+  test "second sweep calculation overflow commits once and then disables" do
+    apu = sweep_ready(1, 1, 0x400)
+
+    swept = APU.clock_frame_sequencer(apu)
+
+    refute swept.ch1.enabled
+    assert {swept.ch1.frequency, swept.ch1.sweep_shadow} == {0x600, 0x600}
+    assert sweep_registers(swept) == {0x00, 0x06}
+  end
+
+  test "successful sweep writeback preserves the NR14 length-enable bit" do
+    apu = sweep_ready(1, 1, 0x200)
+    apu = %{apu | registers: put_elem(apu.registers, 4, 0x42)}
+
+    swept = APU.clock_frame_sequencer(apu)
+
+    assert swept.ch1.enabled
+    assert {swept.ch1.frequency, swept.ch1.sweep_shadow} == {0x300, 0x300}
+    assert sweep_registers(swept) == {0x00, 0x43}
+  end
+
   test "length clocks inactive channels and NRx4 applies phase-sensitive extra clocks" do
     inactive =
       powered()
@@ -368,6 +422,29 @@ defmodule Beamicom.GB.APUTest do
 
   defp powered, do: power_on(APU.new())
   defp power_on(apu), do: APU.write(apu, 0xFF26, 0x80)
+
+  defp sweep_ready(period, shift, frequency) do
+    powered()
+    |> APU.write(0xFF10, period <<< 4 ||| shift)
+    |> APU.write(0xFF12, 0xF0)
+    |> APU.write(0xFF13, frequency &&& 0xFF)
+    |> APU.write(0xFF14, 0x80 ||| (frequency >>> 8 &&& 7))
+    |> then(fn apu ->
+      %{
+        apu
+        | sequencer_step: 2,
+          ch1: %{
+            apu.ch1
+            | enabled: true,
+              sweep_timer: 1,
+              sweep_shadow: frequency,
+              frequency: frequency
+          }
+      }
+    end)
+  end
+
+  defp sweep_registers(apu), do: {elem(apu.registers, 3), elem(apu.registers, 4)}
 
   defp step_machine(machine, 0), do: machine
 

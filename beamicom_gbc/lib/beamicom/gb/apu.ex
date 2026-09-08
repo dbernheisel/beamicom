@@ -147,12 +147,11 @@ defmodule Beamicom.GB.APU do
     elem(apu.registers, index) ||| elem(@read_masks, index)
   end
 
-  def read(%__MODULE__{} = apu, 0xFF26) do
-    0x70 ||| if(apu.master, do: 0x80, else: 0) |||
-      if(apu.ch1.enabled, do: 1, else: 0) |||
-      if(apu.ch2.enabled, do: 2, else: 0) |||
-      if(apu.ch3.enabled, do: 4, else: 0) |||
-      if(apu.ch4.enabled, do: 8, else: 0)
+  def read(%__MODULE__{master: false}, 0xFF26), do: 0x70
+
+  def read(%__MODULE__{ch1: ch1, ch2: ch2, ch3: ch3, ch4: ch4}, 0xFF26) do
+    0xF0 ||| channel_status(ch1, 1) ||| channel_status(ch2, 2) |||
+      channel_status(ch3, 4) ||| channel_status(ch4, 8)
   end
 
   def read(%__MODULE__{}, address) when address in 0xFF27..0xFF2F, do: 0xFF
@@ -162,13 +161,15 @@ defmodule Beamicom.GB.APU do
 
   @doc "Writes an audio register and returns the updated pure state."
   @spec write(t(), 0xFF10..0xFF3F, byte()) :: t()
-  def write(%__MODULE__{} = apu, 0xFF26, value) when value in 0..0xFF do
-    cond do
-      (value &&& 0x80) == 0 -> power_off(apu)
-      apu.master -> apu
-      true -> %{apu | master: true}
-    end
-  end
+  def write(%__MODULE__{} = apu, 0xFF26, value)
+      when value in 0..0xFF and (value &&& 0x80) == 0,
+      do: power_off(apu)
+
+  def write(%__MODULE__{master: true} = apu, 0xFF26, value) when value in 0..0xFF,
+    do: apu
+
+  def write(%__MODULE__{} = apu, 0xFF26, value) when value in 0..0xFF,
+    do: %{apu | master: true}
 
   def write(%__MODULE__{wave_ram: wave} = apu, address, value)
       when address in 0xFF30..0xFF3F and value in 0..0xFF,
@@ -464,32 +465,35 @@ defmodule Beamicom.GB.APU do
   defp clock_sweep(%{ch1: %Pulse{sweep_timer: timer} = ch} = apu) when timer > 1,
     do: %{apu | ch1: %{ch | sweep_timer: timer - 1}}
 
+  defp clock_sweep(%{ch1: %Pulse{sweep_period: 0} = ch} = apu),
+    do: %{apu | ch1: %{ch | sweep_timer: 8}}
+
   defp clock_sweep(%{ch1: ch} = apu) do
-    ch = %{ch | sweep_timer: envelope_reload(ch.sweep_period)}
-
-    if ch.sweep_period == 0 do
-      %{apu | ch1: ch}
-    else
-      case sweep_frequency(ch) do
-        frequency when frequency > 0x7FF ->
-          %{apu | ch1: %{ch | enabled: false}}
-
-        frequency when ch.sweep_shift != 0 ->
-          ch = %{ch | frequency: frequency, sweep_shadow: frequency}
-          ch = if sweep_frequency(ch) > 0x7FF, do: %{ch | enabled: false}, else: ch
-
-          high = (elem(apu.registers, 4) &&& 0x40) ||| (frequency >>> 8 &&& 7)
-
-          registers =
-            apu.registers |> put_elem(3, frequency &&& 0xFF) |> put_elem(4, high)
-
-          %{apu | ch1: ch, registers: registers}
-
-        _frequency ->
-          %{apu | ch1: ch}
-      end
-    end
+    ch = %{ch | sweep_timer: ch.sweep_period}
+    apply_sweep(apu, ch, sweep_frequency(ch))
   end
+
+  defp apply_sweep(apu, ch, frequency) when frequency > 0x7FF,
+    do: %{apu | ch1: %{ch | enabled: false}}
+
+  defp apply_sweep(apu, %Pulse{sweep_shift: 0} = ch, _frequency), do: %{apu | ch1: ch}
+
+  defp apply_sweep(apu, ch, frequency) do
+    ch = %{ch | frequency: frequency, sweep_shadow: frequency}
+    ch = disable_on_sweep_overflow(ch, sweep_frequency(ch))
+    high = (elem(apu.registers, 4) &&& 0x40) ||| (frequency >>> 8 &&& 7)
+
+    registers = apu.registers |> put_elem(3, frequency &&& 0xFF) |> put_elem(4, high)
+    %{apu | ch1: ch, registers: registers}
+  end
+
+  defp disable_on_sweep_overflow(ch, frequency) when frequency > 0x7FF,
+    do: %{ch | enabled: false}
+
+  defp disable_on_sweep_overflow(ch, _frequency), do: ch
+
+  defp channel_status(%{enabled: true}, bit), do: bit
+  defp channel_status(_channel, _bit), do: 0
 
   defp mix_sample(apu) do
     outputs =
