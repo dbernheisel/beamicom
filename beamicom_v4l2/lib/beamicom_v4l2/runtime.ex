@@ -6,13 +6,21 @@ defmodule BeamicomV4L2.Runtime do
   alias Beamicom.GB.System, as: GBSystem
   alias Beamicom.Host.{AudioChunk, Input, Output, VideoFrame}
 
+  @heap_words 65_536
+  @spawn_options [
+    spawn_opt: [
+      {:min_heap_size, @heap_words},
+      {:min_bin_vheap_size, @heap_words}
+    ]
+  ]
+
   @enforce_keys [:machine, :output, :period_ns, :epoch, :pace, :speed]
   defstruct @enforce_keys ++ [slice: 0]
 
   def start_link(options) do
     case Keyword.get(options, :name) do
-      nil -> GenServer.start_link(__MODULE__, options)
-      name -> GenServer.start_link(__MODULE__, options, name: name)
+      nil -> GenServer.start_link(__MODULE__, options, @spawn_options)
+      name -> GenServer.start_link(__MODULE__, options, [{:name, name} | @spawn_options])
     end
   end
 

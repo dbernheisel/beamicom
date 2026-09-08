@@ -1,1 +1,1 @@
-ExUnit.start(exclude: [:e2e, :ucity])
+ExUnit.start(exclude: [:e2e, :performance, :ucity])

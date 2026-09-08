@@ -51,6 +51,12 @@ fed directly from the emulator as signed 16-bit, 44.1 kHz PCM: mono for NES and
 stereo for GB/GBC. The video preview command below does not need to play or
 capture audio itself.
 
+CGB software can switch the emulated CPU to double speed. If the host cannot
+sustain that workload and audio underruns, use a lower speed while profiling or
+playing, for example `--speed 0.8` on the command line or `speed: 0.8` with
+`BeamicomV4L2.play/2`. Gameplay slows by the same factor and the audio adapter
+uses `ffplay` tempo correction to keep playback continuous.
+
 The game uses nearest-neighbor 3× scaling. NES output is 768×720; GB/GBC output
 is 480×432. The selected game region is drawn in the top-left of `/dev/fb0` and
 published as `/dev/video-beamicom`. View it from another terminal:
@@ -114,6 +120,16 @@ devices. The external audio-player adapter is covered separately by unit tests:
 ```sh
 BEAMICOM_UCITY_ROM=/tmp/ucity_compat.gbc \
   BEAMICOM_V4L2_BUILD=true mix test --include ucity test/ucity_compat_test.exs
+```
+
+An opt-in paced performance objective can exercise a local CGB ROM after a
+short warmup. It checks that the runtime produces steady-state PCM at real-time
+speed without accumulating process messages:
+
+```sh
+BEAMICOM_GBC_PERF_ROM=/absolute/path/to/game.gbc \
+  BEAMICOM_V4L2_BUILD=true mix test --include performance \
+  test/gbc_performance_test.exs
 ```
 
 `BEAMICOM_V4L2_BUILD=true` tells `rustler_precompiled` to compile the local crate.

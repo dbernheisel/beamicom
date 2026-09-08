@@ -196,7 +196,7 @@ defmodule Beamicom.GB.Bus do
   def read(%__MODULE__{interrupt_flags: flags}, 0xFF0F), do: 0xE0 ||| flags
 
   def read(%__MODULE__{mode: :mapped, apu: apu}, address) when address in 0xFF10..0xFF3F,
-    do: APU.read(apu, address)
+    do: apu |> APU.flush() |> APU.read(address)
 
   def read(%__MODULE__{mode: :mapped, ppu: ppu}, address) when address in 0xFF40..0xFF45,
     do: PPU.read(ppu, address)
@@ -322,7 +322,7 @@ defmodule Beamicom.GB.Bus do
 
   def write(%__MODULE__{mode: :mapped, apu: apu} = bus, address, value)
       when address in 0xFF10..0xFF3F,
-      do: %{bus | apu: APU.write(apu, address, value)}
+      do: %{bus | apu: apu |> APU.flush() |> APU.write(address, value)}
 
   def write(%__MODULE__{mode: :mapped} = bus, address, value) when address in 0xFF40..0xFF45,
     do: write_ppu(bus, address, value)
@@ -425,6 +425,12 @@ defmodule Beamicom.GB.Bus do
 
   @doc false
   @spec read_cycle(t(), 0..0xFFFF) :: {byte(), t()}
+  def read_cycle(%__MODULE__{mode: :mapped, apu: apu} = bus, address)
+      when address in 0xFF10..0xFF3F do
+    apu = APU.flush(apu)
+    {APU.read(apu, address), tick(%{bus | apu: apu}, 4)}
+  end
+
   def read_cycle(%__MODULE__{} = bus, address), do: {read(bus, address), tick(bus, 4)}
 
   @doc false
@@ -571,7 +577,7 @@ defmodule Beamicom.GB.Bus do
 
     hblank_pending = pending_hblanks(bus, ppu, dots)
     bus = tick_timers(bus, clocks)
-    apu = APU.tick(bus.apu, dots)
+    apu = APU.defer_tick(bus.apu, dots)
     {ppu, signals} = PPU.tick(ppu, dots)
 
     apply_ppu_signals(
@@ -774,7 +780,9 @@ defmodule Beamicom.GB.Bus do
   end
 
   defp reset_apu_divider(nil, _falling_edge?), do: nil
-  defp reset_apu_divider(apu, falling_edge?), do: APU.reset_divider(apu, falling_edge?)
+
+  defp reset_apu_divider(apu, falling_edge?),
+    do: apu |> APU.flush() |> APU.reset_divider(falling_edge?)
 
   defp apu_divider_input(divider, control) when (control &&& @double_speed) == 0,
     do: divider >>> 12 &&& 1

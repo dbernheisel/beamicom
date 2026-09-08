@@ -323,6 +323,29 @@ defmodule Beamicom.GB.APUTest do
     assert {44_100, ^pcm, _split} = APU.take_samples(split)
   end
 
+  test "deferred advancement is identical at every observable APU boundary" do
+    base =
+      powered()
+      |> APU.write(0xFF17, 0xF2)
+      |> APU.write(0xFF18, 0xC0)
+      |> APU.write(0xFF19, 0x87)
+      |> APU.write(0xFF24, 0x77)
+      |> APU.write(0xFF25, 0x22)
+
+    eager = APU.tick(base, 20_000)
+
+    deferred =
+      base
+      |> APU.defer_tick(4_001)
+      |> APU.defer_tick(7_999)
+      |> APU.defer_tick(8_000)
+
+    assert APU.flush(deferred) == eager
+    assert APU.read(APU.flush(deferred), 0xFF26) == APU.read(eager, 0xFF26)
+    assert APU.write(APU.flush(deferred), 0xFF17, 0x91) == APU.write(eager, 0xFF17, 0x91)
+    assert APU.take_samples(deferred) == APU.take_samples(eager)
+  end
+
   test "Bus clocks APU in base dots, handles DIV falling edges, and preserves speed duration" do
     assert {:ok, normal} = Machine.load(rom(0x80))
     normal_bus = Bus.idle(normal.bus, 1_000)
@@ -331,9 +354,12 @@ defmodule Beamicom.GB.APUTest do
     {:speed_switch, double_bus} = double.bus |> Bus.write(0xFF4D, 1) |> Bus.stop()
     double_bus = Bus.idle(double_bus, 2_000)
 
-    assert normal_bus.apu.sample_phase == double_bus.apu.sample_phase
-    assert normal_bus.apu.sample_count == double_bus.apu.sample_count
-    assert normal_bus.apu.ch1.duty_pos == double_bus.apu.ch1.duty_pos
+    normal_apu = APU.flush(normal_bus.apu)
+    double_apu = APU.flush(double_bus.apu)
+
+    assert normal_apu.sample_phase == double_apu.sample_phase
+    assert normal_apu.sample_count == double_apu.sample_count
+    assert normal_apu.ch1.duty_pos == double_apu.ch1.duty_pos
 
     edge_apu =
       powered()
@@ -361,11 +387,11 @@ defmodule Beamicom.GB.APUTest do
     assert {:ok, machine} = Machine.load(rom(0))
     halted = %{machine | cpu: %{machine.cpu | run_state: :halted}}
     {halted, 1} = Machine.step(halted)
-    assert halted.bus.apu.sample_phase != machine.bus.apu.sample_phase
+    assert APU.flush(halted.bus.apu).sample_phase != machine.bus.apu.sample_phase
 
     dma_bus = Bus.write(machine.bus, 0xFF46, 0)
     {dma_bus, 160} = Bus.run_dma(dma_bus)
-    assert dma_bus.apu.sample_count > machine.bus.apu.sample_count
+    assert APU.flush(dma_bus.apu).sample_count > machine.bus.apu.sample_count
 
     stopped = %{machine | cpu: %{machine.cpu | run_state: :stopped}}
     {stopped, 1} = Machine.step(stopped)

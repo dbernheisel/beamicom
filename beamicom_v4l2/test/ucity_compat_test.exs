@@ -22,6 +22,16 @@ defmodule BeamicomV4L2.UCityCompatTest do
     assert %VideoFrame{width: 160, height: 144} = frame = Output.latest_video(output)
     assert byte_size(Video.rgb_payload(frame)) == 160 * 144 * 3
 
-    assert_receive {:audio_chunk, %AudioChunk{channels: 2, sample_format: :s16le}}, 5_000
+    assert_receive {:audio_chunk,
+                    %AudioChunk{
+                      channels: 2,
+                      sample_format: :s16le,
+                      frame_count: frame_count,
+                      data: pcm
+                    }},
+                   5_000
+
+    assert frame_count > 0
+    assert byte_size(pcm) == frame_count * 2 * 2
   end
 end

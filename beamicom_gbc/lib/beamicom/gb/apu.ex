@@ -103,6 +103,7 @@ defmodule Beamicom.GB.APU do
             sequencer_phase: 0,
             sequencer_step: 0,
             sample_phase: 0,
+            pending_dots: 0,
             samples: [],
             sample_count: 0
 
@@ -273,11 +274,28 @@ defmodule Beamicom.GB.APU do
   def write(%__MODULE__{} = apu, 0xFF25, value), do: put_register(apu, 21, value)
   def write(%__MODULE__{} = apu, address, _value) when address in 0xFF27..0xFF2F, do: apu
 
-  @doc "Advances base hardware dots and accumulates exact-rate stereo PCM."
-  @spec tick(t(), non_neg_integer()) :: t()
-  def tick(%__MODULE__{} = apu, 0), do: apu
+  @doc false
+  @spec defer_tick(t(), non_neg_integer()) :: t()
+  def defer_tick(%__MODULE__{} = apu, 0), do: apu
 
-  def tick(%__MODULE__{master: false} = apu, dots) when dots > 0 do
+  def defer_tick(%__MODULE__{pending_dots: pending} = apu, dots) when dots > 0,
+    do: %{apu | pending_dots: pending + dots}
+
+  @doc "Applies deferred dots and accumulates exact-rate stereo PCM."
+  @spec flush(t()) :: t()
+  def flush(%__MODULE__{pending_dots: 0} = apu), do: apu
+
+  def flush(%__MODULE__{pending_dots: dots} = apu),
+    do: apu |> Map.put(:pending_dots, 0) |> tick_immediate(dots)
+
+  @doc "Advances base hardware dots immediately and accumulates exact-rate stereo PCM."
+  @spec tick(t(), non_neg_integer()) :: t()
+  def tick(%__MODULE__{} = apu, dots) when dots >= 0,
+    do: apu |> flush() |> tick_immediate(dots)
+
+  defp tick_immediate(%__MODULE__{} = apu, 0), do: apu
+
+  defp tick_immediate(%__MODULE__{master: false} = apu, dots) when dots > 0 do
     total = apu.sample_phase + dots * @sample_rate
     count = div(total, @clock_rate)
     phase = total - count * @clock_rate
@@ -298,7 +316,7 @@ defmodule Beamicom.GB.APU do
     }
   end
 
-  def tick(%__MODULE__{} = apu, dots) when dots > 0, do: advance(apu, dots)
+  defp tick_immediate(%__MODULE__{} = apu, dots) when dots > 0, do: advance(apu, dots)
 
   @doc "Clocks one DIV-APU edge, used for the FF04 reset falling-edge quirk."
   @spec clock_frame_sequencer(t()) :: t()
@@ -319,7 +337,8 @@ defmodule Beamicom.GB.APU do
 
   @doc "Returns and clears accumulated PCM without changing synthesis state."
   @spec take_samples(t()) :: {non_neg_integer(), binary(), t()}
-  def take_samples(%__MODULE__{samples: samples, sample_count: count} = apu) do
+  def take_samples(%__MODULE__{} = apu) do
+    %__MODULE__{samples: samples, sample_count: count} = apu = flush(apu)
     pcm = samples |> :lists.reverse() |> IO.iodata_to_binary()
     {count, pcm, %{apu | samples: [], sample_count: 0}}
   end
