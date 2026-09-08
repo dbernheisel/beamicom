@@ -72,122 +72,120 @@ defmodule BeamicomPhxWeb.WatchLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div
-      id="game"
-      phx-hook="PreventGameKeyScroll"
-      phx-window-keyup="keyup"
-      data-controller-url={@controller_url}
-      class="crt-room"
-    >
+    <Layouts.app flash={@flash}>
       <div
-        id="player-notification-slot"
-        class="player-notification-slot"
-        phx-update={if(@mode == :client, do: "ignore", else: nil)}
+        id="game"
+        phx-hook="PreventGameKeyScroll"
+        phx-window-keyup="keyup"
+        data-controller-url={@controller_url}
+        class="crt-room"
       >
         <div
-          id="player-notification"
-          class={[
-            "player-notification",
-            @mode == :server && @player_notification && "is-visible"
-          ]}
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
+          id="player-notification-slot"
+          class="player-notification-slot"
+          phx-update={if(@mode == :client, do: "ignore", else: nil)}
         >
-          <span class="player-notification__badge" aria-hidden="true">P2</span>
-          <span id="player-status">
-            {if(@mode == :client,
-              do: "Joining the Player 2 queue…",
-              else: @player_notification || ""
-            )}
-          </span>
-        </div>
-      </div>
-      <div class="crt" data-system={@system}>
-        <div class="crt__cabinet">
-          <div class="crt__bezel">
-            <div class="crt__screen">
-              <Player.live_render socket={@socket} player_id="videoPlayer" />
-              <canvas
-                id="crt-canvas"
-                phx-hook="Crt"
-                phx-update="ignore"
-                class="crt__glass"
-                data-video-width={video_dimension(@av_profile, :width)}
-                data-video-height={video_dimension(@av_profile, :height)}
-                aria-hidden="true"
-              ></canvas>
-            </div>
-          </div>
-          <div class="crt__plate">
-            <div class="crt__buttons">
-              <button
-                type="button"
-                id="crt-toggle"
-                class="crt__btn crt__filter-toggle"
-                aria-label="Toggle CRT filter"
-                aria-pressed="true"
-                title="Toggle CRT filter"
-              >
-                <span>CRT filter</span>
-                <span class="crt__filter-led" aria-hidden="true"></span>
-              </button>
-              <button
-                :if={@mode == :server}
-                type="button"
-                class="crt__btn"
-                phx-click="save_state"
-                disabled={@system == :gbc}
-                title={
-                  if @system == :gbc,
-                    do: "Game Boy save states are not supported yet",
-                    else: "Save state"
-                }
-              >
-                Save
-              </button>
-            </div>
-            <div class="crt__badge">
-              <span class="crt__brand">BEAMICOM</span>
-              <span class="crt__led" aria-hidden="true"></span>
-            </div>
+          <div
+            id="player-notification"
+            class={[
+              "player-notification",
+              @mode == :server && @player_notification && "is-visible"
+            ]}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <span class="player-notification__badge" aria-hidden="true">P2</span>
+            <span id="player-status">
+              {if(@mode == :client,
+                do: "Joining the Player 2 queue…",
+                else: @player_notification || ""
+              )}
+            </span>
           </div>
         </div>
-      </div>
-      <p class="crt__controls">
-        Arrows = D-pad &nbsp;·&nbsp; X = A &nbsp;·&nbsp; Z = B &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
-      </p>
-      <div
-        id="gamepad"
-        class="gamepad"
-        phx-hook="Gamepad"
-        data-held={held_names(@held)}
-      >
-        {raw(controller_svg())}
-      </div>
-      <form :if={@mode == :server} id="rom-upload" phx-change="validate">
-        <label class="crt__rom" phx-drop-target={@uploads.rom.ref}>
-          <.live_file_input upload={@uploads.rom} class="crt__rom-input" />
-          {if @rom_name,
-            do: "▸ #{@rom_name} — drop a .nes, .gb, or .gbc to change",
-            else: "Drop a .nes, .gb, or .gbc ROM here to load"}
-        </label>
-      </form>
+        <div class="crt" data-system={@system}>
+          <div class="crt__cabinet">
+            <div class="crt__bezel">
+              <div class="crt__screen">
+                <Player.live_render socket={@socket} player_id="videoPlayer" />
+                <canvas
+                  id="crt-canvas"
+                  phx-hook="Crt"
+                  phx-update="ignore"
+                  class="crt__glass"
+                  data-video-width={video_dimension(@av_profile, :width)}
+                  data-video-height={video_dimension(@av_profile, :height)}
+                  aria-hidden="true"
+                ></canvas>
+              </div>
+            </div>
+            <div class="crt__plate">
+              <div class="crt__buttons">
+                <button
+                  type="button"
+                  id="crt-toggle"
+                  class="crt__btn crt__filter-toggle"
+                  aria-label="Toggle CRT filter"
+                  aria-pressed="true"
+                  title="Toggle CRT filter"
+                >
+                  <span>CRT filter</span>
+                  <span class="crt__filter-led" aria-hidden="true"></span>
+                </button>
+                <button
+                  :if={@mode == :server}
+                  type="button"
+                  id="save-state"
+                  class="crt__btn"
+                  phx-click="save_state"
+                  title="Save state"
+                >
+                  Save
+                </button>
+              </div>
+              <div class="crt__badge">
+                <span class="crt__brand">BEAMICOM</span>
+                <span class="crt__led" aria-hidden="true"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="crt__controls">
+          Arrows = D-pad &nbsp;·&nbsp; X = A &nbsp;·&nbsp; Z = B &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
+        </p>
+        <div
+          id="gamepad"
+          class="gamepad"
+          phx-hook="Gamepad"
+          data-held={held_names(@held)}
+        >
+          {raw(controller_svg())}
+        </div>
+        <form :if={@mode == :server} id="rom-upload" phx-change="validate">
+          <label id="rom-drop-label" class="crt__rom" phx-drop-target={@uploads.rom.ref}>
+            <.live_file_input upload={@uploads.rom} class="crt__rom-input" />
+            {if @rom_name,
+              do: "▸ #{@rom_name} — drop a .nes, .gb, or .gbc to change",
+              else: "Drop a .nes, .gb, or .gbc ROM here to load"}
+          </label>
+        </form>
 
-      <div :if={@saves != []} class="save-gallery">
-        <button
-          :for={url <- @saves}
-          type="button"
-          class={["save-thumb", @mode != :server && "save-thumb--readonly"]}
-          phx-click={@mode == :server && "load_save"}
-          phx-value-url={url}
-          disabled={@system == :gbc}
-          title={save_title(@mode, @system)}
-        >
-          <img src={url} alt="save state" />
-        </button>
+        <div :if={@saves != []} class="save-gallery">
+          <button
+            :for={url <- @saves}
+            type="button"
+            id={"load-" <> Path.basename(url, ".png")}
+            class={["save-thumb", @mode != :server && "save-thumb--readonly"]}
+            phx-click={@mode == :server && "load_save"}
+            phx-value-url={url}
+            title={save_title(@mode)}
+          >
+            <img src={url} alt="save state" />
+          </button>
+        </div>
       </div>
-    </div>
+    </Layouts.app>
     """
   end
 
@@ -219,9 +217,6 @@ defmodule BeamicomPhxWeb.WatchLive do
       {:ok, _url} ->
         {:noreply, socket}
 
-      {:error, :unsupported_system} ->
-        {:noreply, put_flash(socket, :error, "Game Boy save states are not supported yet")}
-
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Nothing to save yet")}
     end
@@ -231,9 +226,6 @@ defmodule BeamicomPhxWeb.WatchLive do
     case Saves.load(url) do
       :ok ->
         {:noreply, socket}
-
-      {:error, :unsupported_system} ->
-        {:noreply, put_flash(socket, :error, "Game Boy save states are not supported yet")}
 
       _ ->
         {:noreply, put_flash(socket, :error, "Couldn't load that save")}
@@ -439,9 +431,8 @@ defmodule BeamicomPhxWeb.WatchLive do
   defp video_dimension(nil, :height), do: 240
   defp video_dimension(profile, dimension), do: Map.fetch!(profile.video, dimension)
 
-  defp save_title(:server, :gbc), do: "NES saves cannot be loaded while Game Boy is active"
-  defp save_title(:server, _system), do: "Load this save"
-  defp save_title(_mode, _system), do: "Saves (view only)"
+  defp save_title(:server), do: "Load this save"
+  defp save_title(_mode), do: "Saves (view only)"
 
   defp load_uploaded_rom(socket, entry, name) do
     live_view = socket.root_pid

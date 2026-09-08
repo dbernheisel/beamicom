@@ -26,9 +26,31 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
 
   @tag :integration
   test "uploads CGB and NES ROMs and rebuilds the browser pipeline", %{conn: conn} do
+    previous_saves_dir = Application.fetch_env!(:beamicom_phx, :saves_dir)
+
+    saves_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "beamicom-live-saves-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(saves_dir)
+    File.write!(Path.join(saves_dir, "broken.png"), "not a PNG")
+    Application.put_env(:beamicom_phx, :saves_dir, saves_dir)
+
+    on_exit(fn ->
+      Application.put_env(:beamicom_phx, :saves_dir, previous_saves_dir)
+      File.rm_rf!(saves_dir)
+    end)
+
     assert :ok = BeamicomPhx.Emulator.stop()
     on_exit(&BeamicomPhx.Emulator.stop/0)
     {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(view, "#load-broken")
+    element(view, "#load-broken") |> render_click()
+    assert has_element?(view, "#flash-error", "Couldn't load that save")
+    assert has_element?(view, "#rom-upload")
 
     cgb =
       file_input(view, "#rom-upload", :rom, [
@@ -48,8 +70,11 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
     assert html =~ ~s(data-video-width="160")
     assert html =~ ~s(data-video-height="144")
 
-    assert render_click(view, "save_state", %{}) =~
-             "Game Boy save states are not supported yet"
+    assert has_element?(view, "#save-state:not([disabled])")
+    element(view, "#save-state") |> render_click()
+    save_url = Enum.find(BeamicomPhx.Saves.list(), &(&1 != "/saves/broken.png"))
+    assert is_binary(save_url)
+    assert has_element?(view, "#load-" <> Path.basename(save_url, ".png"))
 
     dmg =
       file_input(view, "#rom-upload", :rom, [
@@ -62,8 +87,12 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
 
     render_upload(dmg, "diagnostic.gb")
     assert BeamicomPhx.Emulator.system() == :gbc
-    assert Process.alive?(view.pid)
-    assert render(view) =~ "diagnostic.gb"
+
+    assert has_element?(
+             view,
+             "#rom-drop-label",
+             "▸ diagnostic.gb — drop a .nes, .gb, or .gbc to change"
+           )
 
     profile_before_bad_upload = BeamicomPhx.Emulator.profile()
     children_before_bad_upload = DynamicSupervisor.which_children(BeamicomPhx.RuntimeSupervisor)
@@ -78,8 +107,14 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
       ])
 
     render_upload(malformed, "broken.gbc")
-    assert Process.alive?(view.pid)
-    refute render(view) =~ "broken.gbc"
+    assert has_element?(view, "#flash-error", "Couldn't load broken.gbc")
+
+    assert has_element?(
+             view,
+             "#rom-drop-label",
+             "▸ diagnostic.gb — drop a .nes, .gb, or .gbc to change"
+           )
+
     assert BeamicomPhx.Emulator.profile() == profile_before_bad_upload
 
     assert DynamicSupervisor.which_children(BeamicomPhx.RuntimeSupervisor) ==

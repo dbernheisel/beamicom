@@ -23,6 +23,8 @@ The first milestone provides:
 - Four-channel DMG/CGB audio with sweep, length/envelope sequencing, stereo
   routing, and deterministic 44.1 kHz signed-16 PCM
 - Dependency-free PNG screenshots for CGB RGB24 and DMG palette output
+- Versioned, self-contained save-state PNGs with a visible data border and
+  SHA-256 cartridge identity validation
 
 ROM-only cartridges and MBC1, MBC2, MBC3, and MBC5 are implemented. This
 includes banked/paged save RAM, MBC2 nibble RAM, deterministic MBC3 RTC
@@ -79,6 +81,23 @@ Both are real ROM programs. Their SM83 code disables the LCD and configures
 video through the mapped bus before turning it back on. The CGB diagnostic also
 writes both VRAM banks, attribute maps and color palettes, and transfers sprites
 with OAM DMA. They are used by the end-to-end screenshot tests.
+
+To create and restore a shareable save image from a frame boundary:
+
+```elixir
+alias Beamicom.GB.{ShareImage, System}
+
+{machine, [video, _audio]} = System.run_slice(machine)
+png = ShareImage.to_png(machine, video.data)
+{:ok, restored_machine} = ShareImage.load_image(png)
+```
+
+The screenshot is nearest-neighbor enlarged to 640×576 and centered inside a
+visible, CRC-protected dot-code border. The border holds the compressed,
+ROM-stripped machine state. The immutable ROM is stored after PNG IEND for
+exact file transfer and is verified against the state's byte length and SHA-256
+digest before restoration. `load_image/2` can recover a stripped trailer from
+matching `.gb` or `.gbc` files in explicitly supplied search directories.
 
 ## Known timing limitations
 

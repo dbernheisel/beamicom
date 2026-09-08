@@ -8,7 +8,10 @@ defmodule BeamicomPhx.Saves do
   the `"saves"` PubSub topic so every connected `WatchLive` refreshes its grid.
   """
 
-  alias Beamicom.NES.ShareImage
+  alias Beamicom.GB.Machine
+  alias Beamicom.GB.ShareImage, as: GBShareImage
+  alias Beamicom.NES.Console
+  alias Beamicom.NES.ShareImage, as: NESShareImage
 
   @topic "saves"
 
@@ -39,32 +42,62 @@ defmodule BeamicomPhx.Saves do
   def capture do
     case BeamicomPhx.Emulator.snapshot() do
       {:ok, {_console, nil}} -> {:error, :no_frame}
-      {:ok, {console, frame}} -> capture_nes(console, frame)
+      {:ok, {%Console{} = console, frame}} -> capture_nes(console, frame)
+      {:ok, {%Machine{} = machine, frame}} -> capture_gb(machine, frame)
       {:error, _reason} = error -> error
     end
   end
 
   @doc "Load a save (by URL or basename) into the running emulator."
   def load(url) do
-    case BeamicomPhx.Emulator.system() do
-      :gbc ->
-        {:error, :unsupported_system}
+    path = Path.join(dir(), Path.basename(url))
 
-      _nes_or_empty ->
-        path = Path.join(dir(), Path.basename(url))
+    with {:ok, png} <- File.read(path),
+         {:ok, saved} <- decode(png) do
+      case saved do
+        %Console{} = console -> BeamicomPhx.Emulator.load_console(console)
+        %Machine{} = machine -> BeamicomPhx.Emulator.load_machine(machine)
+      end
+    end
+  end
 
-        with {:ok, png} <- File.read(path),
-             {:ok, console} <- ShareImage.load_image(png, []) do
-          BeamicomPhx.Emulator.load_console(console)
-        end
+  defp decode(png) do
+    case GBShareImage.classify(png) do
+      :gb -> GBShareImage.load_image(png, [])
+      :not_gb -> safe_load_nes(png)
+      {:error, _reason} -> {:error, :invalid_save_image}
+    end
+  end
+
+  defp safe_load_nes(png) do
+    try do
+      NESShareImage.load_image(png, [])
+    rescue
+      _error -> {:error, :invalid_save_image}
+    catch
+      _kind, _reason -> {:error, :invalid_save_image}
     end
   end
 
   defp capture_nes(console, frame) do
     File.mkdir_p!(dir())
-    name = "save-#{System.system_time(:millisecond)}.png"
-    File.write!(Path.join(dir(), name), ShareImage.to_png(console, frame))
+    name = save_name()
+    File.write!(Path.join(dir(), name), NESShareImage.to_png(console, frame))
     Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
     {:ok, "/saves/" <> name}
+  end
+
+  defp capture_gb(machine, frame) do
+    File.mkdir_p!(dir())
+    name = save_name()
+    File.write!(Path.join(dir(), name), GBShareImage.to_png(machine, frame))
+    Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
+    {:ok, "/saves/" <> name}
+  end
+
+  defp save_name do
+    timestamp = System.system_time(:millisecond)
+    unique = System.unique_integer([:positive, :monotonic])
+    "save-#{timestamp}-#{unique}.png"
   end
 end

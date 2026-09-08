@@ -13,8 +13,13 @@ defmodule BeamicomPhx.EmulatorTest do
   alias BeamicomStream.Runtime, as: GBRuntime
 
   setup do
+    previous_saves_dir = Application.fetch_env!(:beamicom_phx, :saves_dir)
+    saves_dir = temporary_directory("saves")
+    Application.put_env(:beamicom_phx, :saves_dir, saves_dir)
+
+    on_exit(fn -> Application.put_env(:beamicom_phx, :saves_dir, previous_saves_dir) end)
     on_exit(&Emulator.stop/0)
-    :ok
+    {:ok, saves_dir: saves_dir}
   end
 
   test "load/1 starts a Runtime that produces frames; stop/0 tears it down" do
@@ -32,7 +37,9 @@ defmodule BeamicomPhx.EmulatorTest do
     refute Emulator.loaded?()
   end
 
-  test "loads CGB video/stereo, accepts only port one, and rejects saves" do
+  test "loads CGB video/stereo, accepts only port one, and round-trips a save", %{
+    saves_dir: saves_dir
+  } do
     rom = temporary_rom("gbc", DiagnosticROM.build_cgb())
     assert :ok = Emulator.subscribe()
     assert :ok = Emulator.load(rom)
@@ -55,8 +62,18 @@ defmodule BeamicomPhx.EmulatorTest do
     assert :ok = Emulator.press(1, [:right, :a])
     assert GBRuntime.snapshot(runtime).bus.buttons == 0x11
 
-    assert Saves.capture() == {:error, :unsupported_system}
-    assert Saves.load("/saves/nes.png") == {:error, :unsupported_system}
+    assert {:ok, save_url} = Saves.capture()
+    assert [^save_url] = Saves.list()
+    save_path = Path.join(saves_dir, Path.basename(save_url))
+    assert {:ok, saved_machine} = Beamicom.GB.ShareImage.load_image(File.read!(save_path))
+    assert saved_machine.model == :cgb
+    assert :ok = Saves.load(save_url)
+    assert Emulator.system() == :gbc
+
+    assert {:ok, second_url} = Saves.capture()
+    refute second_url == save_url
+    assert Enum.sort(Saves.list()) == Enum.sort([save_url, second_url])
+    assert File.exists?(Path.join(saves_dir, Path.basename(second_url)))
 
     output_ref = Process.monitor(profile.output)
     assert :ok = Emulator.stop()
@@ -74,6 +91,40 @@ defmodule BeamicomPhx.EmulatorTest do
     assert {:error, {:rom_too_small, 0x150, 3}} = Emulator.load(bad)
     assert Emulator.profile() == before
     assert %{session: %{runtime: ^runtime}} = :sys.get_state(Emulator)
+  end
+
+  test "save loading identifies and switches between GBC and legacy NES images", %{
+    saves_dir: saves_dir
+  } do
+    gbc = temporary_rom("gbc", DiagnosticROM.build_cgb())
+    assert :ok = Emulator.load(gbc)
+    gbc_output = Emulator.profile().output
+    assert :ok = Output.subscribe_video(gbc_output)
+    assert_receive {:video_frame, :gbc, _number}, 1_000
+    assert {:ok, gbc_save} = Saves.capture()
+    gbc_png = File.read!(Path.join(saves_dir, Path.basename(gbc_save)))
+    {width, height, rgb} = Beamicom.GB.PNG.decode_rgb(gbc_png)
+    offset = (width + 1) * 3
+    <<head::binary-size(^offset), byte, rest::binary>> = rgb
+    damaged_rgb = <<head::binary, 255 - byte, rest::binary>>
+    {:ok, trailer} = Beamicom.GB.ShareImage.get_trailer(gbc_png)
+
+    damaged_gbc =
+      Beamicom.GB.PNG.encode_rgb(width, height, damaged_rgb)
+      |> Beamicom.GB.ShareImage.put_trailer(trailer)
+
+    File.write!(Path.join(saves_dir, "damaged-gbc.png"), damaged_gbc)
+    assert {:error, :undecodable} = Saves.load("/saves/damaged-gbc.png")
+
+    NESOutput.subscribe_video()
+    assert :ok = Emulator.load(@rom)
+    assert_receive {:frame, _number}, 1_000
+    assert {:ok, nes_save} = Saves.capture()
+
+    assert :ok = Saves.load(gbc_save)
+    assert Emulator.system() == :gbc
+    assert :ok = Saves.load(nes_save)
+    assert Emulator.system() == :nes
   end
 
   test "same-family replacement keeps output and encoder epoch" do
@@ -179,6 +230,18 @@ defmodule BeamicomPhx.EmulatorTest do
 
     File.write!(path, media)
     on_exit(fn -> File.rm(path) end)
+    path
+  end
+
+  defp temporary_directory(label) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "beamicom-phx-#{label}-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
     path
   end
 

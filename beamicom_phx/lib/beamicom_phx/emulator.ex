@@ -11,6 +11,7 @@ defmodule BeamicomPhx.Emulator do
 
   use GenServer
 
+  alias Beamicom.GB.{Machine, PPU}
   alias Beamicom.GB.System, as: GBSystem
   alias Beamicom.Host.{Input, Output}
   alias Beamicom.NES.{Console, Runtime}
@@ -36,8 +37,11 @@ defmodule BeamicomPhx.Emulator do
     )
   end
 
-  @doc "Resume an NES save when NES is active or no core has been loaded."
+  @doc "Resume an NES save, replacing whichever system is active."
   def load_console(%Console{} = console), do: GenServer.call(__MODULE__, {:load_console, console})
+
+  @doc "Resume a Game Boy save, replacing whichever system is active."
+  def load_machine(%Machine{} = machine), do: GenServer.call(__MODULE__, {:load_machine, machine})
 
   @doc "Stop the active runtime and encoder session."
   def stop, do: GenServer.call(__MODULE__, :stop)
@@ -67,7 +71,7 @@ defmodule BeamicomPhx.Emulator do
   def press_remote(buttons) when is_list(buttons),
     do: GenServer.call(__MODULE__, {:press, self(), :remote, buttons})
 
-  @doc "Atomically identify the active core and capture NES state."
+  @doc "Atomically identifies the active core and captures its machine plus visible frame."
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
 
   @impl true
@@ -81,16 +85,16 @@ defmodule BeamicomPhx.Emulator do
     end
   end
 
-  def handle_call(
-        {:load_console, _console},
-        _from,
-        %{session: %{core: %Core{id: :gbc}}} = state
-      ),
-      do: {:reply, {:error, :unsupported_system}, state}
-
   def handle_call({:load_console, console}, _from, state) do
     {:ok, core} = Core.resolve("save.nes")
-    replace(%{core: core, machine: console}, state)
+    replace(%{core: core, machine: console, rom_name: "NES save", notify_from: nil}, state)
+  end
+
+  def handle_call({:load_machine, machine}, _from, state) do
+    {:ok, core} = Core.resolve("save.gbc")
+    title = machine.bus.cartridge.header.title
+    rom_name = if title == <<>>, do: "Game Boy save", else: title
+    replace(%{core: core, machine: machine, rom_name: rom_name, notify_from: nil}, state)
   end
 
   def handle_call(:stop, _from, state) do
@@ -119,8 +123,22 @@ defmodule BeamicomPhx.Emulator do
     {:reply, reply, state}
   end
 
-  def handle_call(:snapshot, _from, %{session: %{core: %Core{id: :gbc}}} = state),
-    do: {:reply, {:error, :unsupported_system}, state}
+  def handle_call(
+        :snapshot,
+        _from,
+        %{session: %{core: %Core{id: :gbc}, runtime: runtime}} = state
+      ) do
+    reply =
+      try do
+        machine = GBRuntime.snapshot(runtime)
+        frame = if machine.bus.ppu.frame_number == 0, do: nil, else: PPU.frame(machine.bus.ppu)
+        {:ok, {machine, frame}}
+      catch
+        :exit, _reason -> {:error, :not_loaded}
+      end
+
+    {:reply, reply, state}
+  end
 
   def handle_call(:snapshot, _from, state), do: {:reply, {:error, :not_loaded}, state}
 

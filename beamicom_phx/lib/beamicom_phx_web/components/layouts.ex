@@ -35,6 +35,8 @@ defmodule BeamicomPhxWeb.Layouts do
 
   def app(assigns) do
     ~H"""
+    <.flash_group flash={@flash} />
+    {render_slot(@inner_block)}
     """
   end
 

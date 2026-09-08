@@ -126,6 +126,10 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
   area at the bottom of the page to (re)load the emulator. All connected
   browsers pick up the new game immediately.
 
-- **Save gallery** — NES share-image capture/load remains supported. Game Boy
-  save states are not implemented yet; those controls are disabled and forged
-  save requests return an explicit unsupported-system result.
+- **Save gallery** *(server mode only)* — NES and Game Boy/Game Boy Color saves
+  are self-contained share PNGs. The gameplay screenshot is framed by a visible,
+  lossless dot-code border containing the versioned emulator state; the immutable
+  ROM is carried in an exact-transfer PNG trailer and verified before restore.
+  Game Boy screenshots are nearest-neighbor enlarged from 160×144 to 640×576
+  before the border is added. A save can switch the active emulator family when
+  loaded. Client mode can view the gallery but cannot capture or restore saves.
