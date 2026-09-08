@@ -3,13 +3,14 @@ defmodule Beamicom.GB.System do
   Game Boy implementation of the coarse host system contract.
 
   DMG video uses one native shade-index byte per pixel. CGB video uses packed
-  RGB24. Audio is not emitted until the APU core exists.
+  RGB24. Each frame boundary also drains deterministic interleaved signed-16
+  little-endian stereo PCM generated at 44.1 kHz.
   """
 
   @behaviour Beamicom.Host.System
 
-  alias Beamicom.GB.Machine
-  alias Beamicom.Host.{Input, InputCapabilities, VideoFrame}
+  alias Beamicom.GB.{Bus, Machine}
+  alias Beamicom.Host.{AudioChunk, Input, InputCapabilities, VideoFrame}
 
   @buttons ~w(up down left right a b start select)a
   @frame_dots 456 * 154
@@ -30,7 +31,7 @@ defmodule Beamicom.GB.System do
         pixel_formats: [{:native, :dmg_shade_index}, :rgb24],
         frame_rate: @dot_rate / @frame_dots
       },
-      audio: nil
+      audio: %{sample_rate: 44_100, channels: 2, sample_format: :s16le}
     }
   end
 
@@ -41,6 +42,9 @@ defmodule Beamicom.GB.System do
   def run_slice(%Machine{} = machine) do
     case Machine.run_until_frame(machine) do
       {:ok, machine, number, frame} ->
+        {sample_count, pcm, bus} = Bus.take_audio_pcm(machine.bus)
+        machine = %{machine | bus: bus}
+
         video = %VideoFrame{
           system: :gbc,
           number: number,
@@ -52,7 +56,16 @@ defmodule Beamicom.GB.System do
           metadata: %{model: machine.model}
         }
 
-        {machine, [video]}
+        audio = %AudioChunk{
+          system: :gbc,
+          sample_rate: 44_100,
+          channels: 2,
+          sample_format: :s16le,
+          frame_count: sample_count,
+          data: pcm
+        }
+
+        {machine, [video, audio]}
 
       {:error, :frame_timeout, _machine} ->
         raise "Game Boy did not produce a frame"

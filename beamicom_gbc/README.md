@@ -20,6 +20,8 @@ The first milestone provides:
 - A mapped hardware bus with an explicitly separate flat CPU-test path
 - Separate DMG and CGB background, window, and sprite rendering at 160×144
 - CGB tile attributes, dual-bank VRAM, RGB555 palettes, and RGB24 frame output
+- Four-channel DMG/CGB audio with sweep, length/envelope sequencing, stereo
+  routing, and deterministic 44.1 kHz signed-16 PCM
 - Dependency-free PNG screenshots for CGB RGB24 and DMG palette output
 
 ROM-only cartridges and MBC1, MBC2, MBC3, and MBC5 are implemented. This
@@ -29,9 +31,10 @@ MMM01, MBC6, MBC7, Pocket Camera, Bandai Tama5, HuC1, and HuC3 are identified
 in header metadata but are not emulated yet.
 
 The CPU and bus remain separate. Every CPU fetch, data read/write, and internal
-idle M-cycle advances timer hardware before the next observable bus access;
-the returned M-cycle count remains available to the future LCD/APU scheduler.
-One instruction can be executed headlessly with:
+idle M-cycle advances timer hardware before the next observable bus access.
+The Bus owns the sole PPU and APU instances and converts those CPU clocks to
+base hardware dots, preserving LCD and audio duration in CGB double speed. One
+instruction can be executed headlessly with:
 
 ```elixir
 alias Beamicom.GB.{Bus, CPU}
@@ -85,6 +88,12 @@ toggles speed immediately at the instruction boundary. Hardware pauses the CPU
 for roughly 2050 M-cycles and freezes parts of the PPU differently by LCD mode;
 that oscillator transition is intentionally deferred until those clock-domain
 effects can be represented together.
+
+The APU models digital register/channel behavior but not the analog high-pass
+filter, capacitor state, DAC pops, envelope zombie behavior, sweep-negate
+clearing, or model-specific wave-RAM access/corruption while channel 3 is
+active. CGB PCM amplitude registers FF76 and FF77 are also deferred until the
+internal mixer levels are exposed.
 
 ## Tests
 

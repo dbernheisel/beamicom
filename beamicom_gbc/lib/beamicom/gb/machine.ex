@@ -1,15 +1,15 @@
 defmodule Beamicom.GB.Machine do
   @moduledoc """
-  Coherent CPU, mapped-bus, and PPU ownership boundary for Game Boy emulation.
+  Coherent CPU and mapped-device ownership boundary for Game Boy emulation.
 
-  The bus contains the sole PPU instance, so VRAM, OAM, LCD registers, timing,
-  and completed video frames have one authoritative copy. CPU memory cycles
-  advance timer T-cycles and LCD dots in their hardware order. Instruction
+  The bus contains the sole PPU and APU instances, so their registers, memory,
+  and timing have one authoritative copy. CPU memory cycles advance timer
+  T-cycles and base hardware dots in their hardware order. Instruction
   boundaries also execute pending OAM/GDMA work and HBlank-qualified HDMA
   blocks, reporting their CPU stall cost to callers.
   """
 
-  alias Beamicom.GB.{Bus, CPU, Cartridge, PPU}
+  alias Beamicom.GB.{APU, Bus, CPU, Cartridge, PPU}
 
   @max_instructions_per_frame 1_000_000
 
@@ -176,6 +176,7 @@ defmodule Beamicom.GB.Machine do
     |> Map.put(:serial_control, 0)
     |> Map.put(:interrupt_flags, 0x01)
     |> Map.put(:ie, 0)
+    |> Map.put(:apu, %{APU.post_boot(model: :dmg) | sequencer_phase: 0x0B00})
     |> Bus.write(0xFF40, 0x91)
   end
 
@@ -189,6 +190,7 @@ defmodule Beamicom.GB.Machine do
     |> Map.put(:ie, 0)
     |> Map.put(:svbk, 0)
     |> Map.put(:hdma, {0xFF, 0xF0, 0x1F, 0xF0, 0xFF})
+    |> Map.put(:apu, APU.post_boot(model: :cgb))
     |> Bus.write(0xFF40, 0x91)
   end
 end

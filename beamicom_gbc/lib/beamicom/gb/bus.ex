@@ -2,15 +2,15 @@ defmodule Beamicom.GB.Bus do
   @moduledoc """
   Concrete CPU bus for Game Boy and Game Boy Color machines.
 
-  Production buses map a `Beamicom.GB.Cartridge` and the sole
-  `Beamicom.GB.PPU` instance together with banked WRAM, HRAM, boot ROM, and
-  implemented I/O registers. VRAM, OAM, LCD registers, and VBK are routed
-  directly to the PPU instead of mirrored here. `new_flat/2` is a deliberately
-  separate 64 KiB test path used by isolated SM83 tests; `new/2` accepts a
-  binary as a compatibility shorthand for that path.
+  Production buses map a `Beamicom.GB.Cartridge` and the sole PPU and APU
+  instances together with banked WRAM, HRAM, boot ROM, and implemented I/O
+  registers. VRAM, OAM, LCD registers, VBK, and audio registers are routed
+  directly to their devices instead of mirrored here. `new_flat/2` is a
+  deliberately separate 64 KiB test path used by isolated SM83 tests; `new/2`
+  accepts a binary as a compatibility shorthand for that path.
 
-  `tick/2` advances timers in CPU T-cycles and the PPU in base LCD dots (four
-  per normal-speed M-cycle, two in double speed). `read_cycle/2`,
+  `tick/2` advances timers in CPU T-cycles and the PPU/APU in base hardware
+  dots (four per normal-speed M-cycle, two in double speed). `read_cycle/2`,
   `write_cycle/3`, and `idle/2` retain the CPU's ordered M-cycle contract. OAM
   DMA requests are executed in machine-sized batches: OAM DMA copies 160 bytes,
   while CGB general/HBlank DMA copies 16-byte VRAM blocks. `run_dma/2` advances
@@ -22,7 +22,7 @@ defmodule Beamicom.GB.Bus do
   """
 
   import Bitwise
-  alias Beamicom.GB.{Cartridge, PPU}
+  alias Beamicom.GB.{APU, Cartridge, PPU}
 
   @cgb 0x01
   @double_speed 0x02
@@ -49,6 +49,7 @@ defmodule Beamicom.GB.Bus do
             memory: nil,
             cartridge: nil,
             ppu: nil,
+            apu: nil,
             wram: @zero_wram,
             hram: @zero_hram,
             boot_rom: <<>>,
@@ -97,6 +98,7 @@ defmodule Beamicom.GB.Bus do
           memory: :array.array(byte()) | nil,
           cartridge: Cartridge.t() | nil,
           ppu: PPU.t() | nil,
+          apu: APU.t() | nil,
           wram: tuple(),
           hram: binary(),
           boot_rom: binary(),
@@ -137,6 +139,7 @@ defmodule Beamicom.GB.Bus do
     %__MODULE__{
       cartridge: cartridge,
       ppu: PPU.new(model: model, lcdc: 0),
+      apu: APU.new(model: model),
       boot_rom: boot_rom,
       boot_enabled: byte_size(boot_rom) > 0,
       control: if(model == :cgb, do: @cgb, else: 0)
@@ -191,6 +194,9 @@ defmodule Beamicom.GB.Bus do
   def read(%__MODULE__{tma: tma}, 0xFF06), do: tma
   def read(%__MODULE__{tac: tac}, 0xFF07), do: 0xF8 ||| tac
   def read(%__MODULE__{interrupt_flags: flags}, 0xFF0F), do: 0xE0 ||| flags
+
+  def read(%__MODULE__{mode: :mapped, apu: apu}, address) when address in 0xFF10..0xFF3F,
+    do: APU.read(apu, address)
 
   def read(%__MODULE__{mode: :mapped, ppu: ppu}, address) when address in 0xFF40..0xFF45,
     do: PPU.read(ppu, address)
@@ -313,6 +319,10 @@ defmodule Beamicom.GB.Bus do
 
   def write(%__MODULE__{} = bus, 0xFF0F, value),
     do: %{bus | interrupt_flags: value &&& 0x1F}
+
+  def write(%__MODULE__{mode: :mapped, apu: apu} = bus, address, value)
+      when address in 0xFF10..0xFF3F,
+      do: %{bus | apu: APU.write(apu, address, value)}
 
   def write(%__MODULE__{mode: :mapped} = bus, address, value) when address in 0xFF40..0xFF45,
     do: write_ppu(bus, address, value)
@@ -493,6 +503,15 @@ defmodule Beamicom.GB.Bus do
   def take_serial_output(%__MODULE__{serial_output: output} = bus),
     do: {output |> Enum.reverse() |> :erlang.list_to_binary(), %{bus | serial_output: []}}
 
+  @doc "Returns and clears accumulated interleaved 44.1 kHz signed-16 stereo PCM."
+  @spec take_audio_pcm(t()) :: {non_neg_integer(), binary(), t()}
+  def take_audio_pcm(%__MODULE__{apu: nil} = bus), do: {0, <<>>, bus}
+
+  def take_audio_pcm(%__MODULE__{apu: apu} = bus) do
+    {sample_count, pcm, apu} = APU.take_samples(apu)
+    {sample_count, pcm, %{bus | apu: apu}}
+  end
+
   @doc "Returns and clears the pending OAM DMA source-page request."
   @spec take_oam_dma(t()) :: {byte() | nil, t()}
   def take_oam_dma(%__MODULE__{oam_dma: source} = bus), do: {source, %{bus | oam_dma: nil}}
@@ -528,14 +547,15 @@ defmodule Beamicom.GB.Bus do
   def stop(%__MODULE__{control: control} = bus)
       when (control &&& (@cgb ||| @prepare_speed)) == (@cgb ||| @prepare_speed) do
     clear = bxor(0xFF, @prepare_speed ||| @stop_wake)
+    bus = reset_divider(bus)
     control = bxor(control, @double_speed) &&& clear
-    {:speed_switch, reset_divider(%{bus | control: control})}
+    {:speed_switch, %{bus | control: control}}
   end
 
   def stop(%__MODULE__{control: control} = bus),
     do: {:stop, %{bus | control: control &&& bxor(0xFF, @stop_wake)}}
 
-  @doc "Advances timers by CPU T-cycles and the mapped PPU by base LCD dots."
+  @doc "Advances timers by CPU T-cycles and mapped audio/video by base hardware dots."
   @spec tick(t(), non_neg_integer()) :: t()
   def tick(%__MODULE__{} = bus, 0), do: bus
 
@@ -551,10 +571,11 @@ defmodule Beamicom.GB.Bus do
 
     hblank_pending = pending_hblanks(bus, ppu, dots)
     bus = tick_timers(bus, clocks)
+    apu = APU.tick(bus.apu, dots)
     {ppu, signals} = PPU.tick(ppu, dots)
 
     apply_ppu_signals(
-      %{bus | ppu: ppu, lcd_phase: phase, hblank_pending: hblank_pending},
+      %{bus | ppu: ppu, apu: apu, lcd_phase: phase, hblank_pending: hblank_pending},
       signals
     )
   end
@@ -747,9 +768,18 @@ defmodule Beamicom.GB.Bus do
 
   defp reset_divider(bus) do
     old_input = timer_input(bus.divider, bus.tac)
-    bus = %{bus | divider: 0}
+    apu = reset_apu_divider(bus.apu, apu_divider_input(bus.divider, bus.control) == 1)
+    bus = %{bus | divider: 0, apu: apu}
     timer_control_edge(bus, old_input, timer_input(0, bus.tac))
   end
+
+  defp reset_apu_divider(nil, _falling_edge?), do: nil
+  defp reset_apu_divider(apu, falling_edge?), do: APU.reset_divider(apu, falling_edge?)
+
+  defp apu_divider_input(divider, control) when (control &&& @double_speed) == 0,
+    do: divider >>> 12 &&& 1
+
+  defp apu_divider_input(divider, _control), do: divider >>> 13 &&& 1
 
   defp timer_control_edge(bus, 1, 0), do: increment_tima(bus)
   defp timer_control_edge(bus, _old, _new), do: bus

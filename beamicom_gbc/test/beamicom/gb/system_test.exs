@@ -3,7 +3,7 @@ defmodule Beamicom.GB.SystemTest do
 
   import Bitwise
   alias Beamicom.GB.{DiagnosticROM, System}
-  alias Beamicom.Host.{Input, InputCapabilities, VideoFrame}
+  alias Beamicom.Host.{AudioChunk, Input, InputCapabilities, VideoFrame}
 
   test "advertises one handheld input port and native shade-index video" do
     capabilities = System.capabilities()
@@ -17,7 +17,7 @@ defmodule Beamicom.GB.SystemTest do
              :rgb24
            ]
 
-    assert capabilities.audio == nil
+    assert capabilities.audio == %{sample_rate: 44_100, channels: 2, sample_format: :s16le}
     assert InputCapabilities.accepts?(capabilities.input, Input.new(1, [:a, :start]))
     refute InputCapabilities.accepts?(capabilities.input, Input.new(2, [:a]))
   end
@@ -27,7 +27,9 @@ defmodule Beamicom.GB.SystemTest do
     machine = System.set_input(machine, Input.new(1, [:right, :a, :start]))
     assert machine.bus.buttons == 0x91
 
-    assert {machine, [%VideoFrame{} = video]} = System.run_slice(machine)
+    assert {machine, [%VideoFrame{} = video, %AudioChunk{} = audio]} =
+             System.run_slice(machine)
+
     assert video.system == :gbc
     assert video.number == 0
     assert {video.width, video.height} == {160, 144}
@@ -36,6 +38,12 @@ defmodule Beamicom.GB.SystemTest do
     assert video.data == machine.bus.ppu.frame
     assert video.metadata == %{model: :dmg}
     assert video.duration_ns == round(456 * 154 * 1_000_000_000 / 4_194_304)
+    assert audio.system == :gbc
+    assert {audio.sample_rate, audio.channels, audio.sample_format} == {44_100, 2, :s16le}
+    assert byte_size(audio.data) == audio.frame_count * 4
+    assert audio.frame_count == 690
+    assert machine.bus.apu.sample_count == 0
+    assert {0, <<>>, _bus} = Beamicom.GB.Bus.take_audio_pcm(machine.bus)
   end
 
   test "rejects invalid media" do
@@ -44,11 +52,15 @@ defmodule Beamicom.GB.SystemTest do
 
   test "emits CGB frames as native RGB24" do
     assert {:ok, machine} = System.load(DiagnosticROM.build_cgb(), [])
-    assert {machine, [%VideoFrame{} = video]} = System.run_slice(machine)
+
+    assert {machine, [%VideoFrame{} = video, %AudioChunk{} = audio]} =
+             System.run_slice(machine)
+
     assert machine.model == :cgb
     assert video.pixel_format == :rgb24
     assert byte_size(video.data) == 160 * 144 * 3
     assert video.metadata == %{model: :cgb}
+    assert byte_size(audio.data) == audio.frame_count * 4
   end
 
   defp rom do
