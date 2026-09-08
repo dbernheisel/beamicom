@@ -1,91 +1,93 @@
 defmodule Beamicom.NES.Output do
   @moduledoc """
-  Decoupled A/V fan-out (spec §4, §6.1). The core produces one
-  `%Beamicom.NES.Framebuffer{}` per PPU frame and `publish/1`es it here; sinks (Scenic,
-  Phoenix channel, GStreamer feed) `subscribe/0` for `{:frame, number}`
-  notifications and read the latest frame from ETS when ready. APU audio is
-  streamed separately via `publish_audio/2` → `{:audio, sample_count, pcm}` (no
-  coalescing — audio can't drop samples). PCM chunks are binaries so fan-out
-  between BEAM processes is reference-counted instead of copying sample lists.
+  NES compatibility facade over the system-neutral `Beamicom.Host.Output` hub.
 
-  Owns a `:read_concurrency` ETS table so reads bypass the GenServer entirely —
-  the publish cost is one ETS insert plus an async notify, and it never blocks
-  the emulation core. A slow sink simply reads the newest frame and drops the
-  intermediates; no queueing policy (automatic coalescing).
-
-  ## Sources
-    * NESdev / spec §6.1 — ETS latest-frame + notify, no pixel copies on publish.
+  Existing sinks retain the `{:frame, number}` and
+  `{:audio, sample_count, pcm}` protocol. New hosts can subscribe to typed
+  `Beamicom.Host.VideoFrame` and `Beamicom.Host.AudioChunk` envelopes through
+  `subscribe_video_frames/0` and `subscribe_audio_chunks/0`.
   """
-  use GenServer
 
-  @table :nes_frames
+  alias Beamicom.Host.{AudioChunk, VideoFrame}
+  alias Beamicom.Host.Output, as: HostOutput
+  alias Beamicom.NES.Framebuffer
 
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+  @period_ns round(1_000_000_000 / 60.0988)
+  @sample_rate 44_100
 
-  @doc "Publish a video frame (fire-and-forget): ETS insert + async notify."
-  def publish(frame), do: GenServer.cast(__MODULE__, {:publish, frame})
+  def child_spec(_opts) do
+    %{
+      id: __MODULE__,
+      start: {HostOutput, :start_link, [[name: __MODULE__, table: :nes_frames]]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5_000
+    }
+  end
 
-  @doc """
-  Publish a chunk of signed-16-bit little-endian PCM. Unlike video (latest-frame,
-  coalesced), audio is a stream: every chunk is pushed to subscribers as
-  `{:audio, sample_count, pcm}` so a sink can feed a sound device without gaps.
-  """
+  def start_link(_opts \\ []), do: HostOutput.start_link(name: __MODULE__, table: :nes_frames)
+
+  @doc "Publish an NES framebuffer without blocking the emulator loop."
+  def publish(%Framebuffer{} = frame), do: frame |> video_frame() |> publish_video()
+
+  @doc "Publish an already wrapped NES video frame."
+  def publish_video(%VideoFrame{system: :nes} = frame),
+    do: HostOutput.publish_video(__MODULE__, frame)
+
+  @doc "Publish signed-16-bit little-endian mono PCM."
   def publish_audio(0, <<>>), do: :ok
 
-  def publish_audio(sample_count, pcm) when is_integer(sample_count) and is_binary(pcm),
-    do: GenServer.cast(__MODULE__, {:audio, sample_count, pcm})
+  def publish_audio(sample_count, pcm) when is_integer(sample_count) and is_binary(pcm) do
+    publish_audio_chunk(%AudioChunk{
+      system: :nes,
+      sample_rate: @sample_rate,
+      channels: 1,
+      sample_format: :s16le,
+      frame_count: sample_count,
+      data: pcm
+    })
+  end
 
-  @doc """
-  Subscribe the caller to video `{:frame, number}` notifications only. A
-  video-only sink (the Scenic screen) never receives — and never has copied into
-  its mailbox — the audio sample chunks it would just ignore.
-  """
-  def subscribe_video, do: GenServer.call(__MODULE__, {:subscribe, :video})
+  @doc "Publish an already wrapped NES audio chunk."
+  def publish_audio_chunk(%AudioChunk{system: :nes} = chunk),
+    do: HostOutput.publish_audio(__MODULE__, chunk)
 
-  @doc "Subscribe to audio `{:audio, sample_count, pcm}` chunks only."
-  def subscribe_audio, do: GenServer.call(__MODULE__, {:subscribe, :audio})
+  @doc "Subscribe using the original NES video notification protocol."
+  def subscribe_video, do: HostOutput.subscribe_video(__MODULE__, :legacy)
 
-  @doc "Subscribe the caller to both video and audio (e.g. a combined sink or test)."
-  def subscribe, do: GenServer.call(__MODULE__, {:subscribe, :both})
+  @doc "Subscribe using the original NES audio notification protocol."
+  def subscribe_audio, do: HostOutput.subscribe_audio(__MODULE__, :legacy)
 
-  @doc "The latest published frame, read straight from ETS (nil if none yet)."
+  @doc "Subscribe to both original NES notification protocols."
+  def subscribe, do: HostOutput.subscribe(__MODULE__, :legacy)
+
+  @doc "Subscribe to neutral `{:video_frame, :nes, number}` notifications."
+  def subscribe_video_frames, do: HostOutput.subscribe_video(__MODULE__)
+
+  @doc "Subscribe to neutral `{:audio_chunk, chunk}` notifications."
+  def subscribe_audio_chunks, do: HostOutput.subscribe_audio(__MODULE__)
+
+  @doc "The latest NES framebuffer, or nil when no frame has been published."
   def latest do
-    case :ets.lookup(@table, :latest) do
-      [{:latest, frame}] -> frame
-      [] -> nil
+    case latest_video() do
+      %VideoFrame{data: %Framebuffer{} = frame} -> frame
+      nil -> nil
     end
   end
 
-  @impl true
-  def init(:ok) do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    {:ok, %{video: MapSet.new(), audio: MapSet.new()}}
-  end
+  @doc "The latest typed, system-neutral video envelope."
+  def latest_video, do: HostOutput.latest_video_from_table(:nes_frames)
 
-  @impl true
-  def handle_call({:subscribe, kind}, {pid, _}, state) do
-    Process.monitor(pid)
-    video = if kind in [:video, :both], do: MapSet.put(state.video, pid), else: state.video
-    audio = if kind in [:audio, :both], do: MapSet.put(state.audio, pid), else: state.audio
-    {:reply, :ok, %{state | video: video, audio: audio}}
+  @doc "Wrap an internal NES framebuffer for a system-neutral host."
+  def video_frame(%Framebuffer{} = frame) do
+    %VideoFrame{
+      system: :nes,
+      number: frame.number,
+      width: frame.width,
+      height: frame.height,
+      pixel_format: {:native, :nes_framebuffer},
+      data: frame,
+      duration_ns: @period_ns
+    }
   end
-
-  @impl true
-  def handle_cast({:publish, frame}, state) do
-    :ets.insert(@table, {:latest, frame})
-    Enum.each(state.video, &send(&1, {:frame, frame.number}))
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast({:audio, sample_count, pcm}, state) do
-    Enum.each(state.audio, &send(&1, {:audio, sample_count, pcm}))
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state),
-    do:
-      {:noreply,
-       %{state | video: MapSet.delete(state.video, pid), audio: MapSet.delete(state.audio, pid)}}
 end

@@ -20,9 +20,9 @@ defmodule Beamicom.MixProject do
   end
 
   # Run "mix help deps" to learn about dependencies.
-  # The core emulator has no external dependencies. The Scenic local-verification
-  # window lives in the sibling `beamicom_scenic` project, which depends on this.
+  # The core emulator has no third-party dependencies. Its system-neutral host
+  # contract is the sibling `beamicom_host` project.
   defp deps do
-    []
+    [{:beamicom_host, path: "../beamicom_host"}]
   end
 end

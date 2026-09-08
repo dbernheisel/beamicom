@@ -2,6 +2,7 @@ defmodule Beamicom.NES.OutputTest do
   # Shares the application-started Output (global name + ETS table).
   use ExUnit.Case, async: false
 
+  alias Beamicom.Host.{AudioChunk, VideoFrame}
   alias Beamicom.NES.{Framebuffer, Output, Runtime}
 
   test "publish stores the latest frame and notifies subscribers" do
@@ -20,6 +21,44 @@ defmodule Beamicom.NES.OutputTest do
     assert_receive {:audio, 3, ^pcm}
   end
 
+  test "new hosts can consume typed envelopes without changing legacy subscribers" do
+    Output.subscribe_video_frames()
+    Output.subscribe_audio_chunks()
+
+    frame = %Framebuffer{number: 8, pixels: <<>>, palette: <<>>}
+    pcm = <<1::signed-little-16>>
+    Output.publish(frame)
+    Output.publish_audio(1, pcm)
+
+    assert_receive {:video_frame, :nes, 8}
+    assert %VideoFrame{system: :nes, number: 8, data: ^frame} = Output.latest_video()
+
+    assert_receive {:audio_chunk,
+                    %AudioChunk{
+                      system: :nes,
+                      sample_rate: 44_100,
+                      channels: 1,
+                      frame_count: 1,
+                      data: ^pcm
+                    }}
+  end
+
+  test "legacy video notifications coalesce until the latest frame is read" do
+    Output.subscribe_video()
+
+    Enum.each(20..30, fn number ->
+      Output.publish(%Framebuffer{number: number, pixels: <<>>, palette: <<>>})
+    end)
+
+    _state = :sys.get_state(Output)
+    assert_receive {:frame, 20}
+    assert %Framebuffer{number: 30} = Output.latest()
+    refute_receive {:frame, _number}
+
+    Output.publish(%Framebuffer{number: 31, pixels: <<>>, palette: <<>>})
+    assert_receive {:frame, 31}
+  end
+
   @tag :tmp_dir
   test "runtime loads a ROM and publishes frames to the hub", %{tmp_dir: tmp} do
     # Minimal NROM: reset vector -> $8000, where `JMP $8000` spins forever. The
@@ -36,6 +75,7 @@ defmodule Beamicom.NES.OutputTest do
     start_supervised!({Runtime, rom: path, pace: false, name: :test_runtime})
 
     assert_receive {:frame, n} when is_integer(n) and n >= 0, 2000
+    assert %Framebuffer{} = Output.latest()
 
     assert_receive {:audio, sample_count, pcm}
                    when is_integer(sample_count) and sample_count > 0 and is_binary(pcm),

@@ -20,8 +20,11 @@ defmodule Beamicom.NES.Console do
   defstruct [:cpu, :bus]
 
   @doc "Load an iNES ROM and cold-boot the console."
-  def load(path) do
-    {:ok, cart} = Cart.parse(File.read!(path))
+  def load(path), do: path |> File.read!() |> load_binary()
+
+  @doc "Load iNES media already held in memory and cold-boot the console."
+  def load_binary(media) when is_binary(media) do
+    {:ok, cart} = Cart.parse(media)
     bus = Bus.new(cart, PPU.new(cart.chr_rom, cart.mirroring))
     %__MODULE__{cpu: CPU.reset(bus), bus: bus}
   end

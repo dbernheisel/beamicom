@@ -35,10 +35,10 @@ defmodule BeamicomStream.AV.VideoSource do
   end
 
   @impl true
-  def handle_info({:frame, number}, _ctx, state) do
+  def handle_info({:frame, _number}, _ctx, state) do
     case Output.latest() do
       %Framebuffer{} = frame ->
-        buffer = %Membrane.Buffer{payload: Palette.to_rgb(frame), pts: number * @period_ns}
+        buffer = %Membrane.Buffer{payload: Palette.to_rgb(frame), pts: frame.number * @period_ns}
         {[buffer: {:output, buffer}], state}
 
       nil ->

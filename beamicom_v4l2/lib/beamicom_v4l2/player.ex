@@ -160,9 +160,9 @@ defmodule BeamicomV4L2.Player do
     do: {:reply, {:error, :invalid_buttons}, state}
 
   @impl true
-  def handle_info({:frame, number}, state) do
+  def handle_info({:frame, _number}, state) do
     case Output.latest() do
-      %{number: ^number} = framebuffer ->
+      %{number: number} = framebuffer ->
         case Port.command(state.renderer, Palette.to_rgb(framebuffer)) do
           true -> {:noreply, %{state | frame: number}}
           false -> {:stop, :framebuffer_renderer_closed, state}

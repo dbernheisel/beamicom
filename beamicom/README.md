@@ -11,6 +11,7 @@ Beamicom is organized as several projects in one repository:
 
 ```
 beamicom/          # this project — the core emulator (headless)
+beamicom_host/     # shared system, output, and input contracts
 beamicom_scenic/   # desktop client: a Scenic/OpenGL window + ffplay audio
 beamicom_stream/   # headless local AV1/Opus RTP client + terminal controls
 beamicom_phx/      # web client: streams A/V to the browser over Phoenix
@@ -23,7 +24,8 @@ beamicom_v4l2/     # Linux framebuffer and virtual-camera client
 - [Web client](../beamicom_phx/README.md)
 
 The core produces one `%Beamicom.NES.Framebuffer{}` per PPU frame plus a stream
-of APU samples, and fans them out through `Beamicom.NES.Output`:
+of APU samples, and fans them out through `Beamicom.NES.Output`, a compatibility
+facade over the system-neutral `Beamicom.Host.Output`:
 
 - **Video** is coalesced — sinks read the *latest* frame straight from an ETS
   table (`:read_concurrency`) and drop intermediates. A slow renderer never
