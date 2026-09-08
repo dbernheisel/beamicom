@@ -20,6 +20,8 @@ defmodule BeamicomScenic.MixProject do
   defp deps do
     [
       {:beamicom, path: "../beamicom"},
+      {:beamicom_gbc, path: "../beamicom_gbc"},
+      {:beamicom_host, path: "../beamicom_host"},
       {:scenic, "~> 0.11"},
       {:scenic_driver_local, "~> 0.11"}
     ]

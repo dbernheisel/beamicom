@@ -1,70 +1,102 @@
 defmodule Beamicom.NES.AudioSink do
   @moduledoc """
-  Audio sink (spec §4): subscribes to `Beamicom.NES.Output` and pipes the APU's
-  `{:audio, sample_count, pcm}` stream to `ffmpeg`'s CoreAudio (audiotoolbox)
-  output as raw signed-16-bit LE mono PCM over an Erlang Port. The external
-  player owns the CoreAudio stream and buffering, so the BEAM stays off the
-  realtime audio path. audiotoolbox is used over `ffplay` because ffplay's
-  ~46ms SDL audio buffer is fixed and dominates A/V lag; CoreAudio's buffer is
-  much smaller.
+  System-aware audio sink for the Scenic host. It subscribes to either the NES
+  compatibility output or a core-owned `Beamicom.Host.Output`, validates typed
+  PCM chunks, and writes raw signed-16-bit little-endian audio to an external
+  player. This supports NES mono and Game Boy stereo without changing either
+  emulator core.
 
-  Requires `ffmpeg` (`brew install ffmpeg`); if it isn't found the sink quietly
-  declines to start (`:ignore`) so video still works.
+  On macOS the existing low-latency CoreAudio path is retained through ffmpeg;
+  other platforms use ffplay. If the selected executable is unavailable, the
+  sink quietly declines to start (`:ignore`) so video still works.
 
   ## Sources
-    * ffmpeg `-f audiotoolbox` CoreAudio raw-PCM output.
+    * ffmpeg raw PCM input and CoreAudio output; ffplay elsewhere.
   """
   use GenServer
   require Logger
 
-  @rate 44_100
+  alias Beamicom.Host.{AudioChunk, Output}
+  alias Beamicom.NES.Output, as: NESOutput
+
+  @default_audio %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
 
   @impl true
   def init(opts) do
-    [exe | args] = Keyword.get(opts, :command, cmd_for(Keyword.get(opts, :speed, 1.0)))
+    output = Keyword.get(opts, :output, NESOutput)
+    audio = Keyword.get(opts, :audio, @default_audio)
+    command = Keyword.get(opts, :command, default_command(Keyword.get(opts, :speed, 1.0), audio))
 
-    case System.find_executable(exe) do
+    case command do
+      [exe | args] when is_binary(exe) ->
+        start_player(exe, args, output, audio)
+
+      _invalid ->
+        {:stop, {:invalid_audio_command, command}}
+    end
+  end
+
+  defp start_player(executable, args, output, audio) do
+    case System.find_executable(executable) do
       nil ->
-        Logger.warning("Beamicom.NES.AudioSink: #{exe} not found; audio disabled")
+        Logger.warning("Beamicom.NES.AudioSink: #{executable} not found; audio disabled")
         :ignore
 
       path ->
         port = Port.open({:spawn_executable, path}, [:binary, :exit_status, args: args])
-        Beamicom.NES.Output.subscribe_audio()
-        {:ok, %{port: port}}
+        :ok = subscribe(output)
+        {:ok, %{port: port, audio: audio}}
     end
   end
 
-  # Play the full-rate 44.1kHz stream via ffmpeg's CoreAudio (audiotoolbox) output
-  # rather than ffplay: ffplay hardcodes an SDL audio buffer of ~2048 samples
-  # (~46ms) with no flag to shrink it, which dominates A/V lag. audiotoolbox goes
-  # straight to CoreAudio with a much smaller buffer, so audio tracks video closely.
-  # `speed` is applied with the pitch-preserving `atempo` filter (0.5× consumes
-  # 22050 input samples/sec — exactly what the Runtime produces when paced to 0.5×).
-  #
-  # The input flags below keep A/V lag low: ffmpeg otherwise reads seconds of
-  # stdin to probe/analyze before opening CoreAudio, and in a never-ending stream
-  # that startup gulp becomes permanent latency. `nobuffer` + tiny probesize +
-  # zero analyzeduration make it open the device immediately. Safe because the
-  # raw `s16le` format is fully specified, so there is nothing to probe.
-  defp cmd_for(speed) do
-    ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f s16le -ar #{@rate} -ch_layout mono -i -) ++
-      atempo(speed) ++ ~w(-f audiotoolbox -)
+  @doc false
+  def default_command(speed, audio \\ @default_audio, os \\ :os.type()) do
+    layout = if audio.channels == 1, do: "mono", else: "stereo"
+
+    case os do
+      {:unix, :darwin} ->
+        ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
+          atempo(speed) ++ ~w(-f audiotoolbox -)
+
+      _other ->
+        ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
+          atempo(speed)
+    end
   end
 
-  # `atempo` only accepts 0.5..100.0, so factors below 0.5 must be chained
-  # (0.5 * (speed/0.5) = speed). Handles down to 0.25 with two stages.
-  defp atempo(speed) when speed >= 1.0, do: []
-  defp atempo(speed) when speed >= 0.5, do: ["-af", "atempo=#{speed}"]
-  defp atempo(speed), do: ["-af", "atempo=0.5,atempo=#{speed / 0.5}"]
+  defp atempo(speed) when speed == 1 or speed == 1.0, do: []
+
+  # Individual atempo stages accept 0.5..100. Chain them so every positive
+  # emulator speed has a matching, pitch-preserving audio consumption rate.
+  defp atempo(speed) when speed > 0 do
+    filter = speed |> atempo_factors([]) |> Enum.map_join(",", &"atempo=#{&1}")
+    ["-af", filter]
+  end
+
+  defp atempo_factors(speed, factors) when speed < 0.5,
+    do: atempo_factors(speed / 0.5, [0.5 | factors])
+
+  defp atempo_factors(speed, factors) when speed > 100,
+    do: atempo_factors(speed / 100, [100 | factors])
+
+  defp atempo_factors(speed, factors), do: Enum.reverse([speed | factors])
 
   @impl true
+  def handle_info({:audio_chunk, %AudioChunk{} = chunk}, state) do
+    if compatible?(chunk, state.audio) and Port.command(state.port, chunk.data) do
+      {:noreply, state}
+    else
+      {:stop, :invalid_audio_chunk, state}
+    end
+  end
+
   def handle_info({:audio, _sample_count, pcm}, state) do
-    Port.command(state.port, pcm)
-    {:noreply, state}
+    if Port.command(state.port, pcm),
+      do: {:noreply, state},
+      else: {:stop, :audio_player_closed, state}
   end
 
   def handle_info({:frame, _}, state) do
@@ -81,4 +113,15 @@ defmodule Beamicom.NES.AudioSink do
     if Port.info(port), do: Port.close(port)
     :ok
   end
+
+  defp subscribe(NESOutput), do: NESOutput.subscribe_audio_chunks()
+  defp subscribe(output), do: Output.subscribe_audio(output)
+
+  defp compatible?(chunk, audio) do
+    chunk.sample_rate == audio.sample_rate and chunk.channels == audio.channels and
+      chunk.sample_format == audio.sample_format and
+      byte_size(chunk.data) == chunk.frame_count * chunk.channels * 2
+  end
+
+  defp format(:s16le), do: "s16le"
 end

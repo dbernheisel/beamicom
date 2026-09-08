@@ -2,6 +2,7 @@ defmodule Beamicom.NES.AudioSinkTest do
   # Shares the application-started Output.
   use ExUnit.Case, async: false
 
+  alias Beamicom.Host.{AudioChunk, Output}
   alias Beamicom.NES.AudioSink
 
   test "streams pre-encoded PCM chunks to its port without crashing" do
@@ -14,5 +15,70 @@ defmodule Beamicom.NES.AudioSinkTest do
     # Force the mailbox to drain (FIFO), then confirm the sink is still alive.
     :sys.get_state(pid)
     assert Process.alive?(pid)
+  end
+
+  test "accepts typed stereo chunks from the Game Boy host output" do
+    output = start_supervised!({Output, name: nil})
+
+    pid =
+      start_supervised!(
+        {AudioSink,
+         command: ["cat"],
+         name: :test_gbc_audio_sink,
+         output: output,
+         audio: %{sample_rate: 44_100, channels: 2, sample_format: :s16le}}
+      )
+
+    chunk = %AudioChunk{
+      system: :gbc,
+      sample_rate: 44_100,
+      channels: 2,
+      sample_format: :s16le,
+      frame_count: 2,
+      data: <<1::signed-little-16, 2::signed-little-16, 3::signed-little-16, 4::signed-little-16>>
+    }
+
+    Output.publish_audio(output, chunk)
+    :sys.get_state(output)
+    :sys.get_state(pid)
+    assert Process.alive?(pid)
+  end
+
+  test "builds mono and stereo player commands from core capabilities" do
+    assert "mono" in AudioSink.default_command(1.0)
+
+    assert "stereo" in AudioSink.default_command(1.0, %{
+             sample_rate: 44_100,
+             channels: 2,
+             sample_format: :s16le
+           })
+
+    assert ["ffmpeg" | command] =
+             AudioSink.default_command(
+               1.0,
+               %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
+               {:unix, :darwin}
+             )
+
+    assert "audiotoolbox" in command
+
+    assert ["ffplay" | slow_command] =
+             AudioSink.default_command(
+               0.1,
+               %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
+               {:unix, :linux}
+             )
+
+    assert Enum.find(slow_command, &String.starts_with?(&1, "atempo=")) ==
+             "atempo=0.5,atempo=0.5,atempo=0.5,atempo=0.8"
+
+    assert ["ffplay" | fast_command] =
+             AudioSink.default_command(
+               200,
+               %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
+               {:unix, :linux}
+             )
+
+    assert "atempo=100,atempo=2.0" in fast_command
   end
 end

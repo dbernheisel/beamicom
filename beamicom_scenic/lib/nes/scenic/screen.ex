@@ -1,14 +1,11 @@
 defmodule Beamicom.NES.Scenic.Screen do
   @moduledoc """
-  Scenic scene for local verification (spec §7). Draws a single rect filled by a
-  streamed bitmap; on each `Beamicom.NES.Output` `{:frame, _}` notification it reads the
-  latest frame, expands it through `Beamicom.NES.Palette` at integer scale (nearest-
-  neighbor, since the driver samples linearly), and swaps the stream — the scene
-  graph is static, only the buffer changes.
+  Scenic scene for local verification. It consumes the active core's typed
+  video frames, converts its native pixel format to RGB24, scales it with
+  nearest-neighbor sampling, and swaps a streamed bitmap.
 
-  Local keyboard is player 1. Debug keys: space pauses/resumes, `.` steps one
-  frame while paused, `g` toggles the raw palette-address grayscale view. A
-  "Save" button writes a share PNG of the live state (see `Beamicom.NES.ShareImage`).
+  Local keyboard is player 1. Debug keys pause/resume and single-step either
+  core. NES additionally supports raw palette-address grayscale and share PNGs.
 
   ## Sources
     * Scenic `Assets.Stream` (hand-built `{Bitmap, {w,h,:rgb}, bin}` tuple) and
@@ -18,12 +15,15 @@ defmodule Beamicom.NES.Scenic.Screen do
 
   import Scenic.Primitives, only: [rect: 3, text: 2, text: 3]
   import Scenic.Components, only: [button: 3]
-  alias Beamicom.NES.{Output, Palette, Runtime, ShareImage}
+  alias Beamicom.Host.{Output, VideoFrame}
+  alias Beamicom.NES.ShareImage
+  alias Beamicom.NES.Output, as: NESOutput
+  alias Beamicom.Scenic.{Runtime, Video}
   alias Scenic.Assets.Stream
   alias Scenic.Assets.Stream.Bitmap
   alias Scenic.Graph
 
-  @stream "nes_screen"
+  @stream "beamicom_screen"
 
   # Player-1 key → button.
   @buttons %{
@@ -44,37 +44,41 @@ defmodule Beamicom.NES.Scenic.Screen do
 
   @doc "Extra viewport height reserved for the control bar below the screen."
   def controls_height, do: @controls_h
+  def controls_height(:nes), do: @controls_h
+  def controls_height(:gbc), do: 0
 
   @impl true
   def init(scene, params, _opts) do
     scale = Keyword.get(params, :scale, 3)
-    {w, h} = {256 * scale, 240 * scale}
+    system = Keyword.fetch!(params, :system)
+    runtime_kind = Keyword.fetch!(params, :runtime_kind)
+    runtime = Keyword.fetch!(params, :runtime)
+    output = Keyword.fetch!(params, :output)
+    video = capabilities(system).video
+    {w, h} = {video.width * scale, video.height * scale}
 
     Stream.start_link(nil)
     Stream.put(@stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
-    Output.subscribe_video()
+    subscribe_video(runtime_kind, output)
 
     graph =
       Graph.build()
       |> rect({w, h}, fill: {:stream, @stream})
-      |> button("Save",
-        id: :save,
-        theme: :dark,
-        width: 120,
-        height: 28,
-        t: {div(w - 120, 2), h + 10}
-      )
-      |> text("",
-        id: :saved_label,
-        text_align: :center,
-        font_size: 16,
-        fill: :white,
-        t: {div(w, 2), h + 60}
-      )
+      |> add_nes_controls(system, w, h)
 
     scene =
       scene
-      |> assign(scale: scale, pressed: MapSet.new(), gray: false, paused: false, graph: graph)
+      |> assign(
+        scale: scale,
+        system: system,
+        runtime_kind: runtime_kind,
+        runtime: runtime,
+        output: output,
+        pressed: MapSet.new(),
+        gray: false,
+        paused: false,
+        graph: graph
+      )
       |> push_graph(graph)
 
     request_input(scene, [:key])
@@ -82,24 +86,18 @@ defmodule Beamicom.NES.Scenic.Screen do
   end
 
   @impl true
-  def handle_info({:frame, _n}, scene) do
-    a = scene.assigns
+  def handle_info({:frame, _number}, %{assigns: %{runtime_kind: :nes}} = scene),
+    do: render_latest(scene)
 
-    case Output.latest() do
-      nil ->
-        :ok
-
-      fb ->
-        native = if a.gray, do: Palette.to_addr_gray(fb), else: Palette.to_rgb(fb)
-        {w, h} = {fb.width * a.scale, fb.height * a.scale}
-        Stream.put(@stream, {Bitmap, {w, h, :rgb}, upscale(native, fb.width, a.scale)})
-    end
-
-    {:noreply, scene}
-  end
+  def handle_info(
+        {:video_frame, system, _number},
+        %{assigns: %{system: system, runtime_kind: :host}} = scene
+      ),
+      do: render_latest(scene)
 
   # Audio arrives here too (see Output); the Scenic sink is video-only.
   def handle_info({:audio, _sample_count, _pcm}, scene), do: {:noreply, scene}
+  def handle_info({:audio_chunk, _chunk}, scene), do: {:noreply, scene}
 
   # A background save finished: show the file name under the Save button.
   def handle_info({:saved, path}, scene) do
@@ -119,14 +117,14 @@ defmodule Beamicom.NES.Scenic.Screen do
   # The "Save" button snapshots the live console and writes a share PNG.
   @impl true
   def handle_event({:click, :save}, _from, scene) do
-    save_snapshot()
+    if scene.assigns.system == :nes, do: save_snapshot(scene.assigns.runtime)
     {:noreply, scene}
   end
 
   def handle_event(_event, _from, scene), do: {:noreply, scene}
 
-  defp save_snapshot do
-    case Runtime.snapshot() do
+  defp save_snapshot(runtime) do
+    case Beamicom.NES.Runtime.snapshot(runtime) do
       {console, fb} when not is_nil(fb) ->
         stamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S")
         path = "beamicom-save-#{stamp}.png"
@@ -143,17 +141,6 @@ defmodule Beamicom.NES.Scenic.Screen do
     end
   end
 
-  # Integer nearest-neighbor upscale: the local driver samples textures linearly,
-  # so we pre-scale in the bitmap (spec §7) — repeat each pixel's 3 bytes n× per
-  # row, then each row n×. This is a driver concern, so it lives in the sink.
-  defp upscale(rgb, _width, 1), do: rgb
-
-  defp upscale(rgb, width, n) do
-    scaled_row = width * 3 * n
-    rows = for <<px::binary-size(3) <- rgb>>, into: <<>>, do: :binary.copy(px, n)
-    for <<row::binary-size(^scaled_row) <- rows>>, into: <<>>, do: :binary.copy(row, n)
-  end
-
   # Controller keys update the pressed set and push it to player 1.
   defp key(k, down?, scene) when is_map_key(@buttons, k) do
     pressed =
@@ -167,15 +154,68 @@ defmodule Beamicom.NES.Scenic.Screen do
 
   # Debug keys act on key-down only.
   defp key(:key_space, true, scene) do
-    if scene.assigns.paused, do: Runtime.resume(), else: Runtime.pause()
+    runtime_action(scene, if(scene.assigns.paused, do: :resume, else: :pause))
     assign(scene, paused: not scene.assigns.paused)
   end
 
   defp key(:key_period, true, scene) do
-    Runtime.step()
+    runtime_action(scene, :step)
     scene
   end
 
-  defp key(:key_g, true, scene), do: assign(scene, gray: not scene.assigns.gray)
+  defp key(:key_g, true, %{assigns: %{system: :nes}} = scene),
+    do: assign(scene, gray: not scene.assigns.gray)
+
   defp key(_k, _down?, scene), do: scene
+
+  defp render_latest(scene) do
+    assigns = scene.assigns
+
+    case latest_video(assigns.runtime_kind, assigns.output) do
+      %VideoFrame{} = frame ->
+        rgb = Video.rgb_payload(frame, grayscale: assigns.gray)
+        {w, h} = {frame.width * assigns.scale, frame.height * assigns.scale}
+        pixels = Video.upscale(rgb, frame.width, assigns.scale)
+        Stream.put(@stream, {Bitmap, {w, h, :rgb}, pixels})
+        {:noreply, scene}
+
+      nil ->
+        {:noreply, scene}
+    end
+  end
+
+  defp latest_video(:nes, _output), do: NESOutput.latest_video()
+  defp latest_video(:host, output), do: Output.latest_video(output)
+
+  defp subscribe_video(:nes, _output), do: NESOutput.subscribe_video()
+  defp subscribe_video(:host, output), do: Output.subscribe_video(output)
+
+  defp capabilities(:nes), do: Beamicom.NES.System.capabilities()
+  defp capabilities(:gbc), do: Beamicom.GB.System.capabilities()
+
+  defp add_nes_controls(graph, :gbc, _width, _height), do: graph
+
+  defp add_nes_controls(graph, :nes, width, height) do
+    graph
+    |> button("Save",
+      id: :save,
+      theme: :dark,
+      width: 120,
+      height: 28,
+      t: {div(width - 120, 2), height + 10}
+    )
+    |> text("",
+      id: :saved_label,
+      text_align: :center,
+      font_size: 16,
+      fill: :white,
+      t: {div(width, 2), height + 60}
+    )
+  end
+
+  defp runtime_action(%{assigns: %{runtime_kind: :nes, runtime: runtime}}, action),
+    do: apply(Beamicom.NES.Runtime, action, [runtime])
+
+  defp runtime_action(%{assigns: %{runtime_kind: :host, runtime: runtime}}, action),
+    do: apply(Runtime, action, [runtime])
 end

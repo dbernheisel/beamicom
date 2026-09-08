@@ -1,0 +1,49 @@
+defmodule Beamicom.Scenic.Core do
+  @moduledoc false
+
+  alias Beamicom.GB.System, as: GBSystem
+  alias Beamicom.NES.System, as: NESSystem
+
+  @enforce_keys [:id, :system, :runtime, :capabilities]
+  defstruct @enforce_keys
+
+  @type runtime :: :nes | :host
+  @type t :: %__MODULE__{
+          id: :nes | :gbc,
+          system: module(),
+          runtime: runtime(),
+          capabilities: map()
+        }
+
+  @spec resolve(Path.t()) :: {:ok, t()} | {:error, term()}
+  def resolve(path) when is_binary(path) do
+    path
+    |> Path.extname()
+    |> String.downcase()
+    |> resolve_extension()
+  end
+
+  @doc "Resolve NES ROMs and saves by magic bytes, then use the extension for Game Boy media."
+  @spec resolve(Path.t(), binary()) :: {:ok, t()} | {:error, term()}
+  def resolve(_path, <<"NES", 0x1A, _rest::binary>>), do: {:ok, core(:nes, NESSystem, :nes)}
+
+  def resolve(_path, <<137, 80, 78, 71, 13, 10, 26, 10, _rest::binary>>),
+    do: {:ok, core(:nes, NESSystem, :nes)}
+
+  def resolve(path, _media), do: resolve(path)
+
+  @spec load(t(), binary(), keyword()) :: {:ok, term()} | {:error, term()}
+  def load(%__MODULE__{system: system}, media, options), do: system.load(media, options)
+
+  defp resolve_extension(".nes"), do: {:ok, core(:nes, NESSystem, :nes)}
+  defp resolve_extension(".png"), do: {:ok, core(:nes, NESSystem, :nes)}
+
+  defp resolve_extension(extension) when extension in [".gb", ".gbc"],
+    do: {:ok, core(:gbc, GBSystem, :host)}
+
+  defp resolve_extension(extension), do: {:error, {:unsupported_media_extension, extension}}
+
+  defp core(id, system, runtime) do
+    %__MODULE__{id: id, system: system, runtime: runtime, capabilities: system.capabilities()}
+  end
+end

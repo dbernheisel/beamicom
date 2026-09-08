@@ -3,8 +3,8 @@ import Config
 # Static asset library (fonts/images) — needed by Scenic text/button components.
 config :scenic, :assets, module: Beamicom.NES.Scenic.Assets
 
-# Scenic viewport for local verification (spec §7). The size and default scene
-# are filled in by `Beamicom.NES.Scenic.play/2` (scaled to the requested integer factor).
+# Scenic viewport for local verification. The core-specific size and default
+# scene are filled in by `Beamicom.Scenic.play/2`.
 # The local driver needs native GLFW — see the README.
 config :beamicom_scenic, :viewport,
   name: :beamicom_viewport,
