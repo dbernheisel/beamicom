@@ -276,6 +276,13 @@ defmodule Beamicom.GB.BusTest do
       assert {"", _bus} = Bus.take_serial_output(bus)
     end
 
+    test "no pending DMA preserves the exact bus state without advancing devices" do
+      bus = mapped_bus(model: :cgb)
+
+      assert {^bus, 0} = Bus.run_dma(bus, false)
+      assert {^bus, 0} = Bus.run_dma(bus, true)
+    end
+
     test "OAM DMA batches 160 bytes and stalls for 160 CPU M-cycles" do
       bus =
         Enum.reduce(0..0x9F, mapped_bus(), fn offset, bus ->

@@ -533,6 +533,13 @@ defmodule Beamicom.GB.Bus do
 
   def run_dma(%__MODULE__{mode: :flat} = bus, _allow_hblank), do: {bus, 0}
 
+  def run_dma(
+        %__MODULE__{oam_dma: nil, hdma_request: nil, hblank_pending: 0} = bus,
+        allow_hblank
+      )
+      when is_boolean(allow_hblank),
+      do: {bus, 0}
+
   def run_dma(%__MODULE__{} = bus, allow_hblank) when is_boolean(allow_hblank) do
     {bus, oam_cycles} = run_oam_dma(bus)
     {bus, general_cycles} = run_general_dma(bus)

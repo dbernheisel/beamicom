@@ -23,13 +23,6 @@ defmodule Beamicom.GB.CPU do
 
   @interrupt_vectors {0x40, 0x48, 0x50, 0x58, 0x60}
 
-  @decode_table (for opcode <- 0x00..0xFF do
-                   x = opcode >>> 6
-                   y = opcode >>> 3 &&& 0x07
-                   {x, y, opcode &&& 0x07, y >>> 1, y &&& 0x01}
-                 end)
-                |> List.to_tuple()
-
   @compile {:inline,
             flag?: 2,
             get_r: 3,
@@ -128,11 +121,28 @@ defmodule Beamicom.GB.CPU do
   @spec wake(t()) :: t()
   def wake(%__MODULE__{} = cpu), do: %{cpu | run_state: :running}
 
-  # Decode fields are built once by the compiler. The tuple lookup feeds
-  # literal function heads without rebuilding x/y/z/p/q for every instruction.
-  defp execute(cpu, bus, opcode) do
-    {x, y, z, p, q} = elem(@decode_table, opcode)
-    execute(cpu, bus, opcode, x, y, z, p, q)
+  # Build literal opcode heads once at compile time. This leaves the runtime
+  # dispatcher as a direct select instead of decoding fields or indexing a
+  # tuple for every emulated instruction.
+  for opcode <- 0x00..0xFF do
+    x = opcode >>> 6
+    y = opcode >>> 3 &&& 0x07
+    z = opcode &&& 0x07
+    p = y >>> 1
+    q = y &&& 0x01
+
+    defp execute(cpu, bus, unquote(opcode)),
+      do:
+        execute(
+          cpu,
+          bus,
+          unquote(opcode),
+          unquote(x),
+          unquote(y),
+          unquote(z),
+          unquote(p),
+          unquote(q)
+        )
   end
 
   # x = 0

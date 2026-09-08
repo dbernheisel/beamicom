@@ -340,6 +340,30 @@ defmodule Beamicom.GB.PPU do
       when dots > 0 and (lcdc &&& 0x80) == 0,
       do: {ppu, []}
 
+  # CPU memory cycles almost always remain within the current LCD mode. Keep
+  # those tiny advances out of the recursive boundary/event machinery; exact
+  # boundary hits and multi-boundary batches continue through advance/3.
+  def tick(%__MODULE__{clock: clock} = ppu, dots)
+      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) < @oam_dots and
+             rem(clock, @dots_per_line) + dots < @oam_dots,
+      do: {%{ppu | clock: clock + dots}, []}
+
+  def tick(%__MODULE__{clock: clock} = ppu, dots)
+      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @oam_dots and
+             rem(clock, @dots_per_line) < @transfer_end and
+             rem(clock, @dots_per_line) + dots < @transfer_end,
+      do: {%{ppu | clock: clock + dots}, []}
+
+  def tick(%__MODULE__{clock: clock} = ppu, dots)
+      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @transfer_end and
+             rem(clock, @dots_per_line) + dots < @dots_per_line,
+      do: {%{ppu | clock: clock + dots}, []}
+
+  def tick(%__MODULE__{clock: clock} = ppu, dots)
+      when dots > 0 and clock >= @vblank_start and
+             rem(clock, @dots_per_line) + dots < @dots_per_line,
+      do: {%{ppu | clock: clock + dots}, []}
+
   def tick(%__MODULE__{} = ppu, dots) when dots > 0, do: advance(ppu, dots, [])
 
   defp advance(ppu, 0, signals), do: {ppu, :lists.reverse(signals)}
@@ -529,10 +553,15 @@ defmodule Beamicom.GB.PPU do
     colors = combine_planes(elem(@bit_rows, low), elem(@bit_rows, high))
     colors = if (attrs &&& 0x20) == 0, do: colors, else: reverse_row(colors)
     metadata = (attrs &&& 0x07) <<< 2 ||| (attrs &&& 0x80) >>> 2
-    for <<color <- colors>>, into: <<>>, do: <<color ||| metadata>>
+    apply_cgb_metadata(colors, metadata)
   end
 
   defp reverse_row(<<a, b, c, d, e, f, g, h>>), do: <<h, g, f, e, d, c, b, a>>
+
+  defp apply_cgb_metadata(<<a, b, c, d, e, f, g, h>>, metadata),
+    do:
+      <<a ||| metadata, b ||| metadata, c ||| metadata, d ||| metadata, e ||| metadata,
+        f ||| metadata, g ||| metadata, h ||| metadata>>
 
   defp background_line(ppu, _line, lcdc) when (lcdc &&& 0x01) == 0,
     do: {@blank_line, ppu}
@@ -669,7 +698,7 @@ defmodule Beamicom.GB.PPU do
     if line >= y and line < y + height do
       sprite =
         {:binary.at(oam, offset + 1) - 8, y, :binary.at(oam, offset + 2),
-         :binary.at(oam, offset + 3), index}
+         :binary.at(oam, offset + 3)}
 
       select_cgb_sprites(oam, line, height, index + 1, count + 1, [sprite | sprites])
     else
@@ -734,63 +763,83 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp compose_cgb_sprites(colors, sprites, vram, line, height, lcdc, bg, obj) do
-    compose_cgb_pixel(0, colors, sprites, vram, line, height, lcdc, bg, obj, [])
+    objects = cgb_sprite_overlay(sprites, vram, line, height, @blank_line)
+    compose_cgb_pixel(0, colors, objects, lcdc, bg, obj, [])
   end
 
-  defp compose_cgb_pixel(@width, _colors, _sprites, _vram, _line, _height, _lcdc, _bg, _obj, acc),
+  defp compose_cgb_pixel(@width, _colors, _objects, _lcdc, _bg, _obj, acc),
     do: acc |> :lists.reverse() |> IO.iodata_to_binary()
 
-  defp compose_cgb_pixel(x, colors, sprites, vram, line, height, lcdc, bg, obj, acc) do
+  defp compose_cgb_pixel(x, colors, objects, lcdc, bg, obj, acc) do
     metadata = :binary.at(colors, x)
     bg_color = metadata &&& 0x03
     bg_index = (metadata >>> 2 &&& 0x07) * 4 + bg_color
+    object = :binary.at(objects, x)
 
     rgb =
-      case cgb_sprite_pixel(sprites, x, line, height, vram) do
-        :transparent ->
+      case object do
+        0 ->
           elem(bg, bg_index)
 
-        {_color, _attrs}
+        _object
         when bg_color != 0 and (lcdc &&& 0x01) != 0 and (metadata &&& 0x20) != 0 ->
           elem(bg, bg_index)
 
-        {_color, attrs} when bg_color != 0 and (lcdc &&& 0x01) != 0 and (attrs &&& 0x80) != 0 ->
+        _object when bg_color != 0 and (lcdc &&& 0x01) != 0 and (object &&& 0x20) != 0 ->
           elem(bg, bg_index)
 
-        {color, attrs} ->
-          elem(obj, (attrs &&& 0x07) * 4 + color)
+        object ->
+          elem(obj, (object >>> 2 &&& 0x07) * 4 + (object &&& 0x03))
       end
 
-    compose_cgb_pixel(x + 1, colors, sprites, vram, line, height, lcdc, bg, obj, [rgb | acc])
+    compose_cgb_pixel(x + 1, colors, objects, lcdc, bg, obj, [rgb | acc])
   end
 
-  defp cgb_sprite_pixel([], _x, _line, _height, _vram), do: :transparent
+  # Resolve each selected object's eight-pixel row once, in OAM priority order.
+  # One metadata byte records occupancy, palette, priority, and color so the RGB
+  # compositor needs a single lookup instead of scanning up to ten objects for
+  # every screen pixel.
+  defp cgb_sprite_overlay([], _vram, _line, _height, overlay), do: overlay
 
-  defp cgb_sprite_pixel([{left, _top, _tile, _attrs, _index} | sprites], x, line, height, vram)
-       when x < left or x >= left + 8,
-       do: cgb_sprite_pixel(sprites, x, line, height, vram)
+  defp cgb_sprite_overlay([{left, _top, _tile, _attrs} | sprites], vram, line, height, overlay)
+       when left >= @width or left <= -8,
+       do: cgb_sprite_overlay(sprites, vram, line, height, overlay)
 
-  defp cgb_sprite_pixel([{left, top, tile, attrs, _index} | sprites], x, line, height, vram) do
+  defp cgb_sprite_overlay([{left, top, tile, attrs} | sprites], vram, line, height, overlay) do
     source_y = line - top
     source_y = if (attrs &&& 0x40) == 0, do: source_y, else: height - 1 - source_y
     tile = if height == 8, do: tile, else: (tile &&& 0xFE) + (source_y >>> 3)
-    source_x = x - left
-    source_x = if (attrs &&& 0x20) == 0, do: source_x, else: 7 - source_x
     bank_offset = if (attrs &&& 0x08) == 0, do: 0, else: 0x2000
-    color = tile_pixel(vram, tile, source_y &&& 0x07, source_x, bank_offset)
-
-    if color == 0,
-      do: cgb_sprite_pixel(sprites, x, line, height, vram),
-      else: {color, attrs}
+    offset = bank_offset + tile * 16 + (source_y &&& 0x07) * 2
+    low = vram_byte(vram, offset)
+    high = vram_byte(vram, offset + 1)
+    colors = combine_planes(elem(@bit_rows, low), elem(@bit_rows, high))
+    colors = if (attrs &&& 0x20) == 0, do: colors, else: reverse_row(colors)
+    visible_left = max(left, 0)
+    source_x = visible_left - left
+    count = min(8 - source_x, @width - visible_left)
+    colors = binary_part(colors, source_x, count)
+    existing = binary_part(overlay, visible_left, count)
+    metadata = 0x40 ||| (attrs &&& 0x07) <<< 2 ||| (attrs &&& 0x80) >>> 2
+    merged = merge_cgb_sprite_row(existing, colors, metadata, [])
+    overlay = replace_binary(overlay, visible_left, merged)
+    cgb_sprite_overlay(sprites, vram, line, height, overlay)
   end
 
-  defp tile_pixel(vram, tile, row, x, bank_offset) do
-    offset = bank_offset + tile * 16 + row * 2
-    bit = 7 - x
+  defp merge_cgb_sprite_row(<<>>, <<>>, _metadata, acc),
+    do: acc |> :lists.reverse() |> :erlang.list_to_binary()
 
-    (vram_byte(vram, offset) >>> bit &&& 1) |||
-      (vram_byte(vram, offset + 1) >>> bit &&& 1) <<< 1
-  end
+  defp merge_cgb_sprite_row(<<0, existing::binary>>, <<color, colors::binary>>, metadata, acc)
+       when color != 0,
+       do: merge_cgb_sprite_row(existing, colors, metadata, [metadata ||| color | acc])
+
+  defp merge_cgb_sprite_row(
+         <<existing, rest::binary>>,
+         <<_color, colors::binary>>,
+         metadata,
+         acc
+       ),
+       do: merge_cgb_sprite_row(rest, colors, metadata, [existing | acc])
 
   defp refresh_stat(ppu) do
     active = stat_condition?(ppu)

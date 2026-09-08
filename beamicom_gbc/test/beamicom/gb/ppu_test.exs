@@ -53,6 +53,36 @@ defmodule Beamicom.GB.PPUTest do
     assert signals == []
   end
 
+  test "small in-mode tick fast paths match one exact full-frame batch" do
+    ppu =
+      PPU.new(model: :cgb, lcdc: 0xF3, stat: 0x78, lyc: 73, scx: 5, wy: 2, wx: 9)
+      |> PPU.load_vram(
+        0x0000,
+        tile_from_rows(List.duplicate(Enum.to_list(0..3) ++ [0, 1, 2, 3], 8))
+      )
+      |> PPU.load_vram(0x0010, solid_tile(2))
+      |> PPU.load_vram(0x1800, :binary.copy(<<0, 1>>, 0x200))
+      |> PPU.load_vram(0x3800, :binary.copy(<<0x21, 0xC2>>, 0x200))
+      |> PPU.load_oam(0, <<16, 8, 1, 0x00, 16, 12, 0, 0xA1>>)
+      |> put_cgb_color(:bg, 0, 1, 0x001F)
+      |> put_cgb_color(:bg, 0, 2, 0x03E0)
+      |> put_cgb_color(:obj, 0, 2, 0x7C00)
+
+    {batched, batched_signals} = PPU.tick(ppu, @frame_dots)
+
+    {chunked, chunked_signals, 0} =
+      Stream.cycle([1, 2, 3, 4, 5, 6, 7])
+      |> Enum.reduce_while({ppu, [], @frame_dots}, fn chunk, {ppu, signals, remaining} ->
+        count = min(chunk, remaining)
+        {ppu, emitted} = PPU.tick(ppu, count)
+        next = {ppu, signals ++ emitted, remaining - count}
+        if remaining == count, do: {:halt, next}, else: {:cont, next}
+      end)
+
+    assert chunked == batched
+    assert chunked_signals == batched_signals
+  end
+
   test "register writes can expose an immediate combined STAT rising edge" do
     ppu = PPU.new(lcdc: 0x80, stat: 0x40, lyc: 1)
     assert {ppu, [:lcd_stat]} = PPU.write(ppu, 0xFF45, 0)
@@ -235,6 +265,29 @@ defmodule Beamicom.GB.PPUTest do
     # Object 1 has smaller X, but CGB overlap priority is earlier OAM index.
     assert binary_part(frame, 18 * 3, 10 * 3) ==
              :binary.copy(rgb(0x03E0), 2) <> :binary.copy(rgb(0x001F), 8)
+  end
+
+  test "CGB object row composition preserves clipping, transparency, and OAM priority" do
+    patterned = tile_from_rows(List.duplicate([1, 0, 2, 0, 3, 0, 1, 0], 8))
+
+    ppu =
+      PPU.new(model: :cgb, lcdc: 0x93)
+      |> PPU.load_vram(0x0010, patterned)
+      |> PPU.load_vram(0x0020, solid_tile(2))
+      # The first object starts three pixels left of the screen and is X-flipped.
+      # Its transparent pixels reveal the lower-priority solid object.
+      |> PPU.load_oam(0, <<16, 5, 1, 0x20, 16, 8, 2, 0x00>>)
+      |> put_cgb_color(:obj, 0, 1, 0x001F)
+      |> put_cgb_color(:obj, 0, 2, 0x03E0)
+      |> put_cgb_color(:obj, 0, 3, 0x7C00)
+
+    {_ppu, [{:frame, 0, frame}, :vblank]} = PPU.tick(ppu, @frame_dots)
+
+    expected =
+      [0x7C00, 0x03E0, 0x03E0, 0x03E0, 0x001F, 0x03E0, 0x03E0, 0x03E0]
+      |> Enum.map_join(&rgb/1)
+
+    assert binary_part(frame, 0, 8 * 3) == expected
   end
 
   test "CGB BG and object priority flags yield to LCDC master priority" do
