@@ -4,6 +4,7 @@ defmodule Beamicom.GB.CartridgeTest do
   import Bitwise
 
   alias Beamicom.GB.Cartridge
+  alias Beamicom.GB.Cartridge.RAM
 
   test "loads two fixed ROM banks and reads both address windows directly" do
     rom = rom(bank0: 0x21, bank1: 0x84)
@@ -19,7 +20,7 @@ defmodule Beamicom.GB.CartridgeTest do
   test "initializes, reads, and writes external RAM on no-MBC RAM cartridges" do
     rom = rom(type: 0x08, ram_size: 0x02)
     assert {:ok, cartridge} = Cartridge.load(rom)
-    assert byte_size(cartridge.ram) == 8 * 1024
+    assert RAM.size(cartridge.ram) == 8 * 1024
     assert Cartridge.read(cartridge, 0xA123) == 0
 
     cartridge = Cartridge.write(cartridge, 0xA123, 0x5A)
@@ -34,8 +35,25 @@ defmodule Beamicom.GB.CartridgeTest do
     assert Cartridge.read(cartridge, 0xA801) == 0x77
   end
 
+  test "keeps persistence as a flat binary while live RAM is paged" do
+    source = :binary.copy(<<0x3C>>, 8 * 1024)
+    rom = rom(type: 0x09, ram_size: 0x02)
+
+    assert {:ok, cartridge} = Cartridge.load(rom, persistence: %{ram: source})
+    assert %RAM{size: 8_192, pages: pages} = cartridge.ram
+    assert tuple_size(pages) == 32
+    assert Cartridge.persistent_data(cartridge) == %{ram: source}
+
+    changed = Cartridge.write(cartridge, 0xA100, 0xA7)
+    assert Cartridge.persistent_data(changed).ram != source
+
+    assert {:ok, restored} = Cartridge.restore_persistent_data(changed, %{ram: source})
+    assert Cartridge.read(restored, 0xA100) == 0x3C
+    assert Cartridge.persistent_data(restored) == %{ram: source}
+  end
+
   test "rejects mapper hardware that is not implemented yet" do
-    assert {:error, {:unsupported_mapper, :mbc1}} = Cartridge.load(rom(type: 0x01))
+    assert {:error, {:unsupported_mapper, :mmm01}} = Cartridge.load(rom(type: 0x0B))
   end
 
   test "rejects mismatched image length and malformed no-MBC declarations" do

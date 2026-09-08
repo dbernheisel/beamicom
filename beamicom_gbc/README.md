@@ -2,8 +2,8 @@
 
 A dependency-free, headless Game Boy and Game Boy Color emulator core written
 in Elixir. This project is intentionally separate from the NES core: hardware
-timing and machine state remain system-specific, while future host integration
-can share coarse-grained audio, video, input, and lifecycle boundaries.
+timing and machine state remain system-specific, while `beamicom_host` provides
+shared coarse-grained video, input, and lifecycle boundaries.
 
 The first milestone provides:
 
@@ -17,10 +17,16 @@ The first milestone provides:
 - Interrupt priority/service, delayed IME, HALT/HALT-bug, and STOP behavior
 - DIV/TIMA timer edges, delayed overflow reload, and interrupt registers
 - CGB KEY1 normal/double-speed switching
-- A separate mapped hardware bus with a flat-memory bring-up backing store
+- A mapped hardware bus with an explicitly separate flat CPU-test path
+- Separate DMG and CGB background, window, and sprite rendering at 160×144
+- CGB tile attributes, dual-bank VRAM, RGB555 palettes, and RGB24 frame output
+- Dependency-free PNG screenshots for CGB RGB24 and DMG palette output
 
-MBC1, MBC2, MBC3, MBC5, and other cartridge hardware are recognized in header
-metadata but are not loaded yet.
+ROM-only cartridges and MBC1, MBC2, MBC3, and MBC5 are implemented. This
+includes banked/paged save RAM, MBC2 nibble RAM, deterministic MBC3 RTC
+advancement/latching, persistence import/export, and MBC5's nine-bit ROM bank.
+MMM01, MBC6, MBC7, Pocket Camera, Bandai Tama5, HuC1, and HuC3 are identified
+in header metadata but are not emulated yet.
 
 The CPU and bus remain separate. Every CPU fetch, data read/write, and internal
 idle M-cycle advances timer hardware before the next observable bus access;
@@ -48,6 +54,37 @@ To inspect the header of a cartridge whose mapper is not implemented:
 {:ok, header} = Beamicom.GB.Header.parse(File.read!("game.gbc"))
 header.mapper
 ```
+
+Capture a screenshot after a selected number of frames. Cartridge headers
+select DMG or CGB rendering automatically; the final palette argument applies
+only to DMG shade-index frames:
+
+```sh
+mix gb.shot game.gb screenshot.png 60 dmg_green
+mix gb.shot game.gbc screenshot-color.png 60
+```
+
+The repository's self-authored diagnostic ROM can be generated without any
+commercial game data:
+
+```elixir
+File.write!("diagnostic.gb", Beamicom.GB.DiagnosticROM.build())
+File.write!("diagnostic.gbc", Beamicom.GB.DiagnosticROM.build_cgb())
+```
+
+Both are real ROM programs. Their SM83 code disables the LCD and configures
+video through the mapped bus before turning it back on. The CGB diagnostic also
+writes both VRAM banks, attribute maps and color palettes, and transfers sprites
+with OAM DMA. They are used by the end-to-end screenshot tests.
+
+## Known timing limitations
+
+PPU mode 3 currently uses the fixed minimum 172-dot duration; FIFO stalls and
+mid-scanline register effects are not timing-visible. CGB STOP speed switching
+toggles speed immediately at the instruction boundary. Hardware pauses the CPU
+for roughly 2050 M-cycles and freezes parts of the PPU differently by LCD mode;
+that oscillator transition is intentionally deferred until those clock-domain
+effects can be represented together.
 
 ## Tests
 
