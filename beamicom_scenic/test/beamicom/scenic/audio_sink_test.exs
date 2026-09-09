@@ -1,9 +1,9 @@
-defmodule Beamicom.NES.AudioSinkTest do
+defmodule Beamicom.Scenic.AudioSinkTest do
   # Shares the application-started Output.
   use ExUnit.Case, async: false
 
   alias Beamicom.Host.{AudioChunk, Output}
-  alias Beamicom.NES.AudioSink
+  alias Beamicom.Scenic.{AudioSink, Screen}
 
   test "streams pre-encoded PCM chunks to its port without crashing" do
     # Pipe to `cat` instead of ffplay so the test needs no audio device.
@@ -80,5 +80,16 @@ defmodule Beamicom.NES.AudioSinkTest do
              )
 
     assert "atempo=100,atempo=2.0" in fast_command
+  end
+
+  test "retains legacy audio and Scenic module APIs" do
+    assert Beamicom.NES.AudioSink.default_command(1.0) == AudioSink.default_command(1.0)
+    assert Beamicom.NES.Scenic.Screen.controls_height(:nes) == Screen.controls_height(:nes)
+    assert Beamicom.NES.Scenic.Assets.library() == Beamicom.Scenic.Assets.library()
+  end
+
+  test "legacy audio start retains its registered process name" do
+    pid = start_supervised!({Beamicom.NES.AudioSink, command: ["cat"]})
+    assert Process.whereis(Beamicom.NES.AudioSink) == pid
   end
 end

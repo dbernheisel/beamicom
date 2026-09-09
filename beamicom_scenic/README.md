@@ -78,6 +78,11 @@ The existing `Beamicom.NES.Scenic.play/2` entry point remains available and now
 selects either core too. NES save PNGs are supported as before. Game Boy save
 states are not yet implemented.
 
+The multi-system scene, audio sink, and asset library live under
+`Beamicom.Scenic`. Their former `Beamicom.NES` module names remain available as
+compatibility wrappers, so existing entry points and custom viewport
+configuration continue to work.
+
 Only one local Scenic player runs at a time. A second `play/2` call is rejected
 without starting more emulator or output processes. Inspect or stop the owner
 explicitly when driving it from a long-lived IEx session:

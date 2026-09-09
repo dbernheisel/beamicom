@@ -80,19 +80,35 @@ defmodule BeamicomPhx.Saves do
   end
 
   defp capture_nes(console, frame) do
-    File.mkdir_p!(dir())
-    name = save_name()
-    File.write!(Path.join(dir(), name), NESShareImage.to_png(console, frame))
-    Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
-    {:ok, "/saves/" <> name}
+    persist(NESShareImage.to_png(console, frame))
   end
 
   defp capture_gb(machine, frame) do
-    File.mkdir_p!(dir())
+    persist(GBShareImage.to_png(machine, frame))
+  end
+
+  defp persist(png) do
     name = save_name()
-    File.write!(Path.join(dir(), name), GBShareImage.to_png(machine, frame))
-    Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
-    {:ok, "/saves/" <> name}
+
+    with :ok <- File.mkdir_p(dir()),
+         :ok <- atomic_write(Path.join(dir(), name), png) do
+      Phoenix.PubSub.broadcast(BeamicomPhx.PubSub, @topic, :saves_changed)
+      {:ok, "/saves/" <> name}
+    end
+  end
+
+  @doc false
+  def atomic_write(path, contents) do
+    temporary = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+
+    with :ok <- File.write(temporary, contents, [:binary, :exclusive]),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        _ = File.rm(temporary)
+        error
+    end
   end
 
   defp save_name do

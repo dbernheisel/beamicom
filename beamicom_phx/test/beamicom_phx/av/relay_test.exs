@@ -3,17 +3,23 @@ defmodule BeamicomPhx.AV.RelayTest do
   @moduletag :integration
 
   test "starts and listens without a stream present" do
-    # Use Membrane.Pipeline.start_link/2 directly (not the named start_link/1 in
-    # BeamicomPhx.AV.Relay) so we get an anonymous pipeline that won't clash with
-    # a running app instance.
-    {:ok, _sup, pid} = Membrane.Pipeline.start_link(BeamicomPhx.AV.Relay, listen_port: 5100)
+    # The test wrapper starts an anonymous pipeline, avoiding the production
+    # registration while giving ExUnit ownership of the Membrane supervisor.
+    start_supervised!(
+      {BeamicomPhx.TestPipeline, {BeamicomPhx.AV.Relay, [listen_port: 5100], self()}}
+    )
+
+    assert_receive {:test_pipeline_started, pid}
     ref = Process.monitor(pid)
     refute_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
-    Membrane.Pipeline.terminate(pid)
   end
 
   test "attaching a browser before the stream arrives succeeds without crashing" do
-    {:ok, _sup, pid} = Membrane.Pipeline.start_link(BeamicomPhx.AV.Relay, listen_port: 5102)
+    start_supervised!(
+      {BeamicomPhx.TestPipeline, {BeamicomPhx.AV.Relay, [listen_port: 5102], self()}}
+    )
+
+    assert_receive {:test_pipeline_started, pid}
     ref = Process.monitor(pid)
 
     # Tees exist from init (no SessionBin wait), so attach returns :ok immediately
@@ -23,6 +29,5 @@ defmodule BeamicomPhx.AV.RelayTest do
 
     assert reply == :ok
     refute_receive {:DOWN, ^ref, :process, ^pid, _}, 800
-    Membrane.Pipeline.terminate(pid)
   end
 end

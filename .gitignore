@@ -1,2 +1,5 @@
 roms/
 docs/
+.expert/
+.elixir_ls/
+.lexical/

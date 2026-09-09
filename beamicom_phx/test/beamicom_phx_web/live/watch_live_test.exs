@@ -9,11 +9,19 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
   # id="videoPlayer-lv" in the dead render HTML, which is enough to confirm
   # the route exists and the player element is wired up.
   test "GET / renders the player element", %{conn: conn} do
-    conn = get(conn, ~p"/")
-    assert html_response(conn, 200) =~ "videoPlayer"
-    assert html_response(conn, 200) =~ ".gbc"
-    assert html_response(conn, 200) =~ ~s(data-video-width="256")
-    assert html_response(conn, 200) =~ ~s(data-video-height="240")
+    document = conn |> get(~p"/") |> html_response(200) |> LazyHTML.from_document()
+
+    assert [_ | _] = document |> LazyHTML.query("#videoPlayer-lv") |> LazyHTML.to_tree()
+
+    assert [_ | _] =
+             document
+             |> LazyHTML.query(~s(input[type="file"][accept*=".gbc"]))
+             |> LazyHTML.to_tree()
+
+    assert [_ | _] =
+             document
+             |> LazyHTML.query(~s(#crt-canvas[data-video-width="256"][data-video-height="240"]))
+             |> LazyHTML.to_tree()
   end
 
   test "CRT hook follows decoded relay dimensions" do
@@ -64,11 +72,14 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
     assert {:error, {:redirect, %{to: cgb_path}}} = render_upload(cgb, "diagnostic.gbc")
     assert BeamicomPhx.Emulator.system() == :gbc
     assert cgb_path =~ "stream_epoch="
-    {:ok, view, html} = live(recycle(conn), cgb_path)
-    assert html =~ "diagnostic.gbc"
-    assert html =~ ~s(data-system="gbc")
-    assert html =~ ~s(data-video-width="160")
-    assert html =~ ~s(data-video-height="144")
+    {:ok, view, _html} = live(recycle(conn), cgb_path)
+    assert has_element?(view, "#rom-drop-label", "diagnostic.gbc")
+    assert has_element?(view, ~s(.crt[data-system="gbc"]))
+
+    assert has_element?(
+             view,
+             ~s(#crt-canvas[data-video-width="160"][data-video-height="144"])
+           )
 
     assert has_element?(view, "#save-state:not([disabled])")
     element(view, "#save-state") |> render_click()
@@ -132,10 +143,13 @@ defmodule BeamicomPhxWeb.WatchLiveTest do
     assert {:error, {:redirect, %{to: nes_path}}} = render_upload(nes, "basics.nes")
     assert BeamicomPhx.Emulator.system() == :nes
     assert nes_path =~ "stream_epoch="
-    {:ok, _view, html} = live(recycle(conn), nes_path)
-    assert html =~ "basics.nes"
-    assert html =~ ~s(data-system="nes")
-    assert html =~ ~s(data-video-width="256")
-    assert html =~ ~s(data-video-height="240")
+    {:ok, view, _html} = live(recycle(conn), nes_path)
+    assert has_element?(view, "#rom-drop-label", "basics.nes")
+    assert has_element?(view, ~s(.crt[data-system="nes"]))
+
+    assert has_element?(
+             view,
+             ~s(#crt-canvas[data-video-width="256"][data-video-height="240"])
+           )
   end
 end

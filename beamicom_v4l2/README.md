@@ -26,7 +26,7 @@ socket. The system is selected once from the extension before devices open:
 
 ```sh
 BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 /absolute/path/to/game.nes
-BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 /tmp/ucity_compat.gbc
+BEAMICOM_V4L2_BUILD=true mix beamicom.v4l2 test/fixtures/ucity_compat_v1.3.gbc
 ```
 
 The command stays in the foreground and prints the socket path. By default it
@@ -118,9 +118,12 @@ conversion, and typed stereo audio envelope without requiring Linux video
 devices. The external audio-player adapter is covered separately by unit tests:
 
 ```sh
-BEAMICOM_UCITY_ROM=/tmp/ucity_compat.gbc \
-  BEAMICOM_V4L2_BUILD=true mix test --include ucity test/ucity_compat_test.exs
+BEAMICOM_V4L2_BUILD=true mix test --include ucity test/ucity_compat_test.exs
 ```
+
+The compatibility ROM is the open-source µCity 1.3 fixture distributed with
+this repository. Its provenance and licensing are recorded in
+[`test/fixtures/UCITY_NOTICE.md`](test/fixtures/UCITY_NOTICE.md).
 
 An opt-in paced performance objective can exercise a local CGB ROM after a
 short warmup. It checks that the runtime produces steady-state PCM at real-time

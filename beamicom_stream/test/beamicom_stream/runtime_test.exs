@@ -5,6 +5,8 @@ defmodule BeamicomStream.RuntimeTest do
   alias Beamicom.Host.{AudioChunk, Input, Output, VideoFrame}
   alias BeamicomStream.Runtime
 
+  @runtime_heap_words 65_536
+
   test "runs a CGB core through neutral output and accepts handheld input" do
     output = start_supervised!({Output, name: nil})
     assert :ok = Output.subscribe(output)
@@ -36,6 +38,12 @@ defmodule BeamicomStream.RuntimeTest do
     assert :ok = Runtime.set_input(runtime, Input.new(1, [:right, :a]))
     machine = Runtime.snapshot(runtime)
     assert machine.bus.buttons == 0x11
+
+    assert {:priority, :high} = Process.info(runtime, :priority)
+    assert {:min_heap_size, heap_words} = Process.info(runtime, :min_heap_size)
+    assert {:min_bin_vheap_size, binary_heap_words} = Process.info(runtime, :min_bin_vheap_size)
+    assert heap_words >= @runtime_heap_words
+    assert binary_heap_words >= @runtime_heap_words
   end
 
   test "reports media load failures as normal GenServer start errors" do

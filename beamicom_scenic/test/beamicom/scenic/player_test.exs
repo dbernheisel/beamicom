@@ -34,6 +34,8 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert Enum.all?(children, &Process.alive?/1)
     assert :sys.get_state(state.input_server).ports == [1]
     assert :sys.get_state(state.input_client).ports == [1]
+    assert Process.whereis(Beamicom.Scenic.EIServer) == state.input_server
+    assert Process.whereis(Beamicom.Scenic.EIClient) == state.input_client
 
     assert :ok = Beamicom.EI.Client.set_buttons(state.input_client, 1, [:a])
     assert await_buttons(state.runtime, 0x10)
@@ -61,6 +63,27 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert {:error, :not_running} = Beamicom.Scenic.status()
   end
 
+  test "legacy play facade routes NES and owns its lifecycle" do
+    path =
+      Path.join(System.tmp_dir!(), "beamicom-scenic-#{System.unique_integer([:positive])}.nes")
+
+    File.write!(path, minimal_nes_rom())
+    on_exit(fn -> File.rm(path) end)
+
+    assert :ok = Beamicom.NES.Scenic.play(path, audio: false, speed: 0.01)
+
+    assert %{
+             system: :nes,
+             video: %{width: 256, height: 240, scaled_width: 768, scaled_height: 720}
+           } = Beamicom.Scenic.status()
+
+    state = Player |> Process.whereis() |> :sys.get_state()
+    assert Process.whereis(Beamicom.Scenic.EIServer) == state.input_server
+    assert Process.whereis(Beamicom.Scenic.EIClient) == state.input_client
+    assert :ok = Beamicom.Scenic.stop()
+    assert eventually(fn -> is_nil(Process.whereis(Player)) end)
+  end
+
   test "an initialization failure rolls back anonymous output and runtime children", %{path: path} do
     socket =
       Path.join(
@@ -72,14 +95,11 @@ defmodule Beamicom.Scenic.PlayerTest do
 
     start_supervised!(
       {Beamicom.EI.Server,
-       name: Beamicom.NES.Scenic.EIServer,
-       path: socket,
-       ports: [1],
-       on_buttons: fn _, _ -> :ok end}
+       name: Beamicom.Scenic.EIServer, path: socket, ports: [1], on_buttons: fn _, _ -> :ok end}
     )
 
     outputs_before = processes_started_by(Beamicom.Host.Output)
-    runtimes_before = processes_started_by(Beamicom.Scenic.Runtime)
+    runtimes_before = processes_started_by(Beamicom.Host.Runtime)
 
     assert_raise ArgumentError, fn ->
       Beamicom.Scenic.play(path, audio: false, speed: 0.01)
@@ -87,7 +107,7 @@ defmodule Beamicom.Scenic.PlayerTest do
 
     assert Process.whereis(Player) == nil
     assert eventually(fn -> processes_started_by(Beamicom.Host.Output) == outputs_before end)
-    assert eventually(fn -> processes_started_by(Beamicom.Scenic.Runtime) == runtimes_before end)
+    assert eventually(fn -> processes_started_by(Beamicom.Host.Runtime) == runtimes_before end)
   end
 
   test "an optional audio exit leaves the player and video runtime alive", %{path: path} do
@@ -170,6 +190,11 @@ defmodule Beamicom.Scenic.PlayerTest do
     |> put_byte(0x149, 0)
     |> put_bytes(0x150, <<0x18, 0xFE>>)
     |> with_checksum()
+  end
+
+  defp minimal_nes_rom do
+    prg = <<0x4C, 0x00, 0x80, 0::size((0x3FFC - 3) * 8), 0x00, 0x80, 0::16>>
+    <<"NES", 0x1A, 1, 1, 0::size(10 * 8)>> <> prg <> <<0::size(8192 * 8)>>
   end
 
   defp with_checksum(rom) do

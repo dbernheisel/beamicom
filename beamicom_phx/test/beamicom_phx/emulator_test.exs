@@ -127,6 +127,21 @@ defmodule BeamicomPhx.EmulatorTest do
     assert Emulator.system() == :nes
   end
 
+  test "save capture reports filesystem errors without publishing a gallery change" do
+    rom = temporary_rom("gbc", DiagnosticROM.build_cgb())
+    blocked_parent = temporary_rom("blocked", "not a directory")
+    Application.put_env(:beamicom_phx, :saves_dir, Path.join(blocked_parent, "saves"))
+
+    assert :ok = Saves.subscribe()
+    assert :ok = Emulator.load(rom)
+    output = Emulator.profile().output
+    assert :ok = Output.subscribe_video(output)
+    assert_receive {:video_frame, :gbc, _number}, 1_000
+
+    assert {:error, :enotdir} = Saves.capture()
+    refute_receive :saves_changed
+  end
+
   test "same-family replacement keeps output and encoder epoch" do
     first = temporary_rom("gb", DiagnosticROM.build())
     second = temporary_rom("gb", DiagnosticROM.build())
@@ -145,30 +160,44 @@ defmodule BeamicomPhx.EmulatorTest do
     parent = self()
 
     first =
-      Task.async(fn ->
-        send(parent, {:pressed, self(), Emulator.press(1, [:a])})
-        receive do: (:stop -> :ok)
-      end)
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             send(parent, {:pressed, self(), Emulator.press(1, [:a])})
+             receive do: (:stop -> :ok)
+           end},
+          id: :first_input_owner
+        )
+      )
 
     assert_receive {:pressed, first_pid, :ok}
 
     second =
-      Task.async(fn ->
-        send(parent, {:pressed, self(), Emulator.press(1, [:right])})
-        receive do: (:stop -> :ok)
-      end)
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             send(parent, {:pressed, self(), Emulator.press(1, [:right])})
+             receive do: (:stop -> :ok)
+           end},
+          id: :second_input_owner
+        )
+      )
 
     assert_receive {:pressed, second_pid, :ok}
-    assert first.pid == first_pid
-    assert second.pid == second_pid
+    assert first == first_pid
+    assert second == second_pid
     assert eventually_buttons(0x11)
 
-    send(first.pid, :stop)
-    assert Task.await(first) == :ok
+    first_ref = Process.monitor(first)
+    send(first, :stop)
+    assert_receive {:DOWN, ^first_ref, :process, ^first, :normal}
     assert eventually_buttons(0x01)
 
-    send(second.pid, :stop)
-    assert Task.await(second) == :ok
+    second_ref = Process.monitor(second)
+    send(second, :stop)
+    assert_receive {:DOWN, ^second_ref, :process, ^second, :normal}
     assert eventually_buttons(0x00)
   end
 

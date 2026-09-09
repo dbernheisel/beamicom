@@ -6,11 +6,14 @@ defmodule BeamicomV4L2.UCityCompatTest do
   alias BeamicomV4L2.{Runtime, Video}
 
   @moduletag :ucity
+  @ucity_rom Path.expand("fixtures/ucity_compat_v1.3.gbc", __DIR__)
+  @ucity_sha256 "8b98cbb5303d2159a931332dc375642fb474b2c9473c7ba473ad94c98a8814bf"
 
   test "uCity crosses the V4L2 host runtime and AV adapter boundary" do
-    path = System.get_env("BEAMICOM_UCITY_ROM", "/tmp/ucity_compat.gbc")
-    assert File.regular?(path), "uCity ROM is unavailable at #{path}"
-    assert {:ok, machine} = path |> File.read!() |> GBSystem.load()
+    rom = File.read!(@ucity_rom)
+
+    assert :sha256 |> :crypto.hash(rom) |> Base.encode16(case: :lower) == @ucity_sha256
+    assert {:ok, machine} = GBSystem.load(rom)
 
     output = start_supervised!({Output, []})
     :ok = Output.subscribe(output)

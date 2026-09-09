@@ -163,7 +163,7 @@ defmodule Beamicom.Scenic.Player do
           :error -> audio_options
         end
 
-      case Beamicom.NES.AudioSink.start_link(audio_options) do
+      case Beamicom.Scenic.AudioSink.start_link(audio_options) do
         {:ok, pid} -> {:ok, pid}
         :ignore -> {:ok, nil}
         {:error, reason} -> {:error, {:audio_start_failed, reason}}
@@ -201,14 +201,14 @@ defmodule Beamicom.Scenic.Player do
 
     with {:ok, server} <-
            Beamicom.EI.Server.start_link(
-             name: Beamicom.NES.Scenic.EIServer,
+             name: Beamicom.Scenic.EIServer,
              path: socket,
              ports: ports,
              on_buttons: callback
            ),
          {:ok, client} <-
            Beamicom.EI.Client.start_link(
-             registered_name: Beamicom.NES.Scenic.EIClient,
+             registered_name: Beamicom.Scenic.EIClient,
              name: "beamicom-scenic",
              path: socket,
              ports: ports
@@ -226,7 +226,7 @@ defmodule Beamicom.Scenic.Player do
 
   defp start_scenic(core, runtime, output, scale) do
     video = core.capabilities.video
-    controls_height = Beamicom.NES.Scenic.Screen.controls_height(core.id)
+    controls_height = Beamicom.Scenic.Screen.controls_height(core.id)
 
     scene_options = [
       scale: scale,
@@ -239,7 +239,7 @@ defmodule Beamicom.Scenic.Player do
     config =
       Application.get_env(:beamicom_scenic, :viewport)
       |> Keyword.put(:size, {video.width * scale, video.height * scale + controls_height})
-      |> Keyword.put(:default_scene, {Beamicom.NES.Scenic.Screen, scene_options})
+      |> Keyword.put(:default_scene, {Beamicom.Scenic.Screen, scene_options})
 
     Scenic.start_link([config])
   end
