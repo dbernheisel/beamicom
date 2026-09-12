@@ -92,8 +92,8 @@ defmodule NxNes.Machine do
             fast_instructions: scalar.(0),
             batched_instructions: scalar.(0),
             journal_count: scalar.(0),
-            journal_keys: Nx.broadcast(Nx.tensor(0, type: :s32), {64}),
-            journal_values: Nx.broadcast(Nx.tensor(0, type: :u8), {64})
+            journal_keys: Nx.broadcast(Nx.tensor(0, type: :s32), {8}),
+            journal_values: Nx.broadcast(Nx.tensor(0, type: :u8), {8})
           })
 
         {:ok, Nx.backend_copy(s, Keyword.get(opts, :backend, {EXLA.Backend, client: :host}))}
