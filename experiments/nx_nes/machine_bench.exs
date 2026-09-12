@@ -3,7 +3,13 @@ alias NxNes.Machine.Reference
 
 {opts, _, _} =
   OptionParser.parse(System.argv(),
-    strict: [frames: :integer, output: :string, entry: :integer, start_frame: :integer]
+    strict: [
+      frames: :integer,
+      output: :string,
+      entry: :integer,
+      start_frame: :integer,
+      no_block: :boolean
+    ]
   )
 
 frames = Keyword.get(opts, :frames, 902)
@@ -13,13 +19,17 @@ media = File.read!("../../beamicom/roms/castlevania3.nes")
 IO.puts("Compiling resident MMC5 frame runner")
 
 {compile_us, fun} =
-  :timer.tc(fn -> Machine.compile(initial, media, entry: Keyword.get(opts, :entry, 0xE047)) end)
+  :timer.tc(fn ->
+    compile_opts = if opts[:no_block], do: [], else: [entry: Keyword.get(opts, :entry, 0xE047)]
+    Machine.compile(initial, media, compile_opts)
+  end)
 
 IO.puts("Compiled in #{compile_us / 1_000_000} s")
 File.mkdir_p!("tmp/machine")
 start_frame = Keyword.get(opts, :start_frame)
 # A warmup is not included in timings, and state is reset for the measured boot.
-{warm, _} = fun.(initial, Nx.tensor(0, type: :s32), Nx.tensor(0, type: :s32))
+warm_seed = Nx.backend_copy(initial, {EXLA.Backend, client: :host})
+{warm, _} = fun.(warm_seed, Nx.tensor(0, type: :s32), Nx.tensor(0, type: :s32))
 Nx.to_number(warm.cycles)
 
 init = %{

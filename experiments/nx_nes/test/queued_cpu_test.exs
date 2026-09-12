@@ -5,7 +5,7 @@ defmodule NxNes.QueuedCPUTest do
 
   test "queued writes preserve every opcode and roll back at deadlines" do
     direct = EXLA.jit(&CPU.step/2)
-    queued = EXLA.jit(&CPU.step/2)
+    queued = EXLA.jit(&CPU.step_branchless/2)
 
     for opcode <- Decode.supported(), sp <- [0, 255] do
       s = state(opcode, sp)
