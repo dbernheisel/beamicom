@@ -125,13 +125,15 @@ defmodule NxNes.Machine.PPU do
   end
 
   defn commit_lines(p, framebuffer) do
-    {framebuffer, _, _, _, _} =
-      while {framebuffer, i = Nx.tensor(0, type: :s32), count = p.render_count,
-             rows = p.render_rows, indices = p.render_indices},
-            i < count and i < 8 do
-        row = Nx.slice(rows, [i, 0], [1, 256])
-        {Nx.put_slice(framebuffer, [indices[i], 0], row), i + 1, count, rows, indices}
-      end
+    slots = Nx.iota({8}, type: :s32)
+    valid = slots < p.render_count
+    # Rendered rows are consecutive and there are at most six per CPU step.
+    # Offset unused slots by eight so every scatter index remains distinct.
+    untouched_indices = Nx.remainder(p.render_indices[0] + 8 + slots, 240)
+    indices = Nx.select(valid, p.render_indices, untouched_indices)
+    untouched_rows = Nx.take(framebuffer, untouched_indices)
+    rows = Nx.select(Nx.broadcast(valid, {8, 256}, axes: [0]), p.render_rows, untouched_rows)
+    framebuffer = Nx.indexed_put(framebuffer, Nx.new_axis(indices, -1), rows)
 
     {%{p | render_count: Nx.tensor(0, type: :s32)}, framebuffer}
   end

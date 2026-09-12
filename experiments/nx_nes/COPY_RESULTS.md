@@ -160,6 +160,44 @@ volume is generated within the frame computation.
 Results: [timing](results/copy_bench_donatable.json),
 [copy histogram](results/copy_donatable.json).
 
+## Batched PPU row commit
+
+`PPU.commit_lines/2` now applies its eight-slot scanline queue with one
+`Nx.indexed_put/3` instead of a compiled loop containing one `Nx.put_slice/4`
+per rendered row. Rendered rows are consecutive and a CPU step produces at most
+six, so unused slots target eight distinct rows outside that span and write back
+their existing pixels. This avoids the repeated-index behavior documented for
+`indexed_put` and preserves the public 240 by 256 framebuffer.
+
+The framebuffer joins RAM and WRAM as an explicitly donated input/output. RAM
+and WRAM retain their pointer addresses across exact frames. EXLA may allocate a
+different framebuffer result, so framebuffer pointer identity is not assumed.
+The per-frame 60 KiB framebuffer CopyThunk is gone. Total measured traffic is
+**1.04934 GB/frame**, versus **1.04940 GB/frame** before this change; the remaining
+volume is still dominated by nested 2/4/8 KiB state copies.
+
+The more meaningful gain is fewer runtime thunks. Five exact checkpoint frames
+with the existing sequential-scheduler diagnostic average **408.45 ms/frame
+(2.448 FPS)**, versus **451.07 ms/frame (2.217 FPS)** before the batched commit.
+Plain EXLA averages **665.87 ms/frame (1.502 FPS)** over three exact frames,
+versus **686.91 ms/frame (1.456 FPS)** for a matched pre-change run. The native
+interposer remains diagnostic-only and is not part of the emulator.
+
+Results: [sequential timing](results/copy_bench_ppu_scatter.json),
+[plain EXLA timing](results/copy_bench_ppu_scatter_plain.json),
+[copy histogram](results/copy_ppu_scatter.json).
+
+Two larger alternatives were rejected. A scanline-per-EXLA-call runner remained
+exact but fell to 1.46 FPS and raised traffic to 1.153 GB/frame because PRG and
+CHR became loop inputs on every call. A vectorized closed-form APU filter was
+also byte-exact over the 15-second capture, but prefix-sum and matrix forms were
+slower than the existing 128-sample recurrent loop. These experiments confirm
+that `Nx.donatable/1` controls executable-call ownership; it does not add mutable
+semantics to nested `while` state. Nx containers describe traversal and tensor
+structure, and `Nx.Pointer` is an interop handle rather than a compiled load/store
+API. There is no additional documented Nx function that makes an inner XLA loop
+mutate a tensor in place.
+
 ## Reproduce
 
 Run from `experiments/nx_nes` using Elixir 1.20.2 / OTP 29.0.3 and `MIX_ENV=prod`.

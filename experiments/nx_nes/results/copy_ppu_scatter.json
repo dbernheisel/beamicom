@@ -1,0 +1,65 @@
+{
+  "scope": "Executed XLA CPU CopyThunks; one warmup plus five exact Castlevania III checkpoint frames with framebuffer/RAM/WRAM donation and one indexed PPU row commit",
+  "executed_frames": 6,
+  "nx": "1.0.0",
+  "exla": "1.0.0",
+  "donated": [
+    "ppu.framebuffer",
+    "ram",
+    "wram"
+  ],
+  "copies": 65205196,
+  "bytes": 6296011964,
+  "bytes_per_frame": 1049335327.3333334,
+  "histogram": [
+    {
+      "bytes": 4,
+      "count": 60458075
+    },
+    {
+      "bytes": 8,
+      "count": 527494
+    },
+    {
+      "bytes": 16,
+      "count": 135634
+    },
+    {
+      "bytes": 20,
+      "count": 79036
+    },
+    {
+      "bytes": 32,
+      "count": 1792384
+    },
+    {
+      "bytes": 48,
+      "count": 61511
+    },
+    {
+      "bytes": 64,
+      "count": 213536
+    },
+    {
+      "bytes": 256,
+      "count": 258510
+    },
+    {
+      "bytes": 2048,
+      "count": 1129078
+    },
+    {
+      "bytes": 4096,
+      "count": 222507
+    },
+    {
+      "bytes": 8192,
+      "count": 327431
+    }
+  ],
+  "notes": [
+    "Queued PPU rows use distinct indexed_put destinations; unused slots preserve eight distinct existing rows.",
+    "The framebuffer CopyThunk is eliminated, while remaining traffic is dominated by nested 2/4/8 KiB state copies.",
+    "Counts include one warmup frame."
+  ]
+}

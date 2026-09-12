@@ -162,7 +162,9 @@ defmodule NxNes.Machine do
           {next, n} = run_frame(s, p1, p2, block: block)
           # Immutable cartridge tensors already have resident buffers. Returning
           # them through XLA would allocate/copy them merely to satisfy output ownership.
-          result = {next.ram, next.wram, Map.drop(next, [:prg, :chr, :ram, :wram]), n}
+          rest = Map.drop(next, [:prg, :chr, :ram, :wram])
+          rest = %{rest | ppu: Map.delete(rest.ppu, :framebuffer)}
+          result = {next.ppu.framebuffer, next.ram, next.wram, rest, n}
 
           if Keyword.get(opts, :prune_state, true),
             do: NxNes.StateGraph.prune(result),
@@ -178,15 +180,21 @@ defmodule NxNes.Machine do
 
     fn s, p1, p2 ->
       s = normalize_tensor_metadata(s)
-      {ram, wram, next, n} = compiled.(donate_memory(s), p1, p2)
+      {framebuffer, ram, wram, next, n} = compiled.(donate_memory(s), p1, p2)
       next = Map.merge(next, %{ram: ram, wram: wram})
+      next = %{next | ppu: Map.put(next.ppu, :framebuffer, framebuffer)}
       # Reuse handles only: no tensor values cross to Elixir and no ROM bytes change.
       {Map.merge(next, Map.take(s, [:prg, :chr])), n}
     end
   end
 
   defp donate_memory(s) do
-    %{s | ram: Nx.donatable(s.ram), wram: Nx.donatable(s.wram)}
+    %{
+      s
+      | ram: Nx.donatable(s.ram),
+        wram: Nx.donatable(s.wram),
+        ppu: %{s.ppu | framebuffer: Nx.donatable(s.ppu.framebuffer)}
+    }
   end
 
   defp normalize_tensor_metadata(%Nx.Tensor{} = tensor),
