@@ -12,6 +12,39 @@ The existing `Beamicom.NES` production implementation remains native Elixir and
 has no Nx/EXLA dependency. This runner lives in the isolated experiment project.
 It is functional experimental integration, not yet a real-time replacement.
 
+## Full branchless CPU follow-up
+
+The generic CPU batch now evaluates every supported official and unofficial
+operation as arithmetic candidates and selects register/write results by decoded
+operation class. The existing conditional CPU step remains available for the
+cycle-timed MMIO path and as a differential oracle. An all-opcode queued-write
+test compares the two implementations directly.
+
+The complete 902-frame cold-boot Castlevania III run remains exact: 8,296,332
+instructions, 26,859,520 CPU cycles, 661,818 samples, every framebuffer and
+palette byte, mapper/PPU/APU state, and PCM all match native Elixir. Under the
+same sequential-thunk diagnostic as the prior full result:
+
+| Measurement | Previous optimized core | Branchless CPU |
+| --- | ---: | ---: |
+| Total core time | 418.508 s | **317.323 s** |
+| Throughput | 2.155 FPS | **2.843 FPS** |
+| Median frame | 457.154 ms | **346.354 ms** |
+| p95 frame | 498.517 ms | **374.784 ms** |
+| Initial compilation | 33.618 s | 35.428 s |
+
+This reduces execution time by **24.2%** and raises throughput by **31.9%**.
+Native comparison work in the same run reached 76.44 FPS, so the resident Nx
+core remains about 26.9 times slower and is still dominated by device/scheduler
+state transitions.
+
+The machine retains its 64-entry RAM journal. The isolated branchless CPU is
+fastest with eight entries, but changing the integrated journal cadence exposed
+PPU frame-boundary differences during cold boot. The 64-entry cadence and
+conservative specialized-block bound complete all 902 frames exactly.
+
+Raw result: [branchless full run](results/machine_bench_branchless_sequential.json).
+
 ## Run it
 
 From `experiments/nx_nes`, with the project's Elixir/OTP versions:

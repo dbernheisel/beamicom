@@ -6,104 +6,63 @@ defmodule NxNes.Machine.Mapper do
   defn write(s, a, v) do
     m = s.mapper
     p = s.ppu
-    # Balanced address dispatch keeps StableHLO lowering off deep recursive paths.
-    if a < 0x5120 do
-      if a < 0x5104 do
-        if a < 0x5102 do
-          if a < 0x5101 do
-            if a == 0x5100, do: prg(%{s | mapper: %{m | prg_mode: band(v, 3)}}), else: s
-          else
-            if a == 0x5101, do: chr(%{s | mapper: %{m | chr_mode: band(v, 3)}}), else: s
-          end
-        else
-          if a < 0x5103 do
-            if a == 0x5102, do: %{s | mapper: %{m | m5_protect1: band(v, 3)}}, else: s
-          else
-            if a == 0x5103, do: %{s | mapper: %{m | m5_protect2: band(v, 3)}}, else: s
-          end
-        end
-      else
-        if a < 0x5106 do
-          if a < 0x5105 do
-            if a == 0x5104, do: %{s | ppu: %{p | exram_mode: band(v, 3)}}, else: s
-          else
-            if a == 0x5105,
-              do: %{
-                s
-                | ppu: %{p | nt_source: band(Nx.right_shift(v, Nx.iota({4}, type: :s32) * 2), 3)}
-              },
-              else: s
-          end
-        else
-          if a < 0x5107 do
-            if a == 0x5106, do: %{s | ppu: %{p | fill_tile: v}}, else: s
-          else
-            if a < 0x5113 do
-              if a == 0x5107, do: %{s | ppu: %{p | fill_attr: band(v, 3)}}, else: s
-            else
-              if a >= 0x5113 and a <= 0x5117,
-                do: prg(%{s | mapper: %{m | m5_prg_regs: PPU.put(m.m5_prg_regs, a - 0x5113, v)}}),
-                else: s
-            end
-          end
-        end
-      end
-    else
-      if a < 0x5203 do
-        if a < 0x5200 do
-          if a < 0x5130 do
-            if a >= 0x5120 and a <= 0x512B,
-              do: chr(%{s | mapper: %{m | chr_regs: PPU.put(m.chr_regs, a - 0x5120, v)}}),
-              else: s
-          else
-            if a == 0x5130,
-              do:
-                chr(%{s | mapper: %{m | chr_hi: band(v, 3)}, ppu: %{p | ext_chr_hi: band(v, 3)}}),
-              else: s
-          end
-        else
-          if a < 0x5201 do
-            if a == 0x5200,
-              do: %{
-                s
-                | ppu: %{
-                    p
-                    | split_en: Nx.as_type(band(v, 128) != 0, :s32),
-                      split_side: band(Nx.right_shift(v, 6), 1),
-                      split_tile: band(v, 31)
-                  }
-              },
-              else: s
-          else
-            if a < 0x5202 do
-              if a == 0x5201, do: %{s | ppu: %{p | split_scroll: v}}, else: s
-            else
-              if a == 0x5202, do: %{s | ppu: %{p | split_chr: v}}, else: s
-            end
-          end
-        end
-      else
-        if a < 0x5205 do
-          if a < 0x5204 do
-            if a == 0x5203, do: %{s | mapper: %{m | irq_latch: v}}, else: s
-          else
-            if a == 0x5204, do: %{s | irq_enabled: Nx.as_type(band(v, 128) != 0, :s32)}, else: s
-          end
-        else
-          if a < 0x5206 do
-            if a == 0x5205, do: %{s | mapper: %{m | mul_a: v}}, else: s
-          else
-            if a < 0x5C00 do
-              if a == 0x5206, do: %{s | mapper: %{m | mul_b: v}}, else: s
-            else
-              if a >= 0x5C00 and a <= 0x5FFF,
-                do: %{s | ppu: %{p | exram: PPU.put(p.exram, a - 0x5C00, v)}},
-                else: s
-            end
-          end
-        end
-      end
-    end
+    prg_register = a >= 0x5113 and a <= 0x5117
+    prg_index = Nx.clip(a - 0x5113, 0, 4)
+    prg_old = m.m5_prg_regs[prg_index]
+
+    prg_registers =
+      PPU.put(m.m5_prg_regs, prg_index, Nx.select(prg_register, v, prg_old))
+
+    chr_register = a >= 0x5120 and a <= 0x512B
+    chr_index = Nx.clip(a - 0x5120, 0, 11)
+    chr_old = m.chr_regs[chr_index]
+    chr_registers = PPU.put(m.chr_regs, chr_index, Nx.select(chr_register, v, chr_old))
+    exram_write = a >= 0x5C00 and a <= 0x5FFF
+    exram_index = Nx.clip(a - 0x5C00, 0, 1023)
+    exram_old = p.exram[exram_index]
+    exram = PPU.put(p.exram, exram_index, Nx.select(exram_write, v, exram_old))
+
+    next = %{
+      s
+      | irq_enabled: Nx.select(a == 0x5204, Nx.as_type(band(v, 128) != 0, :s32), s.irq_enabled),
+        mapper: %{
+          m
+          | prg_mode: Nx.select(a == 0x5100, band(v, 3), m.prg_mode),
+            chr_mode: Nx.select(a == 0x5101, band(v, 3), m.chr_mode),
+            m5_protect1: Nx.select(a == 0x5102, band(v, 3), m.m5_protect1),
+            m5_protect2: Nx.select(a == 0x5103, band(v, 3), m.m5_protect2),
+            m5_prg_regs: prg_registers,
+            chr_regs: chr_registers,
+            chr_hi: Nx.select(a == 0x5130, band(v, 3), m.chr_hi),
+            irq_latch: Nx.select(a == 0x5203, v, m.irq_latch),
+            mul_a: Nx.select(a == 0x5205, v, m.mul_a),
+            mul_b: Nx.select(a == 0x5206, v, m.mul_b)
+        },
+        ppu: %{
+          p
+          | exram_mode: Nx.select(a == 0x5104, band(v, 3), p.exram_mode),
+            nt_source:
+              Nx.select(
+                a == 0x5105,
+                band(Nx.right_shift(v, Nx.iota({4}, type: :s32) * 2), 3),
+                p.nt_source
+              ),
+            fill_tile: Nx.select(a == 0x5106, v, p.fill_tile),
+            fill_attr: Nx.select(a == 0x5107, band(v, 3), p.fill_attr),
+            ext_chr_hi: Nx.select(a == 0x5130, band(v, 3), p.ext_chr_hi),
+            split_en: Nx.select(a == 0x5200, Nx.as_type(band(v, 128) != 0, :s32), p.split_en),
+            split_side: Nx.select(a == 0x5200, band(Nx.right_shift(v, 6), 1), p.split_side),
+            split_tile: Nx.select(a == 0x5200, band(v, 31), p.split_tile),
+            split_scroll: Nx.select(a == 0x5201, v, p.split_scroll),
+            split_chr: Nx.select(a == 0x5202, v, p.split_chr),
+            exram: exram
+        }
+    }
+
+    prg_changed = a == 0x5100 or prg_register
+    chr_changed = a == 0x5101 or chr_register or a == 0x5130
+    next = select_state(prg_changed, prg(next), next)
+    select_state(chr_changed, chr(next), next)
   end
 
   defn read(s, a) do
@@ -206,4 +165,16 @@ defmodule NxNes.Machine.Mapper do
   end
 
   defnp(band(a, b), do: Nx.bitwise_and(a, b))
+
+  deftransformp select_state(condition, candidate, state) do
+    Map.new(state, fn {key, value} ->
+      replacement = Map.fetch!(candidate, key)
+
+      {key,
+       if(is_map(value) and not is_struct(value, Nx.Tensor),
+         do: select_state(condition, replacement, value),
+         else: Nx.select(condition, replacement, value)
+       )}
+    end)
+  end
 end

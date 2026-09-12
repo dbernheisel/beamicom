@@ -2,7 +2,7 @@ defmodule NxNes.Machine.Memory do
   @moduledoc false
   import Nx.Defn
   alias NxNes.Core.Bus
-  @journal_capacity 8
+  @journal_capacity 64
 
   defn peek(s, address) do
     a = band(address, 65535)

@@ -92,8 +92,8 @@ defmodule NxNes.Machine do
             fast_instructions: scalar.(0),
             batched_instructions: scalar.(0),
             journal_count: scalar.(0),
-            journal_keys: Nx.broadcast(Nx.tensor(0, type: :s32), {8}),
-            journal_values: Nx.broadcast(Nx.tensor(0, type: :u8), {8})
+            journal_keys: Nx.broadcast(Nx.tensor(0, type: :s32), {64}),
+            journal_values: Nx.broadcast(Nx.tensor(0, type: :u8), {64})
           })
 
         {:ok, Nx.backend_copy(s, Keyword.get(opts, :backend, {EXLA.Backend, client: :host}))}
@@ -193,6 +193,8 @@ defmodule NxNes.Machine do
       s
       | ram: Nx.donatable(s.ram),
         wram: Nx.donatable(s.wram),
+        audio: Nx.donatable(s.audio),
+        apu: Nx.donatable(s.apu),
         ppu: %{s.ppu | framebuffer: Nx.donatable(s.ppu.framebuffer)}
     }
   end
@@ -279,7 +281,7 @@ defmodule NxNes.Machine do
          s.nmi_pending == 0 and s.nmi_edge == 0 and s.nmi_prev == line(s.ppu) and
          not (s.irq_pending != 0 and s.irq_enabled != 0) and s.apu.frame_irq == 0 and
          s.apu.irq_inhibit != 0 and
-         NxNes.Machine.Memory.journal_room_for(s, block_writes(block)) and
+         NxNes.Machine.Memory.journal_room_for(s, block_count(block) * 3) and
          block_valid(s, block) do
       iterations =
         Nx.select(
@@ -291,7 +293,7 @@ defmodule NxNes.Machine do
       iterations =
         Nx.min(
           iterations,
-          NxNes.Machine.Memory.journal_iterations(s, block_write_stride(block))
+          NxNes.Machine.Memory.journal_iterations(s, block_count(block) * 3)
         )
 
       c = cpu_state(s)
@@ -360,33 +362,6 @@ defmodule NxNes.Machine do
   deftransformp(block_entry(b), do: b.entry)
   deftransformp(block_count(b), do: b.count)
   deftransformp(block_cycles(b), do: b.cycles)
-
-  deftransformp block_writes(b) do
-    Enum.reduce(b.instructions, 0, fn instruction, count ->
-      count +
-        case instruction.op do
-          op when op in ["BRK"] ->
-            3
-
-          op when op in ["JSR"] ->
-            2
-
-          op when op in ["PHA", "PHP", "STA", "STX", "STY", "SAX", "SHX", "SHY"] ->
-            1
-
-          op when op in ["ASL", "LSR", "ROL", "ROR"] ->
-            if instruction.mode == "acc", do: 0, else: 1
-
-          op when op in ["INC", "DEC", "DCP", "ISB", "SLO", "RLA", "SRE", "RRA"] ->
-            1
-
-          _ ->
-            0
-        end
-    end)
-  end
-
-  deftransformp(block_write_stride(b), do: max(block_writes(b), 1))
 
   deftransformp block_valid(s, b) do
     addresses = Nx.tensor(Enum.to_list(b.entry..(b.entry + length(b.bytes) - 1)), type: :s32)

@@ -38,174 +38,161 @@ defmodule NxNes.APUWrites do
   ]
   @noise [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068]
   defn apply(s, addr, v) do
-    cond do
-      addr >= 0x4000 and addr <= 0x4003 ->
-        %{
-          s
-          | pulse1: pulse(s.pulse1, addr - 0x4000, v),
-            p1_seq: Nx.select(addr == 0x4003, 0, s.p1_seq)
-        }
+    p1_write = addr >= 0x4000 and addr <= 0x4003
+    p2_write = addr >= 0x4004 and addr <= 0x4007
+    triangle_write = addr >= 0x4008 and addr <= 0x400B
+    noise_write = addr >= 0x400C and addr <= 0x400F
+    status_read = addr == 0x4015 and v == -1
+    status_write = addr == 0x4015 and v != -1
+    frame_write = addr == 0x4017
+    m5_write = addr >= 0x5000 and addr <= 0x5015
 
-      addr >= 0x4004 and addr <= 0x4007 ->
-        %{
-          s
-          | pulse2: pulse(s.pulse2, addr - 0x4004, v),
-            p2_seq: Nx.select(addr == 0x4007, 0, s.p2_seq)
-        }
+    p1 = %{
+      s
+      | pulse1: pulse(s.pulse1, addr - 0x4000, v),
+        p1_seq: Nx.select(addr == 0x4003, 0, s.p1_seq)
+    }
 
-      addr >= 0x4008 and addr <= 0x400B ->
-        %{s | triangle: triangle(s.triangle, addr - 0x4008, v)}
+    p2 = %{
+      s
+      | pulse2: pulse(s.pulse2, addr - 0x4004, v),
+        p2_seq: Nx.select(addr == 0x4007, 0, s.p2_seq)
+    }
 
-      addr >= 0x400C and addr <= 0x400F ->
-        %{s | noise: noise(s.noise, addr - 0x400C, v)}
+    triangle = %{s | triangle: triangle(s.triangle, addr - 0x4008, v)}
+    noise = %{s | noise: noise(s.noise, addr - 0x400C, v)}
+    read_status = %{s | frame_irq: Nx.tensor(0, type: :s32)}
 
-      addr == 0x4015 and v == -1 ->
-        %{s | frame_irq: Nx.tensor(0, type: :s32)}
+    write_status = %{
+      s
+      | pulse1: enable(s.pulse1, band(v, 1)),
+        pulse2: enable(s.pulse2, band(v, 2)),
+        triangle: enable(s.triangle, band(v, 4)),
+        noise: enable(s.noise, band(v, 8)),
+        dmc_irq: Nx.tensor(0, type: :s32)
+    }
 
-      addr == 0x4015 ->
-        %{
-          s
-          | pulse1: enable(s.pulse1, band(v, 1)),
-            pulse2: enable(s.pulse2, band(v, 2)),
-            triangle: enable(s.triangle, band(v, 4)),
-            noise: enable(s.noise, band(v, 8)),
-            dmc_irq: Nx.tensor(0, type: :s32)
-        }
+    frame = %{
+      s
+      | frame_mode: Nx.select(band(v, 128) != 0, 5, 4),
+        irq_inhibit: int(band(v, 64) != 0),
+        seq_cycle: Nx.tensor(0, type: :s32),
+        frame_irq: Nx.select(band(v, 64) != 0, 0, s.frame_irq)
+    }
 
-      addr == 0x4017 ->
-        s = %{
-          s
-          | frame_mode: Nx.select(band(v, 128) != 0, 5, 4),
-            irq_inhibit: int(band(v, 64) != 0),
-            seq_cycle: Nx.tensor(0, type: :s32),
-            frame_irq: Nx.select(band(v, 64) != 0, 0, s.frame_irq)
-        }
+    frame_clocked = NxNes.APU.frame(%{frame | seq_cycle: Nx.tensor(14913, type: :s32)})
+    frame_clocked = %{frame_clocked | seq_cycle: Nx.tensor(0, type: :s32)}
+    frame = select_state(frame, frame.frame_mode == 5, frame_clocked)
 
-        if s.frame_mode == 5 do
-          s = NxNes.APU.frame(%{s | seq_cycle: Nx.tensor(14913, type: :s32)})
-          %{s | seq_cycle: Nx.tensor(0, type: :s32)}
-        else
-          s
-        end
+    m5_p1 = addr >= 0x5000 and addr <= 0x5003
+    m5_p2 = addr >= 0x5004 and addr <= 0x5007
 
-      addr >= 0x5000 and addr <= 0x5015 ->
-        s = %{s | m5_active: Nx.tensor(1, type: :s32)}
+    m5 = %{
+      s
+      | m5_active: Nx.tensor(1, type: :s32),
+        m5p1: select_state(s.m5p1, m5_p1, pulse(s.m5p1, addr - 0x5000, v)),
+        m5p2: select_state(s.m5p2, m5_p2, pulse(s.m5p2, addr - 0x5004, v)),
+        m5p1_seq: Nx.select(addr == 0x5003, 0, s.m5p1_seq),
+        m5p2_seq: Nx.select(addr == 0x5007, 0, s.m5p2_seq),
+        m5pcm: Nx.select(addr == 0x5011, v, s.m5pcm)
+    }
 
-        cond do
-          addr <= 0x5003 ->
-            %{
-              s
-              | m5p1: pulse(s.m5p1, addr - 0x5000, v),
-                m5p1_seq: Nx.select(addr == 0x5003, 0, s.m5p1_seq)
-            }
+    # $5015 is the only non-pulse MMC5 write that changes channel enable state.
+    m5 = %{
+      m5
+      | m5p1: select_state(m5.m5p1, addr == 0x5015, enable(s.m5p1, band(v, 1))),
+        m5p2: select_state(m5.m5p2, addr == 0x5015, enable(s.m5p2, band(v, 2)))
+    }
 
-          addr <= 0x5007 ->
-            %{
-              s
-              | m5p2: pulse(s.m5p2, addr - 0x5004, v),
-                m5p2_seq: Nx.select(addr == 0x5007, 0, s.m5p2_seq)
-            }
-
-          addr == 0x5011 ->
-            %{s | m5pcm: v}
-
-          addr == 0x5015 ->
-            %{s | m5p1: enable(s.m5p1, band(v, 1)), m5p2: enable(s.m5p2, band(v, 2))}
-
-          true ->
-            s
-        end
-
-      true ->
-        s
-    end
+    s
+    |> select_state(p1_write, p1)
+    |> select_state(p2_write, p2)
+    |> select_state(triangle_write, triangle)
+    |> select_state(noise_write, noise)
+    |> select_state(status_read, read_status)
+    |> select_state(status_write, write_status)
+    |> select_state(frame_write, frame)
+    |> select_state(m5_write, m5)
   end
 
   defnp pulse(p, reg, v) do
     lengths = Nx.tensor(@length, type: :s32)
 
-    cond do
-      reg == 0 ->
-        %{
-          p
-          | duty: shr(v, 6),
-            halt: int(band(v, 32) != 0),
-            const: int(band(v, 16) != 0),
-            vol: band(v, 15)
-        }
-
-      reg == 1 ->
-        %{
-          p
-          | sweep_en: int(band(v, 128) != 0),
-            sweep_period: band(shr(v, 4), 7),
-            sweep_neg: int(band(v, 8) != 0),
-            sweep_shift: band(v, 7),
-            sweep_reload: Nx.tensor(1, type: :s32)
-        }
-
-      reg == 2 ->
-        %{p | period: Nx.bitwise_or(band(p.period, 0x700), v)}
-
-      true ->
-        %{
-          p
-          | period: Nx.bitwise_or(band(p.period, 255), Nx.left_shift(band(v, 7), 8)),
-            length: Nx.select(p.enabled != 0, lengths[shr(v, 3)], p.length),
-            env_start: Nx.tensor(1, type: :s32)
-        }
-    end
+    %{
+      p
+      | duty: Nx.select(reg == 0, shr(v, 6), p.duty),
+        halt: Nx.select(reg == 0, int(band(v, 32) != 0), p.halt),
+        const: Nx.select(reg == 0, int(band(v, 16) != 0), p.const),
+        vol: Nx.select(reg == 0, band(v, 15), p.vol),
+        sweep_en: Nx.select(reg == 1, int(band(v, 128) != 0), p.sweep_en),
+        sweep_period: Nx.select(reg == 1, band(shr(v, 4), 7), p.sweep_period),
+        sweep_neg: Nx.select(reg == 1, int(band(v, 8) != 0), p.sweep_neg),
+        sweep_shift: Nx.select(reg == 1, band(v, 7), p.sweep_shift),
+        sweep_reload: Nx.select(reg == 1, 1, p.sweep_reload),
+        period:
+          Nx.select(
+            reg == 2,
+            Nx.bitwise_or(band(p.period, 0x700), v),
+            Nx.select(
+              reg == 3,
+              Nx.bitwise_or(band(p.period, 255), Nx.left_shift(band(v, 7), 8)),
+              p.period
+            )
+          ),
+        length: Nx.select(reg == 3 and p.enabled != 0, lengths[shr(v, 3)], p.length),
+        env_start: Nx.select(reg == 3, 1, p.env_start)
+    }
   end
 
   defnp triangle(t, reg, v) do
     lengths = Nx.tensor(@length, type: :s32)
 
-    cond do
-      reg == 0 ->
-        %{
-          t
-          | control: int(band(v, 128) != 0),
-            halt: int(band(v, 128) != 0),
-            linear_reload: band(v, 127)
-        }
-
-      reg == 2 ->
-        %{t | period: Nx.bitwise_or(band(t.period, 0x700), v)}
-
-      reg == 3 ->
-        %{
-          t
-          | period: Nx.bitwise_or(band(t.period, 255), Nx.left_shift(band(v, 7), 8)),
-            length: Nx.select(t.enabled != 0, lengths[shr(v, 3)], t.length),
-            reload_flag: Nx.tensor(1, type: :s32)
-        }
-
-      true ->
-        t
-    end
+    %{
+      t
+      | control: Nx.select(reg == 0, int(band(v, 128) != 0), t.control),
+        halt: Nx.select(reg == 0, int(band(v, 128) != 0), t.halt),
+        linear_reload: Nx.select(reg == 0, band(v, 127), t.linear_reload),
+        period:
+          Nx.select(
+            reg == 2,
+            Nx.bitwise_or(band(t.period, 0x700), v),
+            Nx.select(
+              reg == 3,
+              Nx.bitwise_or(band(t.period, 255), Nx.left_shift(band(v, 7), 8)),
+              t.period
+            )
+          ),
+        length: Nx.select(reg == 3 and t.enabled != 0, lengths[shr(v, 3)], t.length),
+        reload_flag: Nx.select(reg == 3, 1, t.reload_flag)
+    }
   end
 
   defnp noise(n, reg, v) do
     lengths = Nx.tensor(@length, type: :s32)
     periods = Nx.tensor(@noise, type: :s32)
 
-    cond do
-      reg == 0 ->
-        %{n | halt: int(band(v, 32) != 0), const: int(band(v, 16) != 0), vol: band(v, 15)}
+    %{
+      n
+      | halt: Nx.select(reg == 0, int(band(v, 32) != 0), n.halt),
+        const: Nx.select(reg == 0, int(band(v, 16) != 0), n.const),
+        vol: Nx.select(reg == 0, band(v, 15), n.vol),
+        mode: Nx.select(reg == 2, int(band(v, 128) != 0), n.mode),
+        period: Nx.select(reg == 2, periods[band(v, 15)], n.period),
+        length: Nx.select(reg == 3 and n.enabled != 0, lengths[shr(v, 3)], n.length),
+        env_start: Nx.select(reg == 3, 1, n.env_start)
+    }
+  end
 
-      reg == 2 ->
-        %{n | mode: int(band(v, 128) != 0), period: periods[band(v, 15)]}
+  deftransformp select_state(state, condition, candidate) do
+    Map.new(state, fn {key, value} ->
+      replacement = Map.fetch!(candidate, key)
 
-      reg == 3 ->
-        %{
-          n
-          | length: Nx.select(n.enabled != 0, lengths[shr(v, 3)], n.length),
-            env_start: Nx.tensor(1, type: :s32)
-        }
-
-      true ->
-        n
-    end
+      {key,
+       if(is_map(value) and not is_struct(value, Nx.Tensor),
+         do: select_state(value, condition, replacement),
+         else: Nx.select(condition, replacement, value)
+       )}
+    end)
   end
 
   defnp(enable(p, on), do: %{p | enabled: int(on != 0), length: Nx.select(on != 0, p.length, 0)})
