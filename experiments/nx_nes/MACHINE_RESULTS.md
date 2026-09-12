@@ -81,15 +81,47 @@ The complete experiment suite passes **31 tests**, including the existing
 CPU, PPU and APU regressions and new MMC5 register/memory tests plus a full
 resident frame test exercising DMA, NMI and guarded instruction batches.
 
-The 902-frame live-ROM validation is in progress; final timing and hashes will
-be added after it completes.
+The **902-frame cold-boot run completed with every comparison passing**:
+8,296,332 instructions, 26,859,520 CPU cycles and 661,818 audio samples. This is
+approximately 15 seconds of emulated NTSC time, with no controller input.
+
+| Measurement | Result |
+| --- | ---: |
+| Resident Nx execution, sequential diagnostic | 1269.502 s / **0.711 FPS** |
+| Native comparison loop in this run | 13.511 s / 66.76 FPS |
+| Median Nx frame | 1349.361 ms |
+| Initial compilation, excluded | 86.499 s |
+| Specialized instructions | 572,358 / 8,296,332 (6.90%) |
+
+The original standalone native benchmark was about 83.7 FPS. The native number
+above measures this validation script's comparison loop, which also ran on a
+shared desktop alongside the Nx workload; it is not a replacement for that
+standalone native benchmark. The full Nx core is **not close to real time**.
+The earlier isolated block/PPU/APU speedups did not translate into a full-core win.
+
+The PCM SHA-256 is
+`0aaab7e4ee5edbab8579849e9433602144130e5bec1d348660fa07e7730d3a2b`,
+exactly matching the original 902-frame native baseline. Every frame's pixels
+and palette also matched native byte-for-byte. The new video hash concatenates
+raw pixels and palette bytes, so its serialization differs from the original
+benchmark's Erlang framebuffer-struct hash.
+
+Raw timings, totals and hashes: `results/machine_bench_sequential.json`.
+Core implementation checkpoint: `b8fe2d9`. Default XLA configuration was retained;
+the sequential override was process-local for this diagnostic run. No 902-frame
+GPU or default-scheduling throughput claim is made.
+
+Some regression compilation and a separate profiling process ran concurrently
+with early/middle portions of this validation; timing remains diagnostic. The
+emulated workload and frame-by-frame oracle checks were unchanged throughout.
 
 `machine_bench.exs` runs the full ROM and separately advances native Elixir as a
 comparison oracle after each measured Nx frame. The native core supplies no
 state or events to Nx during execution. Checks include CPU/NMI/IRQ state,
 RAM/WRAM, mapper registers and banks, PPU control/VRAM/OAM/ExRAM, every framebuffer
 pixel and palette byte, audio sample counts, and PCM. APU integer state is exact;
-floating state uses an absolute tolerance of 1e-9.
+floating state uses an absolute tolerance of 1e-9. The standalone native
+project also passes its own nestest test without the Nx experiment dependencies.
 
 Initial upload, compilation, native-reference execution and comparison exports
 are excluded from Nx frame timing. Each timed call synchronizes its result.
@@ -111,6 +143,39 @@ LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libcrypto.so.3:$PWD/tmp/sequential_thunks.
 The script writes progress, PNG frames, a WAV and a resident-state checkpoint
 under ignored `tmp/machine/`. The ROM and those captures are not committed.
 `--start-frame N` injects Start for three frames in both implementations.
+
+## Full-machine runtime sample
+
+A separate warmed process advanced from a live-game checkpoint under GDB,
+using the sequential thunk diagnostic. Across 60 all-thread snapshots, 57 stacks
+contained executor activity:
+
+| Observed executor path | Stack records |
+| --- | ---: |
+| Tensor copies (`CopyThunk`, including its `memcpy` calls) | 23 |
+| Generated computation kernels | 14 |
+| Executor/dispatch | 13 |
+| Thread synchronization | 3 |
+| Other copies | 2 |
+| Allocation/protection | 2 |
+
+These are **stack counts, not CPU-time percentages**. Debugger pauses perturb
+execution, and neither tensor-copy sizes nor total memory traffic were measured.
+The evidence points to tensor copies and runtime dispatch as the next profiling
+focus. Eigen worker activity is still visible: sequential thunk execution does
+not disable all parallel kernel work.
+
+Summary: `results/machine_profile_sequential.json`. To reproduce after generating
+a checkpoint with `machine_bench.exs`:
+
+```sh
+NX_PROFILE_WORKLOAD=machine_profile.exs NX_PROFILE_PREFIX=machine \
+  NX_PROFILE_COMPILE_TIMEOUT=240 APU_PROFILE_SEQUENTIAL=1 \
+  APU_PROFILE_LABEL=_sequential APU_SAMPLES=60 python3 sample_apu.py
+```
+
+The sampler launches its own inferior; it does not attach to the live validation
+run or change system tracing permissions. Raw stacks stay in ignored `tmp/`.
 
 ## Limits and next work
 

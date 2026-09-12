@@ -4,12 +4,15 @@ Debugger pauses perturb execution; use this to locate hot native paths, not time
 """
 import ast, json, os, pathlib, queue, random, subprocess, threading, time
 
-pathlib.Path('tmp/apu_profile.ready').unlink(missing_ok=True)
-env = dict(os.environ, MIX_ENV='prod')
+prefix = os.environ.get('NX_PROFILE_PREFIX', 'apu')
+workload = os.environ.get('NX_PROFILE_WORKLOAD', 'apu_profile.exs')
+ready = pathlib.Path('tmp') / (prefix + '_profile.ready')
+ready.unlink(missing_ok=True)
+env = dict(os.environ, MIX_ENV='prod', NX_PROFILE_READY=str(ready))
 elixir = subprocess.check_output(['which', 'elixir'], text=True).strip()
 mix = subprocess.check_output(['which', 'mix'], text=True).strip()
 p = subprocess.Popen(['gdb', '-q', '-nx', '--interpreter=mi2', '--args', '/bin/sh', elixir, mix,
-                      'run', 'apu_profile.exs'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                      'run', workload], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
 q = queue.Queue()
 def reader():
@@ -17,7 +20,7 @@ def reader():
 threading.Thread(target=reader, daemon=True).start()
 token = 0
 label = os.environ.get('APU_PROFILE_LABEL', '')
-log = open('tmp/apu_gdb' + label + '.log', 'w')
+log = open('tmp/' + prefix + '_gdb' + label + '.log', 'w')
 def get(timeout=60):
     line = q.get(timeout=timeout)
     log.write(line + '\n'); log.flush()
@@ -48,8 +51,8 @@ try:
         command('-gdb-set environment LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcrypto.so.3:' + str(pathlib.Path('tmp/sequential_thunks.so').resolve()))
         command('-gdb-set environment NX_APU_FORCE_SEQUENTIAL=1')
     command('-exec-run')
-    deadline = time.time() + 120
-    while not pathlib.Path('tmp/apu_profile.ready').exists():
+    deadline = time.time() + int(os.environ.get('NX_PROFILE_COMPILE_TIMEOUT', '120'))
+    while not ready.exists():
         if time.time() > deadline: raise RuntimeError('workload did not become ready')
         try:
             line = get(.1)
@@ -64,11 +67,11 @@ try:
         # The interrupt acknowledgement precedes the all-stop notification.
         while not get().startswith('*stopped'): pass
         snapshots.append(console('thread apply all bt 16'))
-        pathlib.Path('tmp/apu_stacks' + label + '.json').write_text(json.dumps(snapshots))
+        pathlib.Path('tmp/' + prefix + '_stacks' + label + '.json').write_text(json.dumps(snapshots))
         command('-exec-continue')
         if (i + 1) % 25 == 0: print(f'{i + 1} snapshots', flush=True)
-    pathlib.Path('tmp/apu_stacks' + label + '.json').write_text(json.dumps(snapshots))
-    print('Saved tmp/apu_stacks' + label + '.json', flush=True)
+    pathlib.Path('tmp/' + prefix + '_stacks' + label + '.json').write_text(json.dumps(snapshots))
+    print('Saved tmp/' + prefix + '_stacks' + label + '.json', flush=True)
 finally:
     try: command('-gdb-exit')
     except Exception: p.kill()
