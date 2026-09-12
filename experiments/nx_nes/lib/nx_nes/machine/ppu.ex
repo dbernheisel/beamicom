@@ -77,12 +77,7 @@ defmodule NxNes.Machine.PPU do
       p.dot == 257 and p.scanline < 240 ->
         {line, status, v} = NxNes.PPU.render(p, chr)
 
-        %{
-          p
-          | status: status,
-            v: v,
-            framebuffer: Nx.put_slice(p.framebuffer, [p.scanline, 0], Nx.reshape(line, {1, 256}))
-        }
+        store_line(%{p | status: status, v: v}, line)
 
       p.dot == 257 and p.scanline == 261 and rendering ->
         %{p | v: bor(band(p.v, 31712), band(p.t, 1055))}
@@ -109,6 +104,36 @@ defmodule NxNes.Machine.PPU do
       true ->
         p
     end
+  end
+
+  deftransformp store_line(p, line) do
+    if Map.has_key?(p, :render_rows) do
+      queue_line(p, line)
+    else
+      %{p | framebuffer: Nx.put_slice(p.framebuffer, [p.scanline, 0], Nx.reshape(line, {1, 256}))}
+    end
+  end
+
+  defnp queue_line(p, line) do
+    %{
+      p
+      | render_rows: Nx.put_slice(p.render_rows, [p.render_count, 0], Nx.reshape(line, {1, 256})),
+        render_indices:
+          Nx.put_slice(p.render_indices, [p.render_count], Nx.reshape(p.scanline, {1})),
+        render_count: p.render_count + 1
+    }
+  end
+
+  defn commit_lines(p, framebuffer) do
+    {framebuffer, _, _, _, _} =
+      while {framebuffer, i = Nx.tensor(0, type: :s32), count = p.render_count,
+             rows = p.render_rows, indices = p.render_indices},
+            i < count and i < 8 do
+        row = Nx.slice(rows, [i, 0], [1, 256])
+        {Nx.put_slice(framebuffer, [indices[i], 0], row), i + 1, count, rows, indices}
+      end
+
+    {%{p | render_count: Nx.tensor(0, type: :s32)}, framebuffer}
   end
 
   defn read_register(p, chr, addr) do

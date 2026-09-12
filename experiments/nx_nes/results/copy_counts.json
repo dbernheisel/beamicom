@@ -1,0 +1,122 @@
+{
+  "scope": "Executed XLA CPU CopyThunks grouped by exact source slice bytes; one warmup plus five matched checkpoint frames",
+  "seed_cycles": 26859520,
+  "executed_frames": 6,
+  "sequential_diagnostic": true,
+  "baseline_commit": "65fd218",
+  "notes": [
+    "Copy counts/bytes are execution totals, not CPU-time percentages.",
+    "Does not count copies inside generated kernels or host transfers.",
+    "Size 2048 combines RAM, VRAM and the new scanline queue; size 4096 combines ExRAM and audio.",
+    "Baseline probe overlapped regression testing; probe timings are not the performance comparison."
+  ],
+  "baseline": {
+    "histogram": [
+      {
+        "bytes": 4,
+        "count": 74089204
+      },
+      {
+        "bytes": 8,
+        "count": 1909384
+      },
+      {
+        "bytes": 16,
+        "count": 710648
+      },
+      {
+        "bytes": 20,
+        "count": 78600
+      },
+      {
+        "bytes": 32,
+        "count": 1216001
+      },
+      {
+        "bytes": 48,
+        "count": 61075
+      },
+      {
+        "bytes": 256,
+        "count": 121648
+      },
+      {
+        "bytes": 2048,
+        "count": 1684601
+      },
+      {
+        "bytes": 4096,
+        "count": 797201
+      },
+      {
+        "bytes": 8192,
+        "count": 3787893
+      },
+      {
+        "bytes": 61440,
+        "count": 805539
+      },
+      {
+        "bytes": 131072,
+        "count": 6
+      },
+      {
+        "bytes": 262144,
+        "count": 498782
+      }
+    ],
+    "copies": 85760582,
+    "bytes": 218389188576
+  },
+  "optimized": {
+    "histogram": [
+      {
+        "bytes": 4,
+        "count": 59502554
+      },
+      {
+        "bytes": 8,
+        "count": 522795
+      },
+      {
+        "bytes": 16,
+        "count": 134762
+      },
+      {
+        "bytes": 20,
+        "count": 78600
+      },
+      {
+        "bytes": 32,
+        "count": 1790204
+      },
+      {
+        "bytes": 48,
+        "count": 61075
+      },
+      {
+        "bytes": 256,
+        "count": 44538
+      },
+      {
+        "bytes": 2048,
+        "count": 1148854
+      },
+      {
+        "bytes": 4096,
+        "count": 221315
+      },
+      {
+        "bytes": 8192,
+        "count": 357662
+      },
+      {
+        "bytes": 61440,
+        "count": 6
+      }
+    ],
+    "copies": 63862365,
+    "bytes": 6507235600
+  },
+  "byte_reduction_percent": 97.02034901890967
+}

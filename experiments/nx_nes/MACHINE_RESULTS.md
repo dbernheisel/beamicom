@@ -1,5 +1,7 @@
 # Resident MMC5 NES frame runner
 
+For the subsequent copy-removal optimization, see [buffer-copy results](COPY_RESULTS.md).
+
 `NxNes.Machine` runs Castlevania III from its reset vector with the complete PRG
 and CHR ROM, RAM, mapper, PPU, APU, controller and CPU state held in Nx tensors.
 The compiled frame loop performs CPU execution, device accesses, interrupt

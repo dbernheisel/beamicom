@@ -106,7 +106,8 @@ defmodule NxNes.Machine do
         4 => :unsupported_opcode,
         7 => :unsupported_dmc,
         8 => :audio_overflow,
-        9 => :instruction_limit
+        9 => :instruction_limit,
+        10 => :render_overflow
       },
       Nx.to_number(s.reason)
     )
@@ -150,9 +151,27 @@ defmodule NxNes.Machine do
         end
       end
 
-    EXLA.compile(
-      fn s, p1, p2 -> run_frame(s, p1, p2, block: block) end,
-      [Nx.to_template(initial), Nx.template({}, :s32), Nx.template({}, :s32)], client: :host)
+    compiled =
+      EXLA.compile(
+        fn s, p1, p2 ->
+          {next, n} = run_frame(s, p1, p2, block: block)
+          # Immutable cartridge tensors already have resident buffers. Returning
+          # them through XLA would allocate/copy them merely to satisfy output ownership.
+          result = {Map.drop(next, [:prg, :chr]), n}
+
+          if Keyword.get(opts, :prune_state, true),
+            do: NxNes.StateGraph.prune(result),
+            else: result
+        end,
+        [Nx.to_template(initial), Nx.template({}, :s32), Nx.template({}, :s32)],
+        client: :host
+      )
+
+    fn s, p1, p2 ->
+      {next, n} = compiled.(s, p1, p2)
+      # Reuse handles only: no tensor values cross to Elixir and no ROM bytes change.
+      {Map.merge(next, Map.take(s, [:prg, :chr])), n}
+    end
   end
 
   defn run_frame(s, pad1, pad2, opts \\ []) do
@@ -167,16 +186,45 @@ defmodule NxNes.Machine do
         audio_count: Nx.tensor(0, type: :s32)
     }
 
-    {s, count, _} =
-      while {s, count = Nx.tensor(0, type: :s32), target},
+    {s, framebuffer} = separate_framebuffer(s)
+
+    {s, framebuffer, count, _} =
+      while {s, framebuffer, count = Nx.tensor(0, type: :s32), target},
             s.ppu.ready < target and s.reason == 0 and count < 100_000 do
         {s, n} = scheduled_step(s, opts[:block])
-        {s, count + n, target}
+        s = %{s | reason: Nx.select(s.ppu.render_count > 8, 10, s.reason)}
+        {p, framebuffer} = PPU.commit_lines(s.ppu, framebuffer)
+        {%{s | ppu: p}, framebuffer, count + n, target}
       end
 
+    s = restore_framebuffer(s, framebuffer)
     s = Audio.sync(s)
     s = %{s | reason: Nx.select(count >= 100_000, 9, s.reason)}
     {s, count}
+  end
+
+  # A CPU step can render at most six scanlines, including DMA and interrupt entry.
+  # Keep the full framebuffer out of every nested device/CPU conditional.
+  deftransformp separate_framebuffer(s) do
+    {framebuffer, p} = Map.pop!(s.ppu, :framebuffer)
+
+    p =
+      Map.merge(p, %{
+        render_rows: Nx.broadcast(Nx.tensor(0, type: :u8), {8, 256}),
+        render_indices: Nx.broadcast(Nx.tensor(0, type: :s32), {8}),
+        render_count: Nx.tensor(0, type: :s32)
+      })
+
+    {%{s | ppu: p}, framebuffer}
+  end
+
+  deftransformp restore_framebuffer(s, framebuffer) do
+    p =
+      s.ppu
+      |> Map.drop([:render_rows, :render_indices, :render_count])
+      |> Map.put(:framebuffer, framebuffer)
+
+    %{s | ppu: p}
   end
 
   deftransformp scheduled_step(s, block) do
@@ -420,6 +468,13 @@ defmodule NxNes.Machine do
   @cpu_fields [:a, :x, :y, :sp, :p, :pc, :cycles, :ram, :wram]
   deftransformp cpu_state(s) do
     Map.merge(Map.take(s, @cpu_fields ++ [:prg, :prg_banks, :event_cycle, :opcode]), %{
+      write_count: Nx.tensor(0, type: :s32),
+      write_addr0: Nx.tensor(0, type: :s32),
+      write_addr1: Nx.tensor(0, type: :s32),
+      write_addr2: Nx.tensor(0, type: :s32),
+      write_value0: Nx.tensor(0, type: :s32),
+      write_value1: Nx.tensor(0, type: :s32),
+      write_value2: Nx.tensor(0, type: :s32),
       reason: Nx.tensor(0, type: :s32),
       event_addr: Nx.tensor(0, type: :s32),
       event_value: Nx.tensor(0, type: :s32),
@@ -440,7 +495,9 @@ defmodule NxNes.Machine do
     })
   end
 
-  deftransformp(merge_cpu(s, c), do: Map.merge(s, Map.take(c, @cpu_fields)))
+  deftransformp(merge_cpu(s, c),
+    do: Map.merge(s, Map.take(NxNes.Machine.Memory.commit(c), @cpu_fields))
+  )
 
   defnp poll_nmi(s, line) do
     %{

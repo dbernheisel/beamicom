@@ -34,7 +34,43 @@ defmodule NxNes.Machine.Memory do
     end
   end
 
-  defn write(s, addr, value) do
+  # CPU dispatch returns at most three byte writes (BRK/interrupt stack pushes).
+  # Commit only after the whole instruction passes its deadline/device checks.
+  deftransform write(s, addr, value) do
+    if Map.has_key?(s, :write_count),
+      do: queue_write(s, addr, value),
+      else: direct_write(s, addr, value)
+  end
+
+  defn queue_write(s, addr, value) do
+    a = band(addr, 65535)
+
+    if a >= 0x2000 and a < 0x6000 do
+      Bus.barrier(s, 3, a, band(value, 255))
+    else
+      n = s.write_count
+
+      %{
+        s
+        | write_count: n + 1,
+          write_addr0: Nx.select(n == 0, a, s.write_addr0),
+          write_addr1: Nx.select(n == 1, a, s.write_addr1),
+          write_addr2: Nx.select(n == 2, a, s.write_addr2),
+          write_value0: Nx.select(n == 0, value, s.write_value0),
+          write_value1: Nx.select(n == 1, value, s.write_value1),
+          write_value2: Nx.select(n == 2, value, s.write_value2)
+      }
+    end
+  end
+
+  defn commit(s) do
+    s = if s.write_count > 0, do: direct_write(s, s.write_addr0, s.write_value0), else: s
+    s = if s.write_count > 1, do: direct_write(s, s.write_addr1, s.write_value1), else: s
+    s = if s.write_count > 2, do: direct_write(s, s.write_addr2, s.write_value2), else: s
+    %{s | write_count: Nx.tensor(0, type: :s32)}
+  end
+
+  defn direct_write(s, addr, value) do
     a = band(addr, 65535)
     v = band(value, 255)
 

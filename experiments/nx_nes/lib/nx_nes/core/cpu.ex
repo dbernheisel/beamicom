@@ -62,23 +62,30 @@ defmodule NxNes.Core.CPU do
         do: %{s | reason: Nx.tensor(6, type: :s32), event_addr: original.pc},
         else: s
 
-    cond do
-      s.cycles > deadline and s.reason < 4 ->
-        %{original | reason: Nx.tensor(1, type: :s32), event_cycle: s.cycles, opcode: byte}
+    s =
+      cond do
+        s.cycles > deadline and s.reason < 4 ->
+          %{original | reason: Nx.tensor(1, type: :s32), event_cycle: s.cycles, opcode: byte}
 
-      s.reason != 0 ->
-        %{
-          original
-          | reason: s.reason,
-            event_addr: s.event_addr,
-            event_value: s.event_value,
-            event_cycle: s.event_cycle,
-            opcode: byte
-        }
+        s.reason != 0 ->
+          %{
+            original
+            | reason: s.reason,
+              event_addr: s.event_addr,
+              event_value: s.event_value,
+              event_cycle: s.event_cycle,
+              opcode: byte
+          }
 
-      true ->
-        %{s | io_read_ready: Nx.tensor(0, type: :s32), io_write_ready: Nx.tensor(0, type: :s32)}
-    end
+        true ->
+          %{s | io_read_ready: Nx.tensor(0, type: :s32), io_write_ready: Nx.tensor(0, type: :s32)}
+      end
+
+    commit_writes(s)
+  end
+
+  deftransformp commit_writes(s) do
+    if Map.has_key?(s, :write_count), do: NxNes.Machine.Memory.commit(s), else: s
   end
 
   # kind: 1=NMI, 2=IRQ. Called at a scheduler-selected instruction boundary.

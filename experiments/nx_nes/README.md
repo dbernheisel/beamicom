@@ -1,5 +1,7 @@
 # Resident Nx NES experiment
 
+For the subsequent copy-removal optimization, see [buffer-copy results](COPY_RESULTS.md).
+
 Restore point: `9755cc8` (`main`). The production CPU, PPU, APU and mapper code
 has not been changed. Nx/EXLA are dependencies of this separate project only.
 
