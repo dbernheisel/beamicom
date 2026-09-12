@@ -77,6 +77,44 @@ full-machine benchmark. It does not change the normal project configuration;
 this remains a shared desktop with unpinned clocks. Native Elixir remains the
 production fallback, and the Nx runner remains below real time.
 
+The complete **902-frame cold-boot run** also passes, with the same
+8,296,332 instructions, 26,859,520 cycles, 661,818 samples, and unchanged
+video/audio SHA-256 hashes. Its core time is 418.508 seconds
+(2.155 FPS), versus 1269.502 seconds before
+(0.711 FPS). This full-run timing is diagnostic: follow-up compiler
+experiments overlapped part of the run after frame 550. The ten-frame timings
+above are the uncontended paired comparison. This result validates core commit
+`d4dd73c`: [full-workload result](results/machine_bench_copy_optimized.json).
+
+## Remaining ownership problem
+
+The 1.085 GB/frame result is still excessive; it does **not** establish the
+requested engine-owned, copy-free RAM architecture. The current API preserves
+input tensor values and feeds a new logical state through nested control flow.
+ROM handles are now reused, but that does not guarantee reuse of every mutable
+buffer or its physical address across calls.
+
+Follow-up diagnostics attributed large copies to the generic CPU loop and the
+scanline queue inside PPU timing branches. Tested alternatives included
+region-aware copy analysis, disabling loop invariant code motion, selected-region
+scalar memory reads, transient/cleared queues, packed CPU state, guarded blocks
+inside CPU batches, and an opaque register-materialization primitive. None
+established copy-free RAM, and the unvalidated/performance-regressing core
+alternatives were reverted. The materialization experiment copied only register
+packets in a CPU custom call; it did not implement emulator arithmetic in C.
+
+The next architectural acceptance test must establish exclusive memory ownership
+and measured buffer reuse for compiled load/store/opcode operations before
+integrating more whole-machine control flow. Existing Nx value semantics do not
+guarantee in-place allocation reuse. Frame-level ownership/donation and copies
+inside a compiled loop must be tested separately. The native Elixir fallback
+remains unchanged.
+
+Diagnostics: [follow-up measurements](results/copy_followup_diagnostics.json).
+Set `NX_COPY_SITES=1` with the copy probe to write an additional
+`<NX_COPY_REPORT>.sites.csv` file identifying executed copy operations of at least
+1 KiB by HLO operation name. This extra instrumentation adds overhead.
+
 ## Reproduce
 
 Run from `experiments/nx_nes` using Elixir 1.20.2 / OTP 29.0.3 and `MIX_ENV=prod`.
