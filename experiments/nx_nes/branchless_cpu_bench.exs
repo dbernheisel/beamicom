@@ -60,6 +60,20 @@ rom = Nx.backend_copy(rom, backend)
     )
   end)
 
+{journaled_compile_us, journaled} =
+  :timer.tc(fn ->
+    EXLA.compile(
+      &BranchlessCPU.run_journaled/4,
+      [
+        Nx.to_template(registers),
+        ram_host |> Nx.donatable() |> Nx.to_template(),
+        Nx.to_template(rom),
+        Nx.template({}, :s32)
+      ],
+      client: :host
+    )
+  end)
+
 {generic_compile_us, generic_run} =
   :timer.tc(fn ->
     EXLA.compile(
@@ -76,8 +90,15 @@ input_pointer = Nx.to_pointer(expected_input_ram).address
 {expected_registers, expected_ram} =
   branchless.(registers, Nx.donatable(expected_input_ram), rom, limit)
 
-if Nx.to_pointer(expected_ram).address != input_pointer,
-  do: raise("donated RAM buffer was not reused")
+direct_pointer_reused = Nx.to_pointer(expected_ram).address == input_pointer
+
+journaled_input_ram = Nx.backend_copy(ram_host, backend)
+journaled_pointer = Nx.to_pointer(journaled_input_ram).address
+
+{journaled_registers, journaled_ram} =
+  journaled.(registers, Nx.donatable(journaled_input_ram), rom, limit)
+
+journaled_pointer_reused = Nx.to_pointer(journaled_ram).address == journaled_pointer
 
 {expected_generic, count} =
   generic_run.(generic, Nx.tensor(1_152_921_504_606_846_976, type: :s64), limit)
@@ -99,6 +120,8 @@ actual = [
 
 if expected != actual, do: raise("register mismatch: #{inspect(expected)} != #{inspect(actual)}")
 if Nx.to_binary(expected_ram) != Nx.to_binary(expected_generic.ram), do: raise("RAM mismatch")
+if Nx.to_flat_list(journaled_registers) != expected, do: raise("journaled register mismatch")
+if Nx.to_binary(journaled_ram) != Nx.to_binary(expected_ram), do: raise("journaled RAM mismatch")
 
 measure = fn fun, sync ->
   for _ <- 1..7 do
@@ -122,6 +145,19 @@ branchless_times =
     us
   end)
 
+journaled_seeds = for _ <- 1..7, do: Nx.backend_copy(ram_host, backend)
+
+journaled_times =
+  Enum.map(journaled_seeds, fn ram ->
+    :erlang.garbage_collect()
+
+    {us, {result, _ram}} =
+      :timer.tc(fn -> journaled.(registers, Nx.donatable(ram), rom, limit) end)
+
+    Nx.to_flat_list(result)
+    us
+  end)
+
 generic_times =
   measure.(
     fn -> generic_run.(generic, Nx.tensor(1_152_921_504_606_846_976, type: :s64), limit) end,
@@ -131,11 +167,20 @@ generic_times =
 result = %{
   scope: "Ten-opcode synthetic NROM loop; one resident EXLA call per run",
   instructions: instructions,
+  journal_capacity: BranchlessCPU.journal_capacity(),
   operations: ["ADC", "AND", "BNE", "CLC", "DEX", "INC", "JMP", "LDA", "LDX", "STA"],
-  correctness: "registers, cycles, and 2 KiB RAM exactly match the complete CPU",
-  donated_ram_pointer_reused: true,
-  compile_ms: %{branchless: branchless_compile_us / 1000, generic: generic_compile_us / 1000},
-  timings_us: %{branchless: branchless_times, generic: generic_times}
+  correctness:
+    "direct and journaled registers, cycles, and 2 KiB RAM exactly match the complete CPU",
+  donated_ram_pointer_reused: %{
+    direct: direct_pointer_reused,
+    journaled: journaled_pointer_reused
+  },
+  compile_ms: %{
+    branchless: branchless_compile_us / 1000,
+    journaled: journaled_compile_us / 1000,
+    generic: generic_compile_us / 1000
+  },
+  timings_us: %{branchless: branchless_times, journaled: journaled_times, generic: generic_times}
 }
 
 IO.inspect(result)

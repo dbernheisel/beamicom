@@ -1,0 +1,13 @@
+{
+  "scope": "Two 100,000-instruction resident journaled CPU calls with donated 2 KiB RAM",
+  "executed_runs": 2,
+  "instructions_per_run": 100000,
+  "journal_capacity": 8,
+  "donated_ram_pointer_reused": true,
+  "bytes_per_run": 20076,
+  "copies_per_run": 5004,
+  "histogram": [
+    {"bytes": 4, "count": 10006},
+    {"bytes": 64, "count": 2}
+  ]
+}
