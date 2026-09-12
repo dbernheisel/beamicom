@@ -2,14 +2,14 @@ defmodule NxNes.StateGraph do
   @moduledoc """
   Removes unchanged values from conditional and loop results before EXLA lowering.
 
-  Nx 0.13 represents a conditional returning a state container as one tuple,
+  Nx represents a conditional returning a state container as one tuple,
   including fields which are identical in every branch. XLA may copy those
   fields to satisfy conditional buffer ownership. Hoist identical expression
   IDs out of the result; keep all changed fields in one conditional so its
   predicate and branch computations still execute together. Loop outputs which
   return an unmodified loop parameter reuse that parameter's initial value.
 
-  This experiment targets the pure, terminating NES graphs on Nx 0.13.1.
+  This experiment targets the pure, terminating NES graphs on Nx 1.0.0.
   It uses Nx expression internals; it is not a general optimizer for graphs
   with hooks, runtime callbacks or nonterminating loops.
   """

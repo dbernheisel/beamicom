@@ -57,6 +57,8 @@ defmodule NxNes.MachineTest do
     assert %EXLA.Backend{} = s.prg.data
     fun = Machine.compile(s, media, entry: entry)
     native = Beamicom.NES.Console.load_binary(media)
+    ram_pointer = Nx.to_pointer(s.ram).address
+    wram_pointer = Nx.to_pointer(s.wram).address
 
     {s, _} =
       Enum.reduce(1..3, {s, native}, fn _, {s, native} ->
@@ -66,6 +68,8 @@ defmodule NxNes.MachineTest do
         assert Machine.status(s) == :running
         assert %EXLA.Backend{} = s.ram.data
         assert %EXLA.Backend{} = s.ppu.framebuffer.data
+        assert Nx.to_pointer(s.ram).address == ram_pointer
+        assert Nx.to_pointer(s.wram).address == wram_pointer
         {s, native}
       end)
 

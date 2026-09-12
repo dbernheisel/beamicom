@@ -38,7 +38,7 @@ Raw counts and scope: [copy_counts.json](results/copy_counts.json).
 `StateGraph.prune/1` removes fields whose expression IDs are identical in every
 conditional branch. It also bypasses unchanged loop outputs. This prevents
 passthrough ROM and other state from acquiring conditional output buffers.
-The pass is local to this experiment and depends on Nx 0.13.1 expression
+The pass is local to this experiment and depends on Nx 1.0.0 expression
 internals; it targets the pure, bounded emulator graph, without hooks or callbacks.
 `:prune_state` can disable this pass for diagnostics.
 
@@ -135,6 +135,30 @@ RAM journal was also worse than 64 entries at 1.0639 GB/frame and 2.123 FPS.
 
 Results: [timing](results/copy_bench_ram_journal.json),
 [copy histogram](results/copy_ram_journal.json).
+
+## Nx 1.0 buffer donation
+
+Nx 1.0 adds `Nx.donatable/1`, which supplies the ownership contract that was
+missing from the 0.13 implementation. The compiled frame runner marks RAM and
+WRAM as donatable and returns them as the first explicit outputs so EXLA pairs
+each input with the intended same-shape output. ROM and CHR are never donated.
+The returned state owns the buffers; callers must replace the old state and must
+not read it after calling the runner.
+
+On EXLA's host client, RAM and WRAM retain their exact pointer addresses across
+three consecutive native-exact frames. This establishes zero-copy state transfer
+at the compiled frame-call boundary using only Elixir/Nx APIs. A compatibility
+normalizer adds the new tensor metadata field when loading checkpoints serialized
+by Nx 0.13.
+
+Donation does not alter XLA's copies inside nested compiled loops. The final
+five-frame probe reports **1.0494 GB/frame**, effectively unchanged from the
+RAM-journal result, at **451.1 ms/frame (2.217 FPS)**. The distinction is now
+measured: cross-frame RAM/WRAM ownership is solved, while the remaining copy
+volume is generated within the frame computation.
+
+Results: [timing](results/copy_bench_donatable.json),
+[copy histogram](results/copy_donatable.json).
 
 ## Reproduce
 

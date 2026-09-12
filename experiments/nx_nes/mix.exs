@@ -6,7 +6,7 @@ defmodule NxNes.MixProject do
       app: :nx_nes,
       version: "0.1.0",
       elixir: "~> 1.20",
-      deps: [{:beamicom, path: "../../beamicom"}, {:nx, "~> 0.13.1"}, {:exla, "~> 0.13.1"}]
+      deps: [{:beamicom, path: "../../beamicom"}, {:nx, "~> 1.0"}, {:exla, "~> 1.0"}]
     ]
   end
 

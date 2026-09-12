@@ -139,6 +139,8 @@ defmodule NxNes.Machine do
 
   @doc "Compile a frame runner, optionally specializing a guarded ROM block at :entry."
   def compile(initial, media, opts \\ []) do
+    initial = normalize_tensor_metadata(initial)
+
     block =
       if entry = Keyword.get(opts, :entry) do
         native = Beamicom.NES.Console.load_binary(media)
@@ -160,22 +162,43 @@ defmodule NxNes.Machine do
           {next, n} = run_frame(s, p1, p2, block: block)
           # Immutable cartridge tensors already have resident buffers. Returning
           # them through XLA would allocate/copy them merely to satisfy output ownership.
-          result = {Map.drop(next, [:prg, :chr]), n}
+          result = {next.ram, next.wram, Map.drop(next, [:prg, :chr, :ram, :wram]), n}
 
           if Keyword.get(opts, :prune_state, true),
             do: NxNes.StateGraph.prune(result),
             else: result
         end,
-        [Nx.to_template(initial), Nx.template({}, :s32), Nx.template({}, :s32)],
+        [
+          initial |> donate_memory() |> Nx.to_template(),
+          Nx.template({}, :s32),
+          Nx.template({}, :s32)
+        ],
         client: :host
       )
 
     fn s, p1, p2 ->
-      {next, n} = compiled.(s, p1, p2)
+      s = normalize_tensor_metadata(s)
+      {ram, wram, next, n} = compiled.(donate_memory(s), p1, p2)
+      next = Map.merge(next, %{ram: ram, wram: wram})
       # Reuse handles only: no tensor values cross to Elixir and no ROM bytes change.
       {Map.merge(next, Map.take(s, [:prg, :chr])), n}
     end
   end
+
+  defp donate_memory(s) do
+    %{s | ram: Nx.donatable(s.ram), wram: Nx.donatable(s.wram)}
+  end
+
+  defp normalize_tensor_metadata(%Nx.Tensor{} = tensor),
+    do: Map.put_new(tensor, :donatable?, false)
+
+  defp normalize_tensor_metadata(map) when is_map(map),
+    do: Map.new(map, fn {key, value} -> {key, normalize_tensor_metadata(value)} end)
+
+  defp normalize_tensor_metadata(tuple) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> Enum.map(&normalize_tensor_metadata/1) |> List.to_tuple()
+
+  defp normalize_tensor_metadata(value), do: value
 
   defn run_frame(s, pad1, pad2, opts \\ []) do
     target = s.ppu.ready + 1

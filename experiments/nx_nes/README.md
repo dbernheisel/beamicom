@@ -51,7 +51,7 @@ Its API is separate from the production application UI.
 ## Measurements
 
 Machine: AMD Ryzen AI Max+ 395, 32 logical CPUs; Elixir 1.20.2, OTP 29.0.3;
-Nx and EXLA 0.13.1; EXLA `:host` client. No GPU. Performance runs use `MIX_ENV=prod`.
+Nx and EXLA 1.0.0; EXLA `:host` client. No GPU. Performance runs use `MIX_ENV=prod`.
 
 `results/baseline.json` records 902 frames (approximately 15 seconds of emulated
 NTSC time) from cold boot, no buttons pressed, full audio and video enabled.

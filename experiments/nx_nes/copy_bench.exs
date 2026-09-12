@@ -15,7 +15,8 @@ media = File.read!("../../beamicom/roms/castlevania3.nes")
 s = Map.merge(initial, saved) |> Nx.backend_copy({EXLA.Backend, client: :host})
 {compile_us, run} = :timer.tc(fn -> Machine.compile(s, media, entry: 0xE047) end)
 IO.puts("compile #{compile_us / 1_000_000}s")
-{warm, _} = run.(s, Nx.tensor(0, type: :s32), Nx.tensor(0, type: :s32))
+warm_seed = Nx.backend_copy(s, {EXLA.Backend, client: :host})
+{warm, _} = run.(warm_seed, Nx.tensor(0, type: :s32), Nx.tensor(0, type: :s32))
 Nx.to_number(warm.cycles)
 
 {_, _, times} =
