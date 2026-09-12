@@ -12,38 +12,55 @@ The existing `Beamicom.NES` production implementation remains native Elixir and
 has no Nx/EXLA dependency. This runner lives in the isolated experiment project.
 It is functional experimental integration, not yet a real-time replacement.
 
-## Full branchless CPU follow-up
+## Full branchless CPU and device follow-up
 
 The generic CPU batch now evaluates every supported official and unofficial
 operation as arithmetic candidates and selects register/write results by decoded
-operation class. The existing conditional CPU step remains available for the
-cycle-timed MMIO path and as a differential oracle. An all-opcode queued-write
-test compares the two implementations directly.
+operation class. APU register writes and MMC5 register updates now use the same
+candidate-and-mask scheme. The existing conditional CPU step remains available
+for the cycle-timed MMIO path and as a differential oracle. An all-opcode
+queued-write test compares the two CPU implementations directly.
+
+The frame boundary donates the resident RAM, WRAM, framebuffer, audio buffer and
+APU container so EXLA may reuse their buffers for same-shaped outputs. ROM stays
+resident and immutable. Donation has to be targeted: donating the entire mutable
+machine is rejected when a compiled frame does not consume and return every
+marked field. MMC5 mapper state is mostly small scalars, so branchless selection
+is the useful optimization there; broad donation would add little and is not
+valid for unused fields.
 
 The complete 902-frame cold-boot Castlevania III run remains exact: 8,296,332
 instructions, 26,859,520 CPU cycles, 661,818 samples, every framebuffer and
 palette byte, mapper/PPU/APU state, and PCM all match native Elixir. Under the
 same sequential-thunk diagnostic as the prior full result:
 
-| Measurement | Previous optimized core | Branchless CPU |
-| --- | ---: | ---: |
-| Total core time | 418.508 s | **317.323 s** |
-| Throughput | 2.155 FPS | **2.843 FPS** |
-| Median frame | 457.154 ms | **346.354 ms** |
-| p95 frame | 498.517 ms | **374.784 ms** |
-| Initial compilation | 33.618 s | 35.428 s |
+| Measurement | Previous optimized core | Branchless CPU | Branchless devices + donation |
+| --- | ---: | ---: | ---: |
+| Total core time | 418.508 s | 317.323 s | **313.582 s** |
+| Throughput | 2.155 FPS | 2.843 FPS | **2.876 FPS** |
+| Mean frame | 463.978 ms | 351.800 ms | **347.652 ms** |
+| Median frame | 457.154 ms | 346.354 ms | **342.319 ms** |
+| p95 frame | 499.123 ms | **374.824 ms** | 375.300 ms |
+| p99 frame | 540.620 ms | **391.541 ms** | 400.175 ms |
+| Initial compilation | 33.618 s | 35.428 s | **31.748 s** |
 
-This reduces execution time by **24.2%** and raises throughput by **31.9%**.
-Native comparison work in the same run reached 76.44 FPS, so the resident Nx
-core remains about 26.9 times slower and is still dominated by device/scheduler
-state transitions.
+Together these changes reduce execution time by **25.1%** and raise throughput
+by **33.5%** against the previous optimized core. The device follow-up itself
+reduces time by **1.18%** against the branchless-CPU result. APU and mapper writes
+are sparse compared with CPU instruction dispatch, so their smaller gain is
+consistent with the workload. Native comparison work in the final run reached
+76.45 FPS, so the resident Nx core remains about 26.6 times slower. The next
+bottleneck is the frequency and size of scheduler/device state transitions,
+especially PPU/APU state carried through the frame loop, rather than APU or MMC5
+register dispatch alone.
 
 The machine retains its 64-entry RAM journal. The isolated branchless CPU is
 fastest with eight entries, but changing the integrated journal cadence exposed
 PPU frame-boundary differences during cold boot. The 64-entry cadence and
 conservative specialized-block bound complete all 902 frames exactly.
 
-Raw result: [branchless full run](results/machine_bench_branchless_sequential.json).
+Raw results: [branchless CPU run](results/machine_bench_branchless_sequential.json)
+and [branchless device/donation run](results/machine_bench_branchless_devices_sequential.json).
 
 ## Run it
 
@@ -112,7 +129,7 @@ block APU kernel; no native audio loop is used.
 
 ## Validation and measurements
 
-The complete experiment suite passes **31 tests**, including the existing
+The complete experiment suite passes **34 tests**, including the existing
 CPU, PPU and APU regressions and new MMC5 register/memory tests plus a full
 resident frame test exercising DMA, NMI and guarded instruction batches.
 
