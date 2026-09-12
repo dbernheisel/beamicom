@@ -2,6 +2,7 @@ defmodule NxNes.Machine.Memory do
   @moduledoc false
   import Nx.Defn
   alias NxNes.Core.Bus
+  @journal_capacity 64
 
   defn peek(s, address) do
     a = band(address, 65535)
@@ -19,11 +20,14 @@ defmodule NxNes.Machine.Memory do
 
     ex = Nx.select(a >= 0x5C00 and s.exram_mode >= 2, s.exram[band(a, 1023)], 0)
 
-    Nx.select(
-      a < 8192,
-      Nx.as_type(s.ram[band(a, 2047)], :s32),
-      Nx.select(a >= 32768, upper, Nx.select(a >= 24576, low_ram, ex))
-    )
+    base =
+      Nx.select(
+        a < 8192,
+        Nx.as_type(s.ram[band(a, 2047)], :s32),
+        Nx.select(a >= 32768, upper, Nx.select(a >= 24576, low_ram, ex))
+      )
+
+    if a < 0x2000, do: maybe_journal_read(s, a, base), else: base
   end
 
   defn read(s, a) do
@@ -63,12 +67,102 @@ defmodule NxNes.Machine.Memory do
     end
   end
 
-  defn commit(s) do
+  deftransform commit(s) do
+    if Map.has_key?(s, :journal_count), do: commit_journal(s), else: commit_direct(s)
+  end
+
+  defn commit_journal(s) do
+    s = if s.write_count > 0, do: commit_one(s, s.write_addr0, s.write_value0), else: s
+    s = if s.write_count > 1, do: commit_one(s, s.write_addr1, s.write_value1), else: s
+    s = if s.write_count > 2, do: commit_one(s, s.write_addr2, s.write_value2), else: s
+    %{s | write_count: Nx.tensor(0, type: :s32)}
+  end
+
+  defn(journal_write(s, address, value), do: append(s, address, value))
+
+  defn commit_direct(s) do
     s = if s.write_count > 0, do: direct_write(s, s.write_addr0, s.write_value0), else: s
     s = if s.write_count > 1, do: direct_write(s, s.write_addr1, s.write_value1), else: s
     s = if s.write_count > 2, do: direct_write(s, s.write_addr2, s.write_value2), else: s
     %{s | write_count: Nx.tensor(0, type: :s32)}
   end
+
+  defn flush_journal(s) do
+    {ram, _, _, _, _} =
+      while {ram = s.ram, i = Nx.tensor(0, type: :s32), count = s.journal_count,
+             keys = s.journal_keys, values = s.journal_values},
+            i < count do
+        key = keys[i]
+        value = values[i]
+        {put(ram, key, value), i + 1, count, keys, values}
+      end
+
+    %{s | ram: ram, journal_count: Nx.tensor(0, type: :s32)}
+  end
+
+  defn(journal_room(s), do: s.journal_count <= @journal_capacity - 3)
+  defn(journal_room_for(s, needed), do: s.journal_count <= @journal_capacity - needed)
+
+  defn journal_iterations(s, writes_per_iteration) do
+    Nx.quotient(@journal_capacity - s.journal_count, writes_per_iteration)
+  end
+
+  defnp append(s, address, value) do
+    a = Nx.bitwise_and(address, Nx.tensor(65535, type: :s32))
+    key = Nx.remainder(a, Nx.tensor(2048, type: :s32))
+
+    if a < 0x2000 do
+      i = s.journal_count
+
+      %{
+        s
+        | journal_keys: put_key(s.journal_keys, i, key),
+          journal_values: put(s.journal_values, i, value),
+          journal_count: i + 1
+      }
+    else
+      s
+    end
+  end
+
+  defnp commit_one(s, address, value) do
+    if address < 0x2000, do: append(s, address, value), else: direct_write(s, address, value)
+  end
+
+  deftransform journal_read(s, key, base) do
+    if Nx.rank(key) == 0 do
+      journal_read_scalar(s, key, base)
+    else
+      shape = Nx.shape(key)
+      journal_read_vector(s, key, base, shape: shape, size: Tuple.product(shape))
+    end
+  end
+
+  defn journal_read_scalar(s, key, base) do
+    indices = Nx.iota({@journal_capacity}, type: :s32)
+    valid = indices < s.journal_count and s.journal_keys == key and key >= 0
+    latest = Nx.reduce_max(Nx.select(valid, indices + 1, 0))
+    value = Nx.as_type(s.journal_values[Nx.max(latest - 1, 0)], :s32)
+    Nx.select(latest > 0, value, base)
+  end
+
+  defn journal_read_vector(s, key, base, opts \\ []) do
+    shape = opts[:shape]
+    size = opts[:size]
+    indices = Nx.iota({@journal_capacity, 1}, type: :s32)
+    keys = Nx.reshape(s.journal_keys, {@journal_capacity, 1})
+    wanted = Nx.reshape(key, {1, size})
+    valid = indices < s.journal_count and keys == wanted and wanted >= 0
+    latest = Nx.reduce_max(Nx.select(valid, indices + 1, 0), axes: [0])
+    values = Nx.as_type(Nx.take(s.journal_values, Nx.max(latest - 1, 0)), :s32)
+    Nx.reshape(Nx.select(latest > 0, values, Nx.reshape(base, {size})), shape)
+  end
+
+  deftransformp maybe_journal_read(s, a, base) do
+    if Map.has_key?(s, :journal_count), do: journal_read(s, physical_key(s, a), base), else: base
+  end
+
+  defnp(physical_key(_s, a), do: Nx.remainder(a, Nx.tensor(2048, type: :s32)))
 
   defn direct_write(s, addr, value) do
     a = band(addr, 65535)
@@ -112,5 +206,6 @@ defmodule NxNes.Machine.Memory do
   end
 
   defnp(put(t, i, v), do: Nx.put_slice(t, [i], Nx.reshape(Nx.as_type(v, :u8), {1})))
+  defnp(put_key(t, i, v), do: Nx.put_slice(t, [i], Nx.reshape(Nx.as_type(v, :s32), {1})))
   defnp(band(a, b), do: Nx.bitwise_and(a, b))
 end

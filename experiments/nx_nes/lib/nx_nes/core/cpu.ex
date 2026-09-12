@@ -9,7 +9,7 @@ defmodule NxNes.Core.CPU do
 
     {s, count, _, _} =
       while {s, count = Nx.tensor(0, type: :s32), deadline, limit},
-            s.reason == 0 and count < limit and s.cycles < deadline do
+            s.reason == 0 and count < limit and s.cycles < deadline and journal_room(s) do
         next = step(s, deadline)
         {next, count + Nx.as_type(next.reason == 0, :s32), deadline, limit}
       end
@@ -86,6 +86,10 @@ defmodule NxNes.Core.CPU do
 
   deftransformp commit_writes(s) do
     if Map.has_key?(s, :write_count), do: NxNes.Machine.Memory.commit(s), else: s
+  end
+
+  deftransformp journal_room(s) do
+    if Map.has_key?(s, :journal_count), do: NxNes.Machine.Memory.journal_room(s), else: true
   end
 
   # kind: 1=NMI, 2=IRQ. Called at a scheduler-selected instruction boundary.

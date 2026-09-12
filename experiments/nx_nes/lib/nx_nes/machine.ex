@@ -90,7 +90,10 @@ defmodule NxNes.Machine do
             irq_enabled: scalar.(0),
             irq_pending: scalar.(0),
             fast_instructions: scalar.(0),
-            batched_instructions: scalar.(0)
+            batched_instructions: scalar.(0),
+            journal_count: scalar.(0),
+            journal_keys: Nx.broadcast(Nx.tensor(0, type: :s32), {64}),
+            journal_values: Nx.broadcast(Nx.tensor(0, type: :u8), {64})
           })
 
         {:ok, Nx.backend_copy(s, Keyword.get(opts, :backend, {EXLA.Backend, client: :host}))}
@@ -191,12 +194,18 @@ defmodule NxNes.Machine do
     {s, framebuffer, count, _} =
       while {s, framebuffer, count = Nx.tensor(0, type: :s32), target},
             s.ppu.ready < target and s.reason == 0 and count < 100_000 do
+        s =
+          if NxNes.Machine.Memory.journal_room(s),
+            do: s,
+            else: NxNes.Machine.Memory.flush_journal(s)
+
         {s, n} = scheduled_step(s, opts[:block])
         s = %{s | reason: Nx.select(s.ppu.render_count > 8, 10, s.reason)}
         {p, framebuffer} = PPU.commit_lines(s.ppu, framebuffer)
         {%{s | ppu: p}, framebuffer, count + n, target}
       end
 
+    s = NxNes.Machine.Memory.flush_journal(s)
     s = restore_framebuffer(s, framebuffer)
     s = Audio.sync(s)
     s = %{s | reason: Nx.select(count >= 100_000, 9, s.reason)}
@@ -239,12 +248,19 @@ defmodule NxNes.Machine do
          s.nmi_pending == 0 and s.nmi_edge == 0 and s.nmi_prev == line(s.ppu) and
          not (s.irq_pending != 0 and s.irq_enabled != 0) and s.apu.frame_irq == 0 and
          s.apu.irq_inhibit != 0 and
+         NxNes.Machine.Memory.journal_room_for(s, block_count(block) * 3) and
          block_valid(s, block) do
       iterations =
         Nx.select(
           block_loops(block),
           Nx.quotient(PPU.next_stop(s.ppu) - 1 - s.ppu.dot, cycles * 3),
           1
+        )
+
+      iterations =
+        Nx.min(
+          iterations,
+          NxNes.Machine.Memory.journal_iterations(s, block_count(block) * 3)
         )
 
       c = cpu_state(s)
@@ -254,7 +270,7 @@ defmodule NxNes.Machine do
           {NxNes.Core.Blocks.emit(c, block), i + 1, iterations}
         end
 
-      s = merge_cpu(s, c)
+      s = merge_cpu_fields(s, c)
       elapsed = iterations * cycles
       n = iterations * block_count(block)
 
@@ -285,7 +301,7 @@ defmodule NxNes.Machine do
 
       if n > 0 do
         elapsed = Nx.as_type(c.cycles - s.cycles, :s32)
-        s = merge_cpu(s, c)
+        s = merge_cpu_fields(s, c)
 
         s = %{
           s
@@ -318,7 +334,11 @@ defmodule NxNes.Machine do
     addresses = Nx.tensor(Enum.to_list(b.entry..(b.entry + length(b.bytes) - 1)), type: :s32)
     windows = Nx.right_shift(Nx.subtract(addresses, 32768), 13)
     rom = Nx.all(Nx.equal(Nx.bitwise_and(s.mapper.prg_ram_windows, Nx.left_shift(1, windows)), 0))
-    Nx.logical_and(rom, Nx.all(Nx.equal(Bus.peek(s, addresses), Nx.tensor(b.bytes, type: :s32))))
+
+    Nx.logical_and(
+      rom,
+      Nx.all(Nx.equal(Bus.peek_base(s, addresses), Nx.tensor(b.bytes, type: :s32)))
+    )
   end
 
   defn run_steps(s, limit) do
@@ -334,7 +354,7 @@ defmodule NxNes.Machine do
     byte = Bus.peek(s, s.pc)
     d = Decode.fetch(byte)
     {addr, crossed, c} = CPU.resolve(cpu_state(s), d[1])
-    s = merge_cpu(s, c)
+    s = merge_cpu_fields(s, c)
     cost = d[2] + crossed * d[3]
     s = %{s | opcode: byte, event_cycle: s.cycles + Nx.as_type(cost - 1, :s64)}
     s = tick_ppu(s, Nx.max(cost - 1, 0))
@@ -343,7 +363,8 @@ defmodule NxNes.Machine do
     c = cpu_state(s)
     c = %{c | io_read_ready: Nx.tensor(1, type: :s32), io_read_addr: addr, io_read_value: value}
     {c, extra} = CPU.execute(c, d[0], d[1], addr)
-    s = merge_cpu(s, c)
+    c = NxNes.Machine.Memory.commit(c)
+    s = merge_cpu_fields(s, c)
     s = if c.reason == 3, do: Bus.write(s, c.event_addr, c.event_value), else: s
 
     s =
@@ -391,7 +412,8 @@ defmodule NxNes.Machine do
 
   defnp interrupt(s, kind) do
     c = CPU.interrupt(cpu_state(s), kind, Nx.tensor(0x1000000000000000, type: :s64))
-    s = merge_cpu(s, c)
+    c = NxNes.Machine.Memory.commit(c)
+    s = merge_cpu_fields(s, c)
     s = tick_ppu(s, 7)
     flush(s, 7)
   end
@@ -465,7 +487,20 @@ defmodule NxNes.Machine do
 
   # Isolate arithmetic/CPU memory from device graphs so each device access is
   # compiled once, outside the opcode dispatch tree.
-  @cpu_fields [:a, :x, :y, :sp, :p, :pc, :cycles, :ram, :wram]
+  @cpu_fields [
+    :a,
+    :x,
+    :y,
+    :sp,
+    :p,
+    :pc,
+    :cycles,
+    :ram,
+    :wram,
+    :journal_count,
+    :journal_keys,
+    :journal_values
+  ]
   deftransformp cpu_state(s) do
     Map.merge(Map.take(s, @cpu_fields ++ [:prg, :prg_banks, :event_cycle, :opcode]), %{
       write_count: Nx.tensor(0, type: :s32),
@@ -495,9 +530,7 @@ defmodule NxNes.Machine do
     })
   end
 
-  deftransformp(merge_cpu(s, c),
-    do: Map.merge(s, Map.take(NxNes.Machine.Memory.commit(c), @cpu_fields))
-  )
+  deftransformp(merge_cpu_fields(s, c), do: Map.merge(s, Map.take(c, @cpu_fields)))
 
   defnp poll_nmi(s, line) do
     %{

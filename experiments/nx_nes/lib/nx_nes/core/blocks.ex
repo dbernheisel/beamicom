@@ -139,7 +139,10 @@ defmodule NxNes.Core.Blocks do
         v =
           if i.mode == "imm",
             do: Nx.tensor(i.operand, type: :s32),
-            else: Map.get_lazy(ram, addr, fn -> Nx.as_type(Nx.take(s.ram, addr), :s32) end)
+            else:
+              Map.get_lazy(ram, addr, fn ->
+                read_known(s, addr)
+              end)
 
         {s, ram} = operation(s, ram, addr, v, i.op)
         pc = if i.op == "JMP", do: i.operand, else: i.next
@@ -153,12 +156,24 @@ defmodule NxNes.Core.Blocks do
          }, ram}
       end)
 
-    ram =
-      Enum.reduce(Enum.sort(writes), s.ram, fn {addr, v}, ram ->
-        Nx.put_slice(ram, [addr], Nx.reshape(Nx.as_type(v, :u8), {1}))
-      end)
+    Enum.reduce(Enum.sort(writes), s, fn {addr, v}, s -> write_known(s, addr, v) end)
+  end
 
-    %{s | ram: ram}
+  deftransformp read_known(s, addr) do
+    if Map.has_key?(s, :journal_count),
+      do: NxNes.Machine.Memory.peek(s, Nx.tensor(addr, type: :s32)),
+      else: Nx.as_type(Nx.take(s.ram, addr), :s32)
+  end
+
+  deftransformp write_known(s, addr, value) do
+    if Map.has_key?(s, :journal_count) do
+      NxNes.Machine.Memory.journal_write(s, Nx.tensor(addr, type: :s32), value)
+    else
+      %{
+        s
+        | ram: Nx.put_slice(s.ram, [addr], Nx.reshape(Nx.as_type(value, :u8), {1}))
+      }
+    end
   end
 
   defp operation(s, ram, addr, v, op) do

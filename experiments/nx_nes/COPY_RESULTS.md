@@ -115,6 +115,27 @@ Set `NX_COPY_SITES=1` with the copy probe to write an additional
 `<NX_COPY_REPORT>.sites.csv` file identifying executed copy operations of at least
 1 KiB by HLO operation name. This extra instrumentation adds overhead.
 
+## Pure Nx RAM journal follow-up
+
+The CPU now keeps a 64-entry sparse write journal in the machine's existing Nx
+map container. Internal 2 KiB RAM remains unchanged while a CPU batch executes;
+reads select the newest matching journal entry, and the outer scheduler flushes
+the journal only when it fills or the frame ends. Specialized ROM blocks use the
+same read/write path. WRAM retains direct writes because journaling it increased
+8 KiB copy traffic. This implementation is entirely Elixir/Nx and adds no native
+extension or custom call.
+
+Five checkpoint frames plus one warmup remain exact against the native core for
+CPU, RAM, WRAM, mapper, PPU, framebuffer and PCM. The XLA CPU copy probe reports
+**1.0494 GB/frame**, down from **1.0845 GB/frame** by **3.24%**. Probe timing is
+**449.5 ms/frame (2.225 FPS)**, compared with the prior probe result of
+**470.6 ms/frame (2.125 FPS)**. A 4,096-entry whole-frame journal was rejected:
+linear lookup made it 0.65 FPS and raised traffic to 43.9 GB/frame. A 16-entry
+RAM journal was also worse than 64 entries at 1.0639 GB/frame and 2.123 FPS.
+
+Results: [timing](results/copy_bench_ram_journal.json),
+[copy histogram](results/copy_ram_journal.json).
+
 ## Reproduce
 
 Run from `experiments/nx_nes` using Elixir 1.20.2 / OTP 29.0.3 and `MIX_ENV=prod`.

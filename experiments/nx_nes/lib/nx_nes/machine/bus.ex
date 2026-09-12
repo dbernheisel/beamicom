@@ -3,7 +3,7 @@ defmodule NxNes.Machine.Bus do
   import Nx.Defn
   alias NxNes.Machine.{PPU, Mapper, Audio}
 
-  defn peek(s, address) do
+  defn peek_base(s, address) do
     a = band(address, 65535)
     w = Nx.clip(Nx.right_shift(a - 32768, 13), 0, 3)
     off = s.prg_banks[w] + band(a, 8191)
@@ -24,6 +24,35 @@ defmodule NxNes.Machine.Bus do
       Nx.as_type(s.ram[band(a, 2047)], :s32),
       Nx.select(a >= 32768, upper, Nx.select(a >= 24576, low_ram, ex))
     )
+  end
+
+  defn peek(s, address) do
+    a = band(address, 65535)
+    base = peek_base(s, address)
+    overlay_journal(s, a, base)
+  end
+
+  deftransformp overlay_journal(s, a, base) do
+    if Nx.rank(a) == 0,
+      do: overlay_scalar(s, a, base),
+      else: overlay_vector(s, a, base)
+  end
+
+  defnp overlay_scalar(s, a, base) do
+    if a < 0x2000,
+      do:
+        NxNes.Machine.Memory.journal_read(
+          s,
+          Nx.remainder(a, Nx.tensor(2048, type: :s32)),
+          base
+        ),
+      else: base
+  end
+
+  defnp overlay_vector(s, a, base) do
+    keys = Nx.remainder(a, Nx.tensor(2048, type: :s32))
+    values = NxNes.Machine.Memory.journal_read(s, keys, base)
+    Nx.select(a < 0x2000, values, base)
   end
 
   defn read(s, a) do
