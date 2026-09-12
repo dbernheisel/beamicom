@@ -114,9 +114,12 @@ Artifacts: `results/cpu_nestest.json`, `results/cpu_bench.json`, and
 
 ## Remaining core work
 
-The next performance investigation should specialize decoded basic blocks while
-preserving these boundaries and retaining a correctness fallback for RAM code and
-uncommon instructions. Profile that execution before broadening the rewrite.
+The first [ROM-specialized block compiler](BLOCK_CPU_RESULTS.md) now fuses
+straight-line instructions and retains the general CPU fallback. It makes the
+captured hot loop faster than native in a single resident call, but frequent
+host returns and partial-block fallback still lose to native. This is a favorable
+CPU-only loop, not full-game performance. Next investigate compiled block
+prefixes/suffixes and an internal device scheduler before broadening the rewrite.
 An integrated CPU can then drive live device control state and feed the existing
 batched PPU/APU output kernels.
 

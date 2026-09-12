@@ -349,6 +349,11 @@ defmodule NxNes.Core.Decode do
     [28, 7, 7, 0],
     [31, 7, 7, 0]
   ]
+  def metadata(byte) when byte in 0..255 do
+    [op, mode, cycles, crossed] = Enum.at(@table, byte)
+    {Enum.at(@ops, op), Enum.at(@modes, mode), cycles, crossed}
+  end
+
   def operations, do: @ops
   def modes, do: @modes
   def supported, do: for({row, code} <- Enum.with_index(@table), Enum.at(row, 2) > 0, do: code)

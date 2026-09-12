@@ -21,6 +21,10 @@ device/deadline boundaries are implemented, while native Elixir remains independ
 The general Nx interpreter is currently much slower; see the measured performance
 gate before interpreting earlier specialized CPU gains.
 
+[ROM-specialized CPU blocks](BLOCK_CPU_RESULTS.md): automatic straight-line
+fusion now has a guarded interpreter fallback. The captured loop beats native
+in a single call; frequent deadlines still expose substantial overhead.
+
 [ROCm investigation](ROCM_INVESTIGATION.md): GPU arithmetic, PPU, and block APU
 correctness probes now run through an isolated EXLA/PJRT adapter.
 
