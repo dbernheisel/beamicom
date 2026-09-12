@@ -66,23 +66,27 @@ defmodule NxNes.Machine.Mapper do
   end
 
   defn read(s, a) do
-    cond do
-      a == 0x5204 ->
-        {Nx.select(s.irq_pending != 0, 128, 0) + Nx.select(s.ppu.scanline < 240, 64, 0),
-         %{s | irq_pending: Nx.tensor(0, type: :s32)}}
+    product = s.mapper.mul_a * s.mapper.mul_b
+    exram_index = Nx.clip(a - 0x5C00, 0, 1023)
+    exram_read = a >= 0x5C00 and a <= 0x5FFF and s.ppu.exram_mode >= 2
+    irq_value = Nx.select(s.irq_pending != 0, 128, 0) + Nx.select(s.ppu.scanline < 240, 64, 0)
 
-      a == 0x5205 ->
-        {band(s.mapper.mul_a * s.mapper.mul_b, 255), s}
+    value =
+      Nx.select(
+        a == 0x5204,
+        irq_value,
+        Nx.select(
+          a == 0x5205,
+          band(product, 255),
+          Nx.select(
+            a == 0x5206,
+            band(Nx.right_shift(product, 8), 255),
+            Nx.select(exram_read, s.ppu.exram[exram_index], 0)
+          )
+        )
+      )
 
-      a == 0x5206 ->
-        {band(Nx.right_shift(s.mapper.mul_a * s.mapper.mul_b, 8), 255), s}
-
-      a >= 0x5C00 and a <= 0x5FFF and s.ppu.exram_mode >= 2 ->
-        {s.ppu.exram[a - 0x5C00], s}
-
-      true ->
-        {Nx.tensor(0, type: :s32), s}
-    end
+    {value, %{s | irq_pending: Nx.select(a == 0x5204, 0, s.irq_pending)}}
   end
 
   defn prg(s) do

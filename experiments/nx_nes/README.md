@@ -21,9 +21,10 @@ Nx loop, or 2.84x faster than Elixir, under default XLA scheduling.
 [Resident MMC5 frame runner](MACHINE_RESULTS.md): Castlevania III now executes
 from reset with CPU, banking, PPU, DMA, interrupts and audio inside Nx. Native
 Elixir remains independent. See the full-workload validation and timing there.
-Branchless CPU/APU/mapper dispatch plus targeted state donation completes the
-902-frame cold-boot workload exactly in 313.582 seconds (2.876 FPS), a 25.1%
-time reduction from the previous optimized resident core.
+Branchless CPU/address/device dispatch, branchless scheduler gating and targeted
+state donation complete the 902-frame cold-boot workload exactly in 298.434
+seconds (3.022 FPS), a 28.7% time reduction from the previous optimized resident
+core. The generic graph now outperforms the guarded hot-block variant.
 
 [Resident CPU/bus milestone](CORE_STATUS.md): full nestest parity and transactional
 device/deadline boundaries are implemented, while native Elixir remains independent.

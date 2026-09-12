@@ -99,7 +99,7 @@ defmodule NxNes.Core.CPU do
     d = Decode.fetch(byte)
     operation = d[0]
     addressing = d[1]
-    {addr, crossed, s} = resolve(original, addressing)
+    {addr, crossed, s} = resolve_branchless(original, addressing)
     cost = d[2] + crossed * d[3]
     s = %{s | opcode: byte, event_cycle: original.cycles + Nx.as_type(cost - 1, :s64)}
     {s, extra} = execute_branchless(s, operation, addressing, addr)
@@ -282,6 +282,56 @@ defmodule NxNes.Core.CPU do
           {band(nextpc + Nx.select(lo >= 128, lo - 256, lo), 65535), nextpc,
            Nx.tensor(0, type: :s32)}
       end
+
+    {addr, crossed, %{s | pc: nextpc}}
+  end
+
+  defn resolve_branchless(s, m) do
+    pc = band(s.pc + 1, 65535)
+    lo = Bus.peek(s, pc)
+    next1 = band(pc + 1, 65535)
+    next2 = band(pc + 2, 65535)
+    absolute = bor(lo, shl(Bus.peek(s, next1), 8))
+    ab_index = Nx.select(m == mode(:abx), s.x, s.y)
+    ab_addr = band(absolute + ab_index, 65535)
+
+    indirect =
+      bor(
+        Bus.peek(s, absolute),
+        shl(Bus.peek(s, bor(band(absolute, 65280), band(absolute + 1, 255))), 8)
+      )
+
+    izx_base = band(lo + s.x, 255)
+    izx = bor(Bus.peek(s, izx_base), shl(Bus.peek(s, band(izx_base + 1, 255)), 8))
+    izy_base = bor(Bus.peek(s, lo), shl(Bus.peek(s, band(lo + 1, 255)), 8))
+    izy = band(izy_base + s.y, 65535)
+    relative = band(next1 + Nx.select(lo >= 128, lo - 256, lo), 65535)
+
+    addr = Nx.tensor(0, type: :s32)
+    addr = Nx.select(m == mode(:imm), pc, addr)
+    addr = Nx.select(m == mode(:zp), lo, addr)
+    addr = Nx.select(m == mode(:zpx), band(lo + s.x, 255), addr)
+    addr = Nx.select(m == mode(:zpy), band(lo + s.y, 255), addr)
+    addr = Nx.select(m == mode(:abs), absolute, addr)
+    addr = Nx.select(m == mode(:abx) or m == mode(:aby), ab_addr, addr)
+    addr = Nx.select(m == mode(:ind), indirect, addr)
+    addr = Nx.select(m == mode(:izx), izx, addr)
+    addr = Nx.select(m == mode(:izy), izy, addr)
+    addr = Nx.select(m == mode(:rel), relative, addr)
+
+    nextpc =
+      Nx.select(
+        m == mode(:abs) or m == mode(:abx) or m == mode(:aby) or m == mode(:ind),
+        next2,
+        Nx.select(m == mode(:imp) or m == mode(:acc), pc, next1)
+      )
+
+    crossed =
+      Nx.select(
+        m == mode(:abx) or m == mode(:aby),
+        cross(absolute, ab_addr),
+        Nx.select(m == mode(:izy), cross(izy_base, izy), 0)
+      )
 
     {addr, crossed, %{s | pc: nextpc}}
   end
@@ -1033,9 +1083,9 @@ defmodule NxNes.Core.CPU do
   defn masked_queue_write(s, enabled, address, value) do
     a = band(address, 65535)
     v = band(value, 255)
-    device = a >= 0x2000 and a < 0x6000
-    accepted = enabled and not device
-    barrier = enabled and device and s.reason == 0
+    external = a >= 0x2000 and a < 0x6000
+    accepted = enabled and not external
+    barrier = enabled and external and s.reason == 0
     n = s.write_count
 
     %{

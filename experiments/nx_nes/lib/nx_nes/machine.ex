@@ -322,30 +322,32 @@ defmodule NxNes.Machine do
   defn batch_or_step(s) do
     available = Nx.quotient(PPU.next_stop(s.ppu) - 1 - s.ppu.dot, 3)
 
-    if available >= 2 and s.nmi_pending == 0 and s.nmi_edge == 0 and s.nmi_prev == line(s.ppu) and
-         not (s.irq_pending != 0 and s.irq_enabled != 0) and s.apu.frame_irq == 0 and
-         s.apu.irq_inhibit != 0 do
-      {c, n} =
-        CPU.run(
-          cpu_state(s),
-          s.cycles + Nx.as_type(available, :s64),
-          Nx.tensor(100_000, type: :s32)
-        )
+    safe =
+      available >= 2 and s.nmi_pending == 0 and s.nmi_edge == 0 and
+        s.nmi_prev == line(s.ppu) and
+        not (s.irq_pending != 0 and s.irq_enabled != 0) and s.apu.frame_irq == 0 and
+        s.apu.irq_inhibit != 0
 
-      if n > 0 do
-        elapsed = Nx.as_type(c.cycles - s.cycles, :s32)
-        s = merge_cpu_fields(s, c)
+    deadline = s.cycles + Nx.as_type(Nx.select(safe, available, 0), :s64)
 
-        s = %{
-          s
-          | ppu: %{s.ppu | dot: s.ppu.dot + elapsed * 3},
-            batched_instructions: s.batched_instructions + n
-        }
+    {c, n} =
+      CPU.run(
+        cpu_state(s),
+        deadline,
+        Nx.tensor(100_000, type: :s32)
+      )
 
-        {flush(s, elapsed), n}
-      else
-        {step(s), Nx.tensor(1, type: :s32)}
-      end
+    if n > 0 do
+      elapsed = Nx.as_type(c.cycles - s.cycles, :s32)
+      s = merge_cpu_fields(s, c)
+
+      s = %{
+        s
+        | ppu: %{s.ppu | dot: s.ppu.dot + elapsed * 3},
+          batched_instructions: s.batched_instructions + n
+      }
+
+      {flush(s, elapsed), n}
     else
       {step(s), Nx.tensor(1, type: :s32)}
     end
@@ -386,7 +388,7 @@ defmodule NxNes.Machine do
   defn step(s) do
     byte = Bus.peek(s, s.pc)
     d = Decode.fetch(byte)
-    {addr, crossed, c} = CPU.resolve(cpu_state(s), d[1])
+    {addr, crossed, c} = CPU.resolve_branchless(cpu_state(s), d[1])
     s = merge_cpu_fields(s, c)
     cost = d[2] + crossed * d[3]
     s = %{s | opcode: byte, event_cycle: s.cycles + Nx.as_type(cost - 1, :s64)}
@@ -395,23 +397,32 @@ defmodule NxNes.Machine do
     {value, s} = if CPU.reads_operand(d[0], d[1]), do: Bus.read(s, addr), else: {s.a, s}
     c = cpu_state(s)
     c = %{c | io_read_ready: Nx.tensor(1, type: :s32), io_read_addr: addr, io_read_value: value}
-    {c, extra} = CPU.execute(c, d[0], d[1], addr)
+    # The timed path has already performed the potentially side-effecting bus
+    # read and exposes it through io_read_value. Use the same branchless opcode
+    # dispatcher as CPU batches instead of rebuilding the conditional handler
+    # tree at every device boundary.
+    {c, extra} = CPU.execute_branchless(c, d[0], d[1], addr)
     c = NxNes.Machine.Memory.commit(c)
     s = merge_cpu_fields(s, c)
     s = if c.reason == 3, do: Bus.write(s, c.event_addr, c.event_value), else: s
 
-    s =
-      if addr >= 0x2000 and addr <= 0x3FFF and (band(addr, 7) == 0 or band(addr, 7) == 2) do
-        s = poll_nmi(s, line(s.ppu))
+    ppu_poll = addr >= 0x2000 and addr <= 0x3FFF and (band(addr, 7) == 0 or band(addr, 7) == 2)
+    nmi_line = line(s.ppu)
+    polled_pending = Nx.as_type(s.nmi_pending != 0 or s.nmi_edge != 0, :s32)
+    polled_edge = Nx.as_type(nmi_line != 0 and s.nmi_prev == 0, :s32)
 
-        %{
-          s
-          | nmi_pending: Nx.select(s.ppu.nmi_suppress != 0, 0, s.nmi_pending),
-            ppu: %{s.ppu | nmi_suppress: Nx.tensor(0, type: :s32)}
-        }
-      else
-        s
-      end
+    s = %{
+      s
+      | nmi_pending:
+          Nx.select(
+            ppu_poll,
+            Nx.select(s.ppu.nmi_suppress != 0, 0, polled_pending),
+            s.nmi_pending
+          ),
+        nmi_edge: Nx.select(ppu_poll, polled_edge, s.nmi_edge),
+        nmi_prev: Nx.select(ppu_poll, nmi_line, s.nmi_prev),
+        ppu: %{s.ppu | nmi_suppress: Nx.select(ppu_poll, 0, s.ppu.nmi_suppress)}
+    }
 
     s = tick_ppu(s, 1 + extra)
     s = flush(s, cost + extra)
@@ -453,23 +464,24 @@ defmodule NxNes.Machine do
 
   defn flush(s, cycles) do
     p = s.ppu
+    tick = p.irq_ticks != 0
 
-    s =
-      if p.irq_ticks != 0 do
-        %{
-          s
-          | mapper: %{s.mapper | irq_counter: p.irq_scanline},
-            irq_pending:
-              Nx.as_type(
-                s.irq_pending != 0 or
-                  (p.irq_scanline == s.mapper.irq_latch and s.mapper.irq_latch != 0),
-                :s32
-              ),
-            ppu: %{p | irq_ticks: Nx.tensor(0, type: :s32)}
-        }
-      else
-        s
-      end
+    next_irq =
+      Nx.as_type(
+        s.irq_pending != 0 or
+          (p.irq_scanline == s.mapper.irq_latch and s.mapper.irq_latch != 0),
+        :s32
+      )
+
+    s = %{
+      s
+      | mapper: %{
+          s.mapper
+          | irq_counter: Nx.select(tick, p.irq_scanline, s.mapper.irq_counter)
+        },
+        irq_pending: Nx.select(tick, next_irq, s.irq_pending),
+        ppu: %{p | irq_ticks: Nx.select(tick, 0, p.irq_ticks)}
+    }
 
     Audio.tick(s, cycles)
   end

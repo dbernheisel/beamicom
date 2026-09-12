@@ -8,6 +8,7 @@ alias NxNes.Machine.Reference
       output: :string,
       entry: :integer,
       start_frame: :integer,
+      block: :boolean,
       no_block: :boolean
     ]
   )
@@ -20,7 +21,11 @@ IO.puts("Compiling resident MMC5 frame runner")
 
 {compile_us, fun} =
   :timer.tc(fn ->
-    compile_opts = if opts[:no_block], do: [], else: [entry: Keyword.get(opts, :entry, 0xE047)]
+    compile_opts =
+      if opts[:block] == true and opts[:no_block] != true,
+        do: [entry: Keyword.get(opts, :entry, 0xE047)],
+        else: []
+
     Machine.compile(initial, media, compile_opts)
   end)
 
