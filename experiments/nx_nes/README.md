@@ -16,6 +16,10 @@ For the measured cause of the Nx APU slowdown, see [Nx APU runtime profile](NX_A
 matches the full Castlevania capture and runs 15.66x faster than the matched scalar
 Nx loop, or 2.84x faster than Elixir, under default XLA scheduling.
 
+[Resident MMC5 frame runner](MACHINE_RESULTS.md): Castlevania III now executes
+from reset with CPU, banking, PPU, DMA, interrupts and audio inside Nx. Native
+Elixir remains independent. See the full-workload validation and timing there.
+
 [Resident CPU/bus milestone](CORE_STATUS.md): full nestest parity and transactional
 device/deadline boundaries are implemented, while native Elixir remains independent.
 The general Nx interpreter is currently much slower; see the measured performance
@@ -35,11 +39,12 @@ mapper state, PPU and APU state in EXLA CPU buffers. Host calls supply controlle
 input and receive completed framebuffer/audio output. Internal state stays on
 the backend between calls. Loading, debugging and saving are explicit exceptions.
 
-**This is a feasibility experiment, not a playable Nx NES core.** The baseline
+**This is an experimental Nx NES core, currently much slower than real time.** The baseline
 and function profile cover the complete existing emulator. The Nx measurement
 initially covered one real, validated CPU loop, with devices and interrupts excluded.
 The subsequent general CPU/bus prototype and audio/graphics experiments are linked above.
-No full-game Nx performance number exists yet.
+The live MMC5 runner now provides full-ROM correctness and performance measurement.
+Its API is separate from the production application UI.
 
 ## Measurements
 

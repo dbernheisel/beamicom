@@ -1,5 +1,8 @@
 # Resident Nx CPU/bus milestone
 
+For the newer live MMC5 integration, see [the resident frame runner](MACHINE_RESULTS.md).
+This document describes the earlier isolated CPU/bus milestone and its benchmark.
+
 The optional Nx CPU/bus prototype is implemented separately from the native
 Elixir emulator. It passes the complete 8,991-row nestest trace and differential
 instruction tests, but the general tensor interpreter is substantially slower
@@ -123,10 +126,10 @@ prefixes/suffixes and an internal device scheduler before broadening the rewrite
 An integrated CPU can then drive live device control state and feed the existing
 batched PPU/APU output kernels.
 
-PPU registers/timing, vblank/NMI edge behavior, OAM/DMC DMA, live APU status/IRQs,
-mapper banking beyond NROM, MMC5, save states, and frame publication are not yet
-implemented in `NxNes.Core`. CHR storage is resident but no PPU is driven by this
-prototype. `run_frame` is intentionally not exposed as a working emulator API.
+The isolated `NxNes.Core` API remains CPU-only. The separate `NxNes.Machine`
+now integrates MMC5, live PPU/APU control, NMI/IRQ handling, OAM DMA and frame
+publication. DMC DMA, other mapper integration and a portable save-state format
+remain outstanding. See its dedicated results and API before using a frame runner.
 
 The separate [ROCm investigation](ROCM_INVESTIGATION.md) successfully runs PPU and
 block APU correctness smoke tests on Radeon 8060S through an isolated patched

@@ -101,7 +101,7 @@ defmodule NxNes.Core.CPU do
     end
   end
 
-  defnp resolve(s, m) do
+  defn resolve(s, m) do
     pc = band(s.pc + 1, 65535)
     lo = Bus.peek(s, pc)
     absolute = bor(lo, shl(Bus.peek(s, band(pc + 1, 65535)), 8))
@@ -160,17 +160,20 @@ defmodule NxNes.Core.CPU do
     {addr, crossed, %{s | pc: nextpc}}
   end
 
-  defnp execute(s, o, m, addr) do
+  defn reads_operand(o, m) do
+    o == op(:LDA) or o == op(:LDX) or o == op(:LDY) or o == op(:AND) or o == op(:ORA) or
+      o == op(:EOR) or o == op(:BIT) or
+      o == op(:ADC) or o == op(:SBC) or o == op(:CMP) or o == op(:CPX) or o == op(:CPY) or
+      o == op(:INC) or o == op(:DEC) or
+      o == op(:LAX) or o == op(:DCP) or o == op(:ISB) or o == op(:SLO) or o == op(:RLA) or
+      o == op(:SRE) or o == op(:RRA) or
+      o == op(:ANC) or o == op(:ALR) or o == op(:ARR) or o == op(:LXA) or o == op(:SBX) or
+      ((o == op(:ASL) or o == op(:LSR) or o == op(:ROL) or o == op(:ROR)) and m != mode(:acc))
+  end
+
+  defn execute(s, o, m, addr) do
     # Operand reads occur only for operations that really read memory.
-    reads =
-      o == op(:LDA) or o == op(:LDX) or o == op(:LDY) or o == op(:AND) or o == op(:ORA) or
-        o == op(:EOR) or o == op(:BIT) or
-        o == op(:ADC) or o == op(:SBC) or o == op(:CMP) or o == op(:CPX) or o == op(:CPY) or
-        o == op(:INC) or o == op(:DEC) or
-        o == op(:LAX) or o == op(:DCP) or o == op(:ISB) or o == op(:SLO) or o == op(:RLA) or
-        o == op(:SRE) or o == op(:RRA) or
-        o == op(:ANC) or o == op(:ALR) or o == op(:ARR) or o == op(:LXA) or o == op(:SBX) or
-        ((o == op(:ASL) or o == op(:LSR) or o == op(:ROL) or o == op(:ROR)) and m != mode(:acc))
+    reads = reads_operand(o, m)
 
     {v, s} = if reads, do: Bus.read(s, addr), else: {s.a, s}
 

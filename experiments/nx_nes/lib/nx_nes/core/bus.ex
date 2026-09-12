@@ -2,7 +2,31 @@ defmodule NxNes.Core.Bus do
   @moduledoc "Resident NROM CPU memory and controllers. Device accesses produce explicit transactional barriers."
   import Nx.Defn
 
-  defn peek(s, addr) do
+  deftransform(peek(s, addr),
+    do:
+      if(Map.has_key?(s, :prg_banks),
+        do: NxNes.Machine.Memory.peek(s, addr),
+        else: nrom_peek(s, addr)
+      )
+  )
+
+  deftransform(read(s, addr),
+    do:
+      if(Map.has_key?(s, :prg_banks),
+        do: NxNes.Machine.Memory.read(s, addr),
+        else: nrom_read(s, addr)
+      )
+  )
+
+  deftransform(write(s, addr, value),
+    do:
+      if(Map.has_key?(s, :prg_banks),
+        do: NxNes.Machine.Memory.write(s, addr, value),
+        else: nrom_write(s, addr, value)
+      )
+  )
+
+  defn nrom_peek(s, addr) do
     a = Nx.bitwise_and(addr, 65535)
     ram = Nx.as_type(Nx.take(s.ram, Nx.bitwise_and(a, 2047)), :s32)
     rom = Nx.as_type(Nx.take(s.prg, Nx.bitwise_and(a - 32768, s.prg_mask)), :s32)
@@ -10,7 +34,7 @@ defmodule NxNes.Core.Bus do
     Nx.select(a < 8192, ram, Nx.select(a >= 32768, rom, Nx.select(a >= 24576, wram, 0)))
   end
 
-  defn read(s, addr) do
+  defn nrom_read(s, addr) do
     cond do
       s.io_read_ready != 0 and s.io_read_addr == addr ->
         {s.io_read_value, s}
@@ -31,7 +55,7 @@ defmodule NxNes.Core.Bus do
     end
   end
 
-  defn write(s, addr, value) do
+  defn nrom_write(s, addr, value) do
     a = Nx.bitwise_and(addr, 65535)
     v = Nx.bitwise_and(value, 255)
 

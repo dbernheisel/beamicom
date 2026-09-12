@@ -130,7 +130,8 @@ defmodule NxNes.Core.Blocks do
 
   # These are tracing-time Elixir transformations, not runtime host callbacks.
   # Keep known RAM addresses in an SSA map, then emit only their final stores.
-  deftransformp emit(s, block) do
+  @doc false
+  deftransform emit(s, block) do
     {s, writes} =
       Enum.reduce(block.instructions, {s, %{}}, fn i, {s, ram} ->
         addr = Bitwise.band(i.operand, 2047)
