@@ -1,0 +1,59 @@
+{
+  "scope": "64 continuous APU intervals seeded from Castlevania; no intervening register writes; PCM export included",
+  "nx": [
+    {
+      "variant": "scalar_state",
+      "compile_ms": 625.507,
+      "wall_us": [
+        80336,
+        80172,
+        79450,
+        81502,
+        80598,
+        81543,
+        80975
+      ]
+    },
+    {
+      "variant": "packed_state",
+      "compile_ms": 351.141,
+      "wall_us": [
+        88267,
+        88370,
+        88937,
+        89027,
+        89703,
+        88945,
+        90007
+      ]
+    }
+  ],
+  "xla_flags": "",
+  "timing_method": "7 rounds, rotating implementation order after compilation and warmup",
+  "intervals": 64,
+  "cycles_per_interval": 29830,
+  "reference_us": [
+    201069,
+    63650,
+    82434,
+    64160,
+    63019,
+    63308,
+    65033
+  ],
+  "native_us": [
+    1426,
+    1388,
+    1443,
+    1423,
+    1404,
+    1391,
+    1747
+  ],
+  "native_captured_events_verified": 9235,
+  "native_state_bytes": 896,
+  "pcm_sha256": "3364b2f92e1f3b79d2ebd9fc769b2bfbb552fdb488fd0533848afd5e9603dc7b",
+  "correctness": "PCM exact, integer state exact, floating state within 1e-12",
+  "diagnostic_sequential_thunks": true,
+  "diagnostic_preload": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3:/home/dbern/beamicom/experiments/nx_nes/tmp/sequential_thunks.so"
+}

@@ -1,0 +1,30 @@
+{
+  "input": "none; cold boot",
+  "otp": "29",
+  "schedulers": 32,
+  "elixir": "1.20.2",
+  "mapper": 5,
+  "emulated_seconds": 15.008619140482008,
+  "frames": 902,
+  "rom_sha256": "085ec6395681c7ebfda19c2986069c21a3d27738cc61ada76249de70a07ed7d3",
+  "runs": [
+    {
+      "reductions": 844499678,
+      "audio_samples": 661818,
+      "audio_sha256": "0aaab7e4ee5edbab8579849e9433602144130e5bec1d348660fa07e7730d3a2b",
+      "core_ms": 10030.572,
+      "cpu_cycles": 26859520,
+      "fps": 89.92508104223766,
+      "max_frame_ms": 15.035,
+      "mean_frame_ms": 11.120368070953436,
+      "over_budget_frames": 0,
+      "p50_frame_ms": 11.125,
+      "p95_frame_ms": 11.749,
+      "p99_frame_ms": 11.964,
+      "realtime_multiple": 1.4962874640132195,
+      "state_sha256": "9f5a44901ac3cafc096e9702289a5fe9c9222f6821c57a57fd374ac8ee4e50d0",
+      "video_sha256": "80402c48f0b9cd424b23e9ce2c8725cefa0ba38787543f9b4d805ea98300d3d6",
+      "wall_ms": 10058.186
+    }
+  ]
+}
