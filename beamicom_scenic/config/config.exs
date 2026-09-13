@@ -1,5 +1,18 @@
 import Config
 
+# Opt the NES and Game Boy render boundaries into their EXLA implementations at compile
+# time. Keep this environment variable set for every Mix invocation so Mix's
+# compile-env validation sees the same configuration at build and launch.
+if System.get_env("BEAMICOM_SCENIC_NX") in ["1", "true", "yes", "on"] do
+  config :beamicom_nes,
+    ppu_renderer: Beamicom.NES.Nx.PPURenderer,
+    apu_renderer: Beamicom.NES.Nx.APUBlockRenderer
+
+  config :beamicom_gbc,
+    ppu_renderer: Beamicom.GB.Nx.PPURenderer,
+    apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+end
+
 # Static asset library (fonts/images) — needed by Scenic text/button components.
 config :scenic, :assets, module: Beamicom.Scenic.Assets
 
