@@ -34,6 +34,19 @@ facade over the system-neutral `Beamicom.Host.Output`:
   little-endian PCM and pushed as `{:audio, sample_count, pcm}`. The binary is
   reference-counted across subscribers, and audio chunks are never dropped.
 
+APU waveform rendering has a backend-neutral frame-block boundary. The default
+`:native` mode emits samples inline. The dependency-free deferred Elixir
+implementation uses the same timestamped operations and DMC-level stream as the
+optional Nx implementation:
+
+```elixir
+Application.put_env(:beamicom, :apu_renderer, Beamicom.NES.APUBlockRenderer)
+```
+
+Both renderers implement `Beamicom.NES.APURenderer`; the core has no Nx or EXLA
+dependency. CPU-visible length status, DMC DMA, and APU IRQs remain in the live
+native control state for every backend.
+
 `Beamicom.NES.Runtime` is the emulation loop (a `GenServer`): it paces frames
 from a fixed monotonic epoch so timing error doesn't accumulate, and publishes
 fire-and-forget. Sinks subscribe via `Beamicom.NES.Output.subscribe_video/0`,

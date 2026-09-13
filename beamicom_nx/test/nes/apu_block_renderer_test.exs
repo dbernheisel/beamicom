@@ -50,6 +50,11 @@ defmodule BeamicomNx.NES.APUBlockRendererTest do
     {:ok, native} = Beamicom.NES.System.load(media)
     {native, native_pcm} = run_frames(native, 4, [])
 
+    Application.put_env(:beamicom, :apu_renderer, Beamicom.NES.APUBlockRenderer)
+    {:ok, elixir_block} = Beamicom.NES.System.load(media)
+    {_elixir_block, elixir_pcm} = run_frames(elixir_block, 4, [])
+    assert elixir_pcm == native_pcm
+
     Application.put_env(:beamicom, :apu_renderer, APUBlockRenderer)
     {:ok, accelerated} = Beamicom.NES.System.load(media)
     {accelerated, first_pcm} = run_frames(accelerated, 2, [])

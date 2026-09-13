@@ -98,6 +98,9 @@ defmodule Beamicom.NES.APU do
             # each audio sample. DMA/status/IRQ timing still advances natively.
             dmc_samples: [],
             dmc_silent_samples: 0,
+            # Deferred renderers can supply the CPU-timed DMC DAC stream while a
+            # private APU state synthesizes the remaining channels.
+            external_dmc_samples: nil,
             # The DMC IRQ line is kept top-level (not in `dmc`) so `irq?/1` — polled
             # every CPU instruction — stays a single read.
             dmc_irq: false,
@@ -117,6 +120,16 @@ defmodule Beamicom.NES.APU do
 
   @doc false
   def set_output(apu, enabled) when is_boolean(enabled), do: %{apu | output_enabled: enabled}
+
+  @doc false
+  def set_external_dmc_samples(apu, samples) when is_list(samples),
+    do: %{apu | external_dmc_samples: samples}
+
+  @doc false
+  def external_dmc_consumed?(apu), do: apu.external_dmc_samples == []
+
+  @doc false
+  def clear_external_dmc(apu), do: %{apu | external_dmc_samples: nil}
 
   @doc "Select a Sunsoft 5B internal audio register ($C000-$DFFF)."
   def sunsoft5b_select(apu, value) do
@@ -646,6 +659,7 @@ defmodule Beamicom.NES.APU do
 
   defp emit_sample(%{sample_acc: acc} = apu) when acc >= 1.0 do
     {apu, y} = filter(apu, mix(apu))
+    apu = consume_external_dmc(apu)
     %{apu | sample_acc: acc - 1.0, samples: [clamp(round(y * 32767)) | apu.samples]}
   end
 
@@ -816,8 +830,14 @@ defmodule Beamicom.NES.APU do
     pulse_out + elem(@tnd_table, tnd) + expansion
   end
 
+  defp dmc_level(%{external_dmc_samples: [level | _]}), do: level
   defp dmc_level(%{dmc: %DMC{output: o}}), do: o
   defp dmc_level(_), do: 0
+
+  defp consume_external_dmc(%{external_dmc_samples: [_ | rest]} = apu),
+    do: %{apu | external_dmc_samples: rest}
+
+  defp consume_external_dmc(apu), do: apu
 
   # NES RCA output circuit: a DC-blocking first-order high-pass (90Hz) then a
   # first-order low-pass, applied per 44.1kHz sample. The low-pass sits at 8kHz

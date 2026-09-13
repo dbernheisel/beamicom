@@ -23,7 +23,14 @@ defmodule BeamicomNx.NES.APU do
 
     s
     |> Map.from_struct()
-    |> Map.drop([:samples, :dmc_samples, :dmc_silent_samples, :dmc, :sunsoft5b])
+    |> Map.drop([
+      :samples,
+      :dmc_samples,
+      :dmc_silent_samples,
+      :external_dmc_samples,
+      :dmc,
+      :sunsoft5b
+    ])
     |> pack_map()
   end
 

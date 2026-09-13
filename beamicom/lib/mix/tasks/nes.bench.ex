@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Nes.Bench do
   @shortdoc "Measure a deterministic, uncapped NES workload (audio and video enabled)"
   @moduledoc """
-  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--audio-renderer native|nx_block] [--rgb-consumers 0] [--output result.json] [--profile]
+  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--audio-renderer native|elixir_block|nx_block] [--rgb-consumers 0] [--output result.json] [--profile]
 
   Each run cold-boots with no buttons pressed. One untimed run warms code before
   measurements. Hashing is outside the per-frame timer, but included in wall time.
@@ -52,8 +52,9 @@ defmodule Mix.Tasks.Nes.Bench do
     audio_renderer_module =
       case audio_renderer do
         "native" -> :native
+        "elixir_block" -> Beamicom.NES.APUBlockRenderer
         "nx_block" -> BeamicomNx.NES.APUBlockRenderer
-        _ -> Mix.raise("audio-renderer must be native or nx_block")
+        _ -> Mix.raise("audio-renderer must be native, elixir_block, or nx_block")
       end
 
     if audio_renderer_module != :native and not Code.ensure_loaded?(audio_renderer_module),

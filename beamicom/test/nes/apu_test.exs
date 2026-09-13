@@ -222,4 +222,45 @@ defmodule Beamicom.NES.APUTest do
     assert bus.apu.pending == 0
     assert bus.apu.seq_cycle == 37
   end
+
+  test "dependency-free block renderer is sample-exact with DMC" do
+    sample = :binary.copy(<<0xA5>>, 17)
+
+    events = [
+      {0, 0x4010, 0x0F},
+      {0, 0x4011, 48},
+      {0, 0x4000, 0xBF},
+      {0, 0x4002, 0xFD},
+      {0, 0x4003, 0x08},
+      {0, 0x4015, 0x11}
+    ]
+
+    initial = APU.new()
+    reference = apply_dmc_events(initial, events, sample) |> APU.tick(20_000)
+    {expected_count, expected_pcm, _reference} = APU.take_pcm(reference)
+
+    control =
+      initial
+      |> APU.set_output(false)
+      |> apply_dmc_events(events, sample)
+      |> APU.tick(20_000)
+      |> APU.flush()
+
+    {dmc_levels, _control} = APU.take_dmc_samples(control)
+    renderer = Beamicom.NES.APUBlockRenderer
+    {count, pcm, _state} = renderer.render(renderer.prepare(initial), events, 20_000, dmc_levels)
+
+    assert count == expected_count
+    assert pcm == expected_pcm
+  end
+
+  defp apply_dmc_events(apu, events, sample) do
+    Enum.reduce(events, apu, fn {_cycle, addr, value}, apu ->
+      apu = APU.write(apu, addr, value)
+
+      if addr == 0x4015 and Bitwise.band(value, 0x10) != 0,
+        do: APU.dmc_start(apu, sample),
+        else: apu
+    end)
+  end
 end

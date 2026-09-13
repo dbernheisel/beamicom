@@ -26,6 +26,11 @@ The timestamped block APU is selected independently:
 Application.put_env(:beamicom, :apu_renderer, BeamicomNx.NES.APUBlockRenderer)
 ```
 
+It implements the same `Beamicom.NES.APURenderer` callbacks as the core's pure
+Elixir `Beamicom.NES.APUBlockRenderer`. Switching implementations changes only
+the configured module; event capture, DMC timing, frame output, and save-state
+handling are shared.
+
 ```console
 mix nes.bench ../beamicom/roms/castlevania3.nes --seconds 15 \
   --renderer nx_atlas --audio-renderer nx_block --rgb-consumers 3
@@ -72,3 +77,9 @@ median **107.94 FPS** (106.74–110.40). That is 36.5% faster than the 79.09 FPS
 atlas/native-audio path and 62.2% faster than the 66.54 FPS fully native
 three-consumer workload. The renderer also survives save-state snapshot and
 restore with its resident state reconstructed on EXLA.
+
+The dependency-free Elixir block renderer produces the same Castlevania III PCM
+and framebuffer hashes. With a native PPU it reaches 65.69 FPS versus 66.54 FPS
+for inline audio, a 1.3% boundary cost. Paired with the deferred Nx atlas PPU it
+reaches 102.52 FPS because Elixir audio replay overlaps the PPU program. The Nx
+APU raises that to the 107.94 FPS median above through vector waveform synthesis.

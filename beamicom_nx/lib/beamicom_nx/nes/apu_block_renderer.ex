@@ -7,19 +7,24 @@ defmodule BeamicomNx.NES.APUBlockRenderer do
   """
 
   alias BeamicomNx.NES.{APU, BlockAPU}
+  @behaviour Beamicom.NES.APURenderer
 
   @capacity 128
   @compiled_key {__MODULE__, :compiled}
 
+  @impl true
   def prepare(native_apu) do
     native_apu
     |> APU.pack()
     |> Nx.backend_copy({EXLA.Backend, client: :host})
   end
 
+  @impl true
   def snapshot(state), do: Nx.backend_copy(state, Nx.BinaryBackend)
+  @impl true
   def restore(state), do: Nx.backend_copy(state, {EXLA.Backend, client: :host})
 
+  @impl true
   def render(state, events, cycles, dmc_samples) do
     if length(dmc_samples) > 1024, do: raise("DMC sample-level block exceeds capacity")
 
@@ -46,6 +51,7 @@ defmodule BeamicomNx.NES.APUBlockRenderer do
     {count, bytes, state}
   end
 
+  @impl true
   def supports_event?(addr, _value),
     do: addr in 0x4000..0x4013 or addr in [0x4015, 0x4017] or addr in 0x5000..0x5015
 
