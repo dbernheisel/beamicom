@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Nes.Bench do
   @shortdoc "Measure a deterministic, uncapped NES workload (audio and video enabled)"
   @moduledoc """
-  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx] [--output result.json] [--profile]
+  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx] [--rgb-consumers 0] [--output result.json] [--profile]
 
   Each run cold-boots with no buttons pressed. One untimed run warms code before
   measurements. Hashing is outside the per-frame timer, but included in wall time.
@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Nes.Bench do
           repeats: :integer,
           output: :string,
           renderer: :string,
+          rgb_consumers: :integer,
           profile: :boolean,
           profile_only: :boolean
         ]
@@ -38,15 +39,19 @@ defmodule Mix.Tasks.Nes.Bench do
     media = File.read!(path)
     seconds = Keyword.get(opts, :seconds, 15)
     repeats = Keyword.get(opts, :repeats, 3)
-    if seconds < 1 or repeats < 1, do: Mix.raise("seconds and repeats must be positive")
+    rgb_consumers = Keyword.get(opts, :rgb_consumers, 0)
+
+    if seconds < 1 or repeats < 1 or rgb_consumers < 0,
+      do: Mix.raise("seconds and repeats must be positive; rgb-consumers cannot be negative")
+
     frames = ceil(seconds * 60.0988)
 
     if opts[:profile_only] do
-      profile(media, frames)
+      profile(media, frames, rgb_consumers)
     else
       {:ok, cart} = Beamicom.NES.Cart.parse(media)
-      execute(media, frames)
-      runs = for _ <- 1..repeats, do: execute(media, frames)
+      execute(media, frames, rgb_consumers)
+      runs = for _ <- 1..repeats, do: execute(media, frames, rgb_consumers)
       hashes = Enum.map(runs, &{&1.video_sha256, &1.audio_sha256, &1.state_sha256})
       if length(Enum.uniq(hashes)) != 1, do: Mix.raise("non-deterministic output")
 
@@ -60,6 +65,7 @@ defmodule Mix.Tasks.Nes.Bench do
         otp: List.to_string(:erlang.system_info(:otp_release)),
         schedulers: :erlang.system_info(:schedulers_online),
         renderer: renderer,
+        rgb_consumers: rgb_consumers,
         runs: runs
       }
 
@@ -68,21 +74,21 @@ defmodule Mix.Tasks.Nes.Bench do
       if path = opts[:output], do: File.write!(path, json <> "\n")
 
       if opts[:profile] do
-        profile(media, frames)
+        profile(media, frames, rgb_consumers)
       end
     end
   end
 
-  defp profile(media, frames) do
+  defp profile(media, frames, rgb_consumers) do
     Mix.ensure_application!(:tools)
 
     :tprof.profile(
-      fn -> execute(media, frames) end,
+      fn -> execute(media, frames, rgb_consumers) end,
       %{type: :call_time, report: {:total, {:measurement, :descending}}}
     )
   end
 
-  defp execute(media, frames) do
+  defp execute(media, frames, rgb_consumers) do
     {:ok, machine} = Beamicom.NES.System.load(media)
     :erlang.garbage_collect()
     {_, reductions0} = Process.info(self(), :reductions)
@@ -94,9 +100,13 @@ defmodule Mix.Tasks.Nes.Bench do
         {machine, [], :crypto.hash_init(:sha256), :crypto.hash_init(:sha256), 0},
         fn _, {machine, times, vh, ah, count} ->
           {us, {machine, [video, audio]}} =
-            :timer.tc(fn -> Beamicom.NES.System.run_slice(machine) end)
+            :timer.tc(fn ->
+              {machine, [video, audio]} = Beamicom.NES.System.run_slice(machine)
+              consume_rgb(video.data, rgb_consumers)
+              {machine, [video, audio]}
+            end)
 
-          vh = :crypto.hash_update(vh, :erlang.term_to_binary(video.data, [:deterministic]))
+          vh = :crypto.hash_update(vh, Beamicom.NES.Palette.to_rgb(video.data))
           ah = :crypto.hash_update(ah, audio.data)
           {machine, [us | times], vh, ah, count + audio.frame_count}
         end
@@ -128,4 +138,10 @@ defmodule Mix.Tasks.Nes.Bench do
   end
 
   defp hash(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
+  defp consume_rgb(_frame, 0), do: :ok
+
+  defp consume_rgb(frame, count) do
+    Enum.each(1..count, fn _ -> Beamicom.NES.Palette.to_rgb(frame) end)
+  end
 end

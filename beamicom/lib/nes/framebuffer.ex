@@ -3,8 +3,8 @@ defmodule Beamicom.NES.Framebuffer do
   One rendered PPU frame (spec §6). Pixels are 5-bit palette RAM *addresses*
   (the value before palette lookup), not RGB — sinks resolve colour in two steps
   (palette RAM address → 6-bit master index → RGB) using the 32-byte palette
-  snapshot. This keeps palette animation cheap on every output path and lets the
-  wire/Scenic/GStreamer sinks share one representation.
+  snapshot. A renderer may also attach the resolved RGB binary so every output
+  sink can reuse one palette expansion.
 
   ## Sources
     * NESdev Wiki — PPU palettes / rendering: https://www.nesdev.org/wiki/PPU_palettes
@@ -16,6 +16,7 @@ defmodule Beamicom.NES.Framebuffer do
             height: 240,
             pixels: <<>>,
             palette: <<>>,
+            rgb: nil,
             # Presentation-only horizontal overscan mask. The PPU still renders
             # all 256 pixels; RGB consumers replace this many pixels at both
             # edges with black.

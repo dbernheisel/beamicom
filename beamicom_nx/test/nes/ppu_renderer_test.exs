@@ -1,7 +1,7 @@
 defmodule BeamicomNx.NES.PPURendererTest do
   use ExUnit.Case, async: false
 
-  alias Beamicom.NES.PPU
+  alias Beamicom.NES.{PPU, Palette}
 
   defp chr do
     tile1 = :binary.copy(<<0xAA>>, 8) <> :binary.copy(<<0x55>>, 8)
@@ -9,7 +9,7 @@ defmodule BeamicomNx.NES.PPURendererTest do
     <<0::128>> <> tile1 <> tile2 <> <<0::size((8192 - 48) * 8)>>
   end
 
-  defp scene(renderer) do
+  defp scene(renderer, opts \\ []) do
     # Repeating nontrivial background plus overlapping front/behind sprites makes
     # the comparison cover bit extraction, attributes, clipping and OAM priority.
     tiles = for i <- 0..959, into: <<>>, do: <<1 + rem(i, 2)>>
@@ -17,8 +17,17 @@ defmodule BeamicomNx.NES.PPURendererTest do
     sprites = <<30, 2, 0x00, 40, 30, 1, 0x21, 44, 70, 2, 0x20, 4>>
     oam = sprites <> :binary.copy(<<0xFF, 0, 0, 0>>, 61)
 
-    %{PPU.new(chr(), :horizontal) | mask: 0x1E, vram: vram, oam: oam}
+    palette = Map.new(0..31, &{&1, rem(&1 * 7, 64)})
+
+    %{
+      PPU.new(chr(), :horizontal)
+      | mask: Keyword.get(opts, :mask, 0x1E),
+        vram: vram,
+        oam: oam,
+        palette: palette
+    }
     |> PPU.set_renderer(renderer)
+    |> PPU.set_enhancement(:hide_horizontal_overscan, Keyword.get(opts, :overscan, false))
     |> PPU.run(89_342 * 3)
   end
 
@@ -27,7 +36,17 @@ defmodule BeamicomNx.NES.PPURendererTest do
     nx = scene(:nx)
 
     assert nx.frame_ready.pixels == native.frame_ready.pixels
+    assert nx.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
+    assert Palette.to_rgb(nx.frame_ready) == Palette.to_rgb(native.frame_ready)
     assert nx.status == native.status
     assert byte_size(nx.frame_ready.pixels) == 256 * 240
+  end
+
+  test "Nx RGB expansion applies grayscale and presentation edge masking" do
+    native = scene(:native, mask: 0x1F, overscan: true)
+    nx = scene(:nx, mask: 0x1F, overscan: true)
+
+    assert nx.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
+    assert binary_part(nx.frame_ready.rgb, 0, 8 * 3) == <<0::size(8 * 3 * 8)>>
   end
 end

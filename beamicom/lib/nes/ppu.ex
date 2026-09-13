@@ -860,21 +860,24 @@ defmodule Beamicom.NES.PPU do
   end
 
   defp finish_frame(ppu) do
-    # The Nx path transfers one compact frame description and receives one
-    # 61,440-byte image. The native path keeps the original scanline binaries.
-    pixels =
-      if nx_renderer?(ppu),
-        do: apply(ppu.renderer, :render, [Enum.reverse(ppu.fb)]),
-        else: ppu.fb |> Enum.reverse() |> IO.iodata_to_binary()
-
     palette = for i <- 0..31, into: <<>>, do: <<Map.get(ppu.palette, i, 0)>>
+    edge_mask = if(ppu.hide_horizontal_overscan, do: 8, else: 0)
+    grayscale = (ppu.mask &&& 0x01) != 0
+
+    # The Nx path transfers one compact frame description and receives palette
+    # addresses plus one shared RGB expansion. Native keeps the original output.
+    {pixels, rgb} =
+      if nx_renderer?(ppu),
+        do: apply(ppu.renderer, :render, [Enum.reverse(ppu.fb), palette, grayscale, edge_mask]),
+        else: {ppu.fb |> Enum.reverse() |> IO.iodata_to_binary(), nil}
 
     frame = %Beamicom.NES.Framebuffer{
       number: ppu.frame,
       pixels: pixels,
       palette: palette,
-      edge_mask: if(ppu.hide_horizontal_overscan, do: 8, else: 0),
-      grayscale: (ppu.mask &&& 0x01) != 0,
+      rgb: rgb,
+      edge_mask: edge_mask,
+      grayscale: grayscale,
       emphasis: {(ppu.mask &&& 0x20) != 0, (ppu.mask &&& 0x40) != 0, (ppu.mask &&& 0x80) != 0}
     }
 

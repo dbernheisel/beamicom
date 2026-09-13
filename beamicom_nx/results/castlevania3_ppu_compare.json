@@ -1,18 +1,25 @@
 {
   "scope": "Castlevania III cold boot, no input, 902 frames (15.009 emulated seconds), EXLA CPU",
-  "native": {
-    "fps": 88.05680308116807,
-    "core_ms": 10243.388,
-    "mean_frame_ms": 11.35630598669623,
-    "reductions": 842418069
+  "palette_address_only": {
+    "native_fps": 88.05680308116807,
+    "nx_fps": 79.13860697100579
   },
-  "nx": {
-    "fps": 79.13860697100579,
-    "core_ms": 11397.724,
-    "mean_frame_ms": 12.636057649667405,
-    "reductions": 914630580
+  "three_rgb_consumers": {
+    "native": {
+      "fps": 66.53633806124914,
+      "core_ms": 13556.502,
+      "mean_frame_ms": 15.029381374722838,
+      "reductions": 1861807560
+    },
+    "nx_shared_rgb": {
+      "fps": 79.17209511921588,
+      "core_ms": 11392.903,
+      "mean_frame_ms": 12.630712860310421,
+      "reductions": 935141206
+    },
+    "fps_improvement_percent": 18.9938551732876
   },
-  "video_sha256": "80402c48f0b9cd424b23e9ce2c8725cefa0ba38787543f9b4d805ea98300d3d6",
+  "rgb_sha256": "cd999a178bb43b718bac39dfcffaec81ac97de7870c0546076bd6d2d2f1659a1",
   "audio_sha256": "0aaab7e4ee5edbab8579849e9433602144130e5bec1d348660fa07e7730d3a2b",
   "rom_sha256": "085ec6395681c7ebfda19c2986069c21a3d27738cc61ada76249de70a07ed7d3"
 }

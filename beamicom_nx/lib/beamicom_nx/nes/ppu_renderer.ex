@@ -4,7 +4,7 @@ defmodule BeamicomNx.NES.PPURenderer do
 
   The native PPU captures mapper-resolved tile rows and evaluated sprites at the
   correct scanline. This module performs only the regular 240 by 256 background
-  decode and sprite-priority operation in one compiled EXLA call.
+  decode, sprite priority, and RGB palette expansion in one compiled EXLA call.
   """
 
   import Nx.Defn
@@ -15,7 +15,7 @@ defmodule BeamicomNx.NES.PPURenderer do
   @sprites 8
   @compiled_key {__MODULE__, :compiled}
 
-  def render(lines) when length(lines) == @height do
+  def render(lines, palette, grayscale, edge_mask) when length(lines) == @height do
     {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack(lines)
 
     args = [
@@ -28,13 +28,33 @@ defmodule BeamicomNx.NES.PPURenderer do
       tensor(slo, {@height, @sprites}),
       tensor(shi, {@height, @sprites}),
       tensor(sattr, {@height, @sprites}),
-      tensor(svalid, {@height, @sprites})
+      tensor(svalid, {@height, @sprites}),
+      tensor(palette, {32}),
+      tensor(Beamicom.NES.Palette.master_binary(), {64, 3}),
+      Nx.tensor(if(grayscale, do: 0x30, else: 0x3F), type: :u8),
+      Nx.tensor(edge_mask, type: :u8)
     ]
 
-    compiled(args) |> apply(args) |> Nx.to_binary()
+    {pixels, rgb} = compiled(args) |> apply(args)
+    {Nx.to_binary(pixels), Nx.to_binary(rgb)}
   end
 
-  defn compose(lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid) do
+  defn compose(
+         lo,
+         hi,
+         attr,
+         fine_x,
+         mask,
+         sx,
+         slo,
+         shi,
+         sattr,
+         svalid,
+         palette,
+         master,
+         color_mask,
+         edge_mask
+       ) do
     x = Nx.iota({@height, @width}, axis: 1, type: :s32)
     source_x = x + Nx.as_type(fine_x, :s32)
     tile = Nx.quotient(source_x, 8)
@@ -71,8 +91,19 @@ defmodule BeamicomNx.NES.PPURenderer do
     sprite_front = band(sprite, 0x40) != 0
     visible = sprite_addr != 0
 
-    Nx.select(visible and (bg == 0 or sprite_front), sprite_addr, bg)
-    |> Nx.as_type(:u8)
+    pixels = Nx.select(visible and (bg == 0 or sprite_front), sprite_addr, bg) |> Nx.as_type(:u8)
+    colors = Nx.take(palette, pixels) |> band(color_mask)
+    rgb = Nx.take(master, colors)
+    in_picture = x >= edge_mask and x < @width - edge_mask
+
+    rgb =
+      in_picture
+      |> Nx.new_axis(2)
+      |> Nx.broadcast({@height, @width, 3})
+      |> Nx.select(rgb, 0)
+      |> Nx.as_type(:u8)
+
+    {pixels, rgb}
   end
 
   defnp scatter_sprite(pixels, rank, mask, sx, slo, shi, sattr, svalid) do
@@ -125,7 +156,7 @@ defmodule BeamicomNx.NES.PPURenderer do
   defp compiled(args) do
     case :persistent_term.get(@compiled_key, nil) do
       nil ->
-        fun = EXLA.compile(&compose/10, Enum.map(args, &Nx.to_template/1), client: :host)
+        fun = EXLA.compile(&compose/14, Enum.map(args, &Nx.to_template/1), client: :host)
         :persistent_term.put(@compiled_key, fun)
         fun
 

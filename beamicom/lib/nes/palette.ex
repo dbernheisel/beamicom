@@ -86,6 +86,16 @@ defmodule Beamicom.NES.Palette do
   @doc "RGB tuple for a 6-bit master palette index (0-63)."
   def rgb(index), do: elem(@master, index &&& 0x3F)
 
+  @doc "The 64-entry master palette as packed RGB24 bytes."
+  def master_binary do
+    for color <- Tuple.to_list(@master), into: <<>> do
+      {r, g, b} = color
+      <<r, g, b>>
+    end
+  end
+
+  def to_rgb(%Beamicom.NES.Framebuffer{rgb: rgb}) when is_binary(rgb), do: rgb
+
   @doc "Resolve a %Framebuffer{} to a width*height*3 RGB binary."
   def to_rgb(%Beamicom.NES.Framebuffer{
         pixels: pixels,
