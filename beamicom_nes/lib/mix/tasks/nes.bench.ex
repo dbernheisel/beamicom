@@ -31,7 +31,12 @@ defmodule Mix.Tasks.Nes.Bench do
       )
 
     Mix.Task.run("app.start")
-    renderer = opts |> Keyword.get(:renderer, "native") |> String.to_existing_atom()
+    configured_ppu = Beamicom.NES.PPU.configured_renderer()
+
+    renderer =
+      opts
+      |> Keyword.get(:renderer, configured_ppu_name(configured_ppu))
+      |> String.to_existing_atom()
 
     if renderer not in [:native, :nx, :nx_atlas],
       do: Mix.raise("renderer must be native, nx, or nx_atlas")
@@ -46,8 +51,11 @@ defmodule Mix.Tasks.Nes.Bench do
         :nx_atlas -> Beamicom.NES.Nx.PPUAtlasRenderer
       end
 
-    Application.put_env(:beamicom_nes, :ppu_renderer, renderer_module)
-    audio_renderer = Keyword.get(opts, :audio_renderer, "native")
+    if renderer_module != configured_ppu,
+      do: Mix.raise("PPU renderer is compile-time; this build contains #{configured_ppu_name(configured_ppu)}")
+
+    configured_apu = Beamicom.NES.Bus.configured_apu_renderer()
+    audio_renderer = Keyword.get(opts, :audio_renderer, configured_apu_name(configured_apu))
 
     audio_renderer_module =
       case audio_renderer do
@@ -63,7 +71,8 @@ defmodule Mix.Tasks.Nes.Bench do
           "the Nx audio renderer requires running this task from the beamicom_nes_nx project"
         )
 
-    Application.put_env(:beamicom_nes, :apu_renderer, audio_renderer_module)
+    if audio_renderer_module != configured_apu,
+      do: Mix.raise("APU renderer is compile-time; this build contains #{configured_apu_name(configured_apu)}")
     media = File.read!(path)
     seconds = Keyword.get(opts, :seconds, 15)
     repeats = Keyword.get(opts, :repeats, 3)
@@ -178,6 +187,28 @@ defmodule Mix.Tasks.Nes.Bench do
   end
 
   defp hash_state(machine), do: hash(:erlang.term_to_binary(machine, [:deterministic]))
+
+  defp configured_ppu_name(renderer),
+    do:
+      Map.fetch!(
+        %{
+          :native => "native",
+          Beamicom.NES.Nx.PPURenderer => "nx",
+          Beamicom.NES.Nx.PPUAtlasRenderer => "nx_atlas"
+        },
+        renderer
+      )
+
+  defp configured_apu_name(renderer),
+    do:
+      Map.fetch!(
+        %{
+          :native => "native",
+          Beamicom.NES.APUBlockRenderer => "elixir_block",
+          Beamicom.NES.Nx.APUBlockRenderer => "nx_block"
+        },
+        renderer
+      )
 
   defp hash(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 

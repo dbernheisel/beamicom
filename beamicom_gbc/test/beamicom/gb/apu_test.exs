@@ -426,11 +426,11 @@ defmodule Beamicom.GB.APUTest do
     assert {:ok, machine} = Machine.load(rom(0))
     halted = %{machine | cpu: %{machine.cpu | run_state: :halted}}
     {halted, 1} = Machine.step(halted)
-    assert APU.flush(halted.bus.apu).sample_phase != machine.bus.apu.sample_phase
+    assert Bus.sync_apu(halted.bus).apu.sample_phase != machine.bus.apu.sample_phase
 
     dma_bus = Bus.write(machine.bus, 0xFF46, 0)
     {dma_bus, 160} = Bus.run_dma(dma_bus)
-    assert APU.flush(dma_bus.apu).sample_count > machine.bus.apu.sample_count
+    assert Bus.sync_apu(dma_bus).apu.sample_count > machine.bus.apu.sample_count
 
     stopped = %{machine | cpu: %{machine.cpu | run_state: :stopped}}
     {stopped, 1} = Machine.step(stopped)

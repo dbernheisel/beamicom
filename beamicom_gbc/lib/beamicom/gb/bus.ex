@@ -50,6 +50,10 @@ defmodule Beamicom.GB.Bus do
             cartridge: nil,
             ppu: nil,
             apu: nil,
+            # Keep the cycle-rate accumulator on the bus. Rebuilding the much
+            # larger APU struct for every CPU memory cycle is unnecessary; APU
+            # state is synchronized only at observable register/audio boundaries.
+            apu_pending: 0,
             wram: @zero_wram,
             hram: @zero_hram,
             boot_rom: <<>>,
@@ -195,8 +199,9 @@ defmodule Beamicom.GB.Bus do
   def read(%__MODULE__{tac: tac}, 0xFF07), do: 0xF8 ||| tac
   def read(%__MODULE__{interrupt_flags: flags}, 0xFF0F), do: 0xE0 ||| flags
 
-  def read(%__MODULE__{mode: :mapped, apu: apu}, address) when address in 0xFF10..0xFF3F,
-    do: apu |> APU.flush() |> APU.read(address)
+  def read(%__MODULE__{mode: :mapped, apu: apu, apu_pending: pending}, address)
+      when address in 0xFF10..0xFF3F,
+      do: apu |> APU.tick(pending) |> APU.read(address)
 
   def read(%__MODULE__{mode: :mapped, ppu: ppu}, address) when address in 0xFF40..0xFF45,
     do: PPU.read(ppu, address)
@@ -320,9 +325,11 @@ defmodule Beamicom.GB.Bus do
   def write(%__MODULE__{} = bus, 0xFF0F, value),
     do: %{bus | interrupt_flags: value &&& 0x1F}
 
-  def write(%__MODULE__{mode: :mapped, apu: apu} = bus, address, value)
-      when address in 0xFF10..0xFF3F,
-      do: %{bus | apu: apu |> APU.flush() |> APU.write(address, value)}
+  def write(%__MODULE__{mode: :mapped} = bus, address, value)
+      when address in 0xFF10..0xFF3F do
+    bus = sync_apu(bus)
+    %{bus | apu: APU.write(bus.apu, address, value)}
+  end
 
   def write(%__MODULE__{mode: :mapped} = bus, address, value) when address in 0xFF40..0xFF45,
     do: write_ppu(bus, address, value)
@@ -425,10 +432,10 @@ defmodule Beamicom.GB.Bus do
 
   @doc false
   @spec read_cycle(t(), 0..0xFFFF) :: {byte(), t()}
-  def read_cycle(%__MODULE__{mode: :mapped, apu: apu} = bus, address)
+  def read_cycle(%__MODULE__{mode: :mapped} = bus, address)
       when address in 0xFF10..0xFF3F do
-    apu = APU.flush(apu)
-    {APU.read(apu, address), tick(%{bus | apu: apu}, 4)}
+    bus = sync_apu(bus)
+    {APU.read(bus.apu, address), tick(bus, 4)}
   end
 
   def read_cycle(%__MODULE__{} = bus, address), do: {read(bus, address), tick(bus, 4)}
@@ -513,10 +520,18 @@ defmodule Beamicom.GB.Bus do
   @spec take_audio_pcm(t()) :: {non_neg_integer(), binary(), t()}
   def take_audio_pcm(%__MODULE__{apu: nil} = bus), do: {0, <<>>, bus}
 
-  def take_audio_pcm(%__MODULE__{apu: apu} = bus) do
-    {sample_count, pcm, apu} = APU.take_samples(apu)
+  def take_audio_pcm(%__MODULE__{} = bus) do
+    bus = sync_apu(bus)
+    {sample_count, pcm, apu} = APU.take_samples(bus.apu)
     {sample_count, pcm, %{bus | apu: apu}}
   end
+
+  @doc false
+  def sync_apu(%__MODULE__{apu: nil} = bus), do: bus
+  def sync_apu(%__MODULE__{apu_pending: 0} = bus), do: bus
+
+  def sync_apu(%__MODULE__{apu: apu, apu_pending: pending} = bus),
+    do: %{bus | apu: APU.tick(apu, pending), apu_pending: 0}
 
   @doc "Returns and clears the pending OAM DMA source-page request."
   @spec take_oam_dma(t()) :: {byte() | nil, t()}
@@ -582,15 +597,26 @@ defmodule Beamicom.GB.Bus do
         do: {clocks, 0},
         else: {div(phase + clocks, 2), rem(phase + clocks, 2)}
 
-    hblank_pending = pending_hblanks(bus, ppu, dots)
-    bus = tick_timers(bus, clocks)
-    apu = APU.defer_tick(bus.apu, dots)
-    {ppu, signals} = PPU.tick(ppu, dots)
+    hblank_pending =
+      case bus.hdma_request do
+        {:hblank, _, _, _} -> pending_hblanks(bus, ppu, dots)
+        _ -> bus.hblank_pending
+      end
 
-    apply_ppu_signals(
-      %{bus | ppu: ppu, apu: apu, lcd_phase: phase, hblank_pending: hblank_pending},
-      signals
-    )
+    bus = tick_timers(bus, clocks)
+    {ppu, signals} = PPU.tick(ppu, dots)
+    bus = %{
+      bus
+      | ppu: ppu,
+        apu_pending: bus.apu_pending + dots,
+        lcd_phase: phase,
+        hblank_pending: hblank_pending
+    }
+
+    case signals do
+      [] -> bus
+      _ -> apply_ppu_signals(bus, signals)
+    end
   end
 
   # OAM DMA is intentionally a single immutable-memory batch. The CPU is
@@ -780,6 +806,7 @@ defmodule Beamicom.GB.Bus do
     do: %{bus | timer_reload: reload - 1}
 
   defp reset_divider(bus) do
+    bus = sync_apu(bus)
     old_input = timer_input(bus.divider, bus.tac)
     apu = reset_apu_divider(bus.apu, apu_divider_input(bus.divider, bus.control) == 1)
     bus = %{bus | divider: 0, apu: apu}

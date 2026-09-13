@@ -23,6 +23,8 @@ defmodule Beamicom.NES.PPU do
 
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPURenderer}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPUAtlasRenderer}
+  @renderer Application.compile_env(:beamicom_nes, :ppu_renderer, :native)
+  @apu_renderer Application.compile_env(:beamicom_nes, :apu_renderer, :native)
 
   # Bit-reversed byte lookup (input is always 0..255), computed at compile time:
   # turns the 8-iteration reduce in horizontal sprite flips into one `elem/2`.
@@ -111,7 +113,7 @@ defmodule Beamicom.NES.PPU do
             # Pixel composition can remain on the BEAM or be batched into one
             # 240x256 EXLA operation. Fetches and observable PPU state changes
             # always remain in this module at their original scanline cadence.
-            renderer: :native,
+            renderer: @renderer,
             renderer_state: nil,
             fb: [],
             # Tile-row cache: the 33 fetched {nametable, attribute} pairs plus the
@@ -127,22 +129,18 @@ defmodule Beamicom.NES.PPU do
 
   @doc "Build a PPU over the cartridge's CHR data and nametable mirroring."
   def new(chr, mirroring) do
-    renderer =
-      case Application.get_env(:beamicom_nes, :ppu_renderer, :native) do
-        :nx -> Beamicom.NES.Nx.PPURenderer
-        :nx_atlas -> Beamicom.NES.Nx.PPUAtlasRenderer
-        renderer -> renderer
-      end
-
-    renderer_state = prepare_renderer(renderer, chr)
+    renderer_state = if @renderer == :native, do: nil, else: prepare_renderer(@renderer, chr)
 
     %__MODULE__{
       chr: chr,
       mirroring: mirroring,
-      renderer: renderer,
+      renderer: @renderer,
       renderer_state: renderer_state
     }
   end
+
+  @doc "Renderer selected when this core build was compiled."
+  def configured_renderer, do: @renderer
 
   @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, `:nx_atlas`, or a module)."
   def set_renderer(ppu, :native), do: %{ppu | renderer: :native, renderer_state: nil}
@@ -151,8 +149,6 @@ defmodule Beamicom.NES.PPU do
 
   def set_renderer(ppu, renderer) when is_atom(renderer),
     do: %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.chr)}
-
-  defp prepare_renderer(:native, _chr), do: nil
 
   defp prepare_renderer(renderer, chr) do
     if Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare_chr, 1),
@@ -1105,8 +1101,7 @@ defmodule Beamicom.NES.PPU do
     # addresses plus one shared RGB expansion. Native keeps the original output.
     lines = Enum.reverse(ppu.fb)
 
-    defer? =
-      nx_renderer?(ppu) and Application.get_env(:beamicom_nes, :apu_renderer, :native) != :native
+    defer? = nx_renderer?(ppu) and @apu_renderer != :native
 
     {pixels, rgb, render} =
       cond do

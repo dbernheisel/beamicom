@@ -3,12 +3,6 @@ defmodule Beamicom.NES.Nx.PPURendererTest do
 
   alias Beamicom.NES.{PPU, Palette}
 
-  setup do
-    previous = Application.get_env(:beamicom_nes, :apu_renderer, :native)
-    Application.put_env(:beamicom_nes, :apu_renderer, :native)
-    on_exit(fn -> Application.put_env(:beamicom_nes, :apu_renderer, previous) end)
-  end
-
   defp chr do
     tile1 = :binary.copy(<<0xAA>>, 8) <> :binary.copy(<<0x55>>, 8)
     tile2 = :binary.copy(<<0xF0>>, 8) <> :binary.copy(<<0x0F>>, 8)
@@ -34,10 +28,13 @@ defmodule Beamicom.NES.Nx.PPURendererTest do
         chr_latch: Keyword.get(opts, :chr_latch)
     }
 
-    ppu
-    |> PPU.set_renderer(renderer)
-    |> PPU.set_enhancement(:hide_horizontal_overscan, Keyword.get(opts, :overscan, false))
-    |> PPU.run(89_342 * 3)
+    ppu =
+      ppu
+      |> PPU.set_renderer(renderer)
+      |> PPU.set_enhancement(:hide_horizontal_overscan, Keyword.get(opts, :overscan, false))
+      |> PPU.run(89_342 * 3)
+
+    %{ppu | frame_ready: PPU.resolve_frame(ppu.frame_ready)}
   end
 
   test "frame-wide Nx composition is pixel-exact with native composition" do

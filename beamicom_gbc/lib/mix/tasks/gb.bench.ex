@@ -23,13 +23,17 @@ defmodule Mix.Tasks.Gb.Bench do
     Mix.Task.run("app.start")
     frames = Keyword.get(opts, :frames, 120)
     repeats = Keyword.get(opts, :repeats, 3)
-    renderer = renderer(Keyword.get(opts, :renderer, "native"))
-    audio_renderer = audio_renderer(Keyword.get(opts, :audio_renderer, "native"))
+    configured_ppu = Beamicom.GB.PPU.configured_renderer()
+    configured_apu = Beamicom.GB.APU.configured_renderer()
+    renderer = renderer(Keyword.get(opts, :renderer, renderer_name(configured_ppu) |> to_string()))
+
+    audio_renderer =
+      audio_renderer(Keyword.get(opts, :audio_renderer, renderer_name(configured_apu) |> to_string()))
 
     if frames < 1 or repeats < 1, do: Mix.raise("frames and repeats must be positive")
 
-    Application.put_env(:beamicom_gbc, :ppu_renderer, renderer)
-    Application.put_env(:beamicom_gbc, :apu_renderer, audio_renderer)
+    ensure_compiled!(:ppu, renderer, configured_ppu)
+    ensure_compiled!(:apu, audio_renderer, configured_apu)
     media = File.read!(path)
     execute(media, frames)
     runs = for _ <- 1..repeats, do: execute(media, frames)
@@ -90,6 +94,15 @@ defmodule Mix.Tasks.Gb.Bench do
     if Code.ensure_loaded?(module),
       do: module,
       else: Mix.raise("Nx renderers require running this task from beamicom_gbc_nx")
+  end
+
+  defp ensure_compiled!(_device, renderer, renderer), do: :ok
+
+  defp ensure_compiled!(device, requested, configured) do
+    Mix.raise(
+      "#{device} renderer is compile-time: requested #{renderer_name(requested)}, " <>
+        "but this build contains #{renderer_name(configured)}"
+    )
   end
 
   defp renderer_name(:native), do: :native

@@ -1,57 +1,3 @@
-defmodule Beamicom.GB.APU.Pulse do
-  @moduledoc false
-  defstruct enabled: false,
-            dac: false,
-            length: 0,
-            length_enable: false,
-            duty: 0,
-            duty_pos: 0,
-            frequency: 0,
-            timer: 4,
-            initial_volume: 0,
-            volume: 0,
-            envelope_add: false,
-            envelope_period: 0,
-            envelope_timer: 8,
-            sweep_period: 0,
-            sweep_negate: false,
-            sweep_shift: 0,
-            sweep_timer: 8,
-            sweep_shadow: 0,
-            sweep_enabled: false
-end
-
-defmodule Beamicom.GB.APU.Wave do
-  @moduledoc false
-  defstruct enabled: false,
-            dac: false,
-            length: 0,
-            length_enable: false,
-            level: 0,
-            frequency: 0,
-            timer: 2,
-            position: 0,
-            sample_buffer: 0
-end
-
-defmodule Beamicom.GB.APU.Noise do
-  @moduledoc false
-  defstruct enabled: false,
-            dac: false,
-            length: 0,
-            length_enable: false,
-            initial_volume: 0,
-            volume: 0,
-            envelope_add: false,
-            envelope_period: 0,
-            envelope_timer: 8,
-            shift: 0,
-            width7: false,
-            divisor: 0,
-            timer: 8,
-            lfsr: 0x7FFF
-end
-
 defmodule Beamicom.GB.APU do
   @moduledoc """
   Pure four-channel DMG/CGB audio processing unit.
@@ -71,6 +17,7 @@ defmodule Beamicom.GB.APU do
   import Bitwise
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
+  @renderer Application.compile_env(:beamicom_gbc, :apu_renderer, :native)
 
   @clock_rate 4_194_304
   @sample_rate 44_100
@@ -111,10 +58,13 @@ defmodule Beamicom.GB.APU do
             render_events: [],
             render_dots: 0,
             render_triggers: {0, 0, 0, 0},
-            renderer: :native,
+            renderer: @renderer,
             renderer_state: nil
 
   @type t :: %__MODULE__{}
+
+  @doc "Renderer selected when this core build was compiled."
+  def configured_renderer, do: @renderer
 
   @doc "Creates a powered-off APU. Wave RAM remains accessible while powered off."
   @spec new(keyword()) :: t()
@@ -122,14 +72,9 @@ defmodule Beamicom.GB.APU do
     model = Keyword.get(opts, :model, :dmg)
     unless model in [:dmg, :cgb], do: raise(ArgumentError, "model must be :dmg or :cgb")
 
-    renderer =
-      case Application.get_env(:beamicom_gbc, :apu_renderer, :native) do
-        :nx_block -> Beamicom.GB.Nx.APUBlockRenderer
-        configured -> configured
-      end
-
-    apu = %__MODULE__{model: model, renderer: renderer}
-    %{apu | renderer_state: prepare_renderer(renderer, apu)}
+    apu = %__MODULE__{model: model, renderer: @renderer}
+    state = if @renderer == :native, do: nil, else: prepare_renderer(@renderer, apu)
+    %{apu | renderer_state: state}
   end
 
   @doc "Selects inline native mixing or an optional block renderer."
@@ -160,8 +105,6 @@ defmodule Beamicom.GB.APU do
 
     %{configured | renderer_state: prepare_renderer(renderer, configured)}
   end
-
-  defp prepare_renderer(:native, _apu), do: nil
 
   defp prepare_renderer(renderer, apu) do
     unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),

@@ -1,28 +1,16 @@
 defmodule Beamicom.GB.Nx.PPURendererTest do
   use ExUnit.Case, async: false
 
-  alias Beamicom.GB.{APU, DiagnosticROM, SaveState, System}
-
-  setup do
-    previous = Application.get_env(:beamicom_gbc, :ppu_renderer, :native)
-    previous_apu = Application.get_env(:beamicom_gbc, :apu_renderer, :native)
-
-    on_exit(fn ->
-      Application.put_env(:beamicom_gbc, :ppu_renderer, previous)
-      Application.put_env(:beamicom_gbc, :apu_renderer, previous_apu)
-    end)
-  end
+  alias Beamicom.GB.{APU, DiagnosticROM, PPU, SaveState, System}
 
   for {model, media} <- [dmg: DiagnosticROM.build(), cgb: DiagnosticROM.build_cgb()] do
     test "#{model} frame composition is pixel-exact" do
       media = unquote(Macro.escape(media))
-      Application.put_env(:beamicom_gbc, :ppu_renderer, :native)
-      Application.put_env(:beamicom_gbc, :apu_renderer, :native)
       {:ok, native} = System.load(media, [])
+      native = put_in(native.bus.ppu, PPU.set_renderer(native.bus.ppu, :native))
+      native = put_in(native.bus.apu, APU.set_renderer(native.bus.apu, :native))
       {_native, [native_video, native_audio]} = System.run_slice(native)
 
-      Application.put_env(:beamicom_gbc, :ppu_renderer, Beamicom.GB.Nx.PPURenderer)
-      Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUSynthRenderer)
       {:ok, accelerated} = System.load(media, [])
       {_accelerated, [video, audio]} = System.run_slice(accelerated)
 
@@ -33,8 +21,6 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
   end
 
   test "Nx-backed machines survive save and restore at a frame boundary" do
-    Application.put_env(:beamicom_gbc, :ppu_renderer, Beamicom.GB.Nx.PPURenderer)
-    Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUSynthRenderer)
     media = DiagnosticROM.build_cgb()
     {:ok, machine} = System.load(media, [])
     {machine, _outputs} = System.run_slice(machine)
@@ -66,22 +52,17 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
     assert complex_audio(Beamicom.GB.Nx.APUSynthRenderer) == complex_audio(:native)
   end
 
-  test "application boundary enables and disables the optional renderer" do
-    assert :ok = Beamicom.GB.Nx.disable()
-    assert Application.get_env(:beamicom_gbc, :ppu_renderer) == :native
-    assert Application.get_env(:beamicom_gbc, :apu_renderer) == :native
-    assert :ok = Beamicom.GB.Nx.enable()
-    assert Application.get_env(:beamicom_gbc, :ppu_renderer) == Beamicom.GB.Nx.PPURenderer
-
-    assert Application.get_env(:beamicom_gbc, :apu_renderer) ==
-             Beamicom.GB.Nx.APUBlockRenderer
+  test "Nx wrapper compiles the core against both optional renderers" do
+    assert Beamicom.GB.Nx.backends() == %{
+             ppu: Beamicom.GB.Nx.PPURenderer,
+             apu: Beamicom.GB.Nx.APUBlockRenderer
+           }
   end
 
   defp audible_audio(renderer) do
-    Application.put_env(:beamicom_gbc, :apu_renderer, renderer)
-
     apu =
       APU.new(model: :cgb)
+      |> APU.set_renderer(renderer)
       |> APU.write(0xFF26, 0x80)
       |> APU.write(0xFF16, 0x80)
       |> APU.write(0xFF17, 0xF3)
@@ -96,10 +77,8 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
   end
 
   defp complex_audio(renderer) do
-    Application.put_env(:beamicom_gbc, :apu_renderer, renderer)
-
     apu =
-      Enum.reduce(0..15, APU.new(model: :cgb), fn index, apu ->
+      Enum.reduce(0..15, APU.new(model: :cgb) |> APU.set_renderer(renderer), fn index, apu ->
         APU.write(apu, 0xFF30 + index, rem(index * 29, 256))
       end)
       |> APU.write(0xFF26, 0x80)

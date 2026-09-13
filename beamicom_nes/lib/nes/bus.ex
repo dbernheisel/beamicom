@@ -23,6 +23,7 @@ defmodule Beamicom.NES.Bus do
   # Match APU's lazy-run threshold, but keep the per-instruction accumulator on
   # the smaller Bus state so the large APU struct is not rebuilt every step.
   @apu_flush_threshold 100
+  @apu_renderer Application.compile_env(:beamicom_nes, :apu_renderer, :native)
 
   @default_mapper_state %{
     submapper: 0,
@@ -84,12 +85,14 @@ defmodule Beamicom.NES.Bus do
 
   def default_mapper_state, do: @default_mapper_state
 
+  @doc "APU renderer selected when this core build was compiled."
+  def configured_apu_renderer, do: @apu_renderer
+
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
     apu = Beamicom.NES.APU.new()
-    renderer = Application.get_env(:beamicom_nes, :apu_renderer, :native)
     # Sunsoft 5B synthesis is still native; mapper 69 must not enter a renderer
     # that only implements the 2A03/MMC5 block contract.
-    renderer = if cart.mapper == 69, do: :native, else: renderer
+    renderer = if cart.mapper == 69, do: :native, else: @apu_renderer
 
     {apu, renderer_state} =
       if renderer == :native do

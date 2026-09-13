@@ -49,7 +49,16 @@ defmodule Beamicom.GB.Machine do
   @spec step(t()) :: {t(), pos_integer()}
   def step(%__MODULE__{cpu: cpu, bus: bus} = machine) do
     {cpu, bus, m_cycles} = CPU.step(cpu, bus)
-    {bus, dma_cycles} = Bus.run_dma(bus, cpu.run_state != :halted)
+
+    {bus, dma_cycles} =
+      case bus do
+        %Bus{oam_dma: nil, hdma_request: nil, hblank_pending: 0} ->
+          {bus, 0}
+
+        _ ->
+          Bus.run_dma(bus, cpu.run_state != :halted)
+      end
+
     {%{machine | cpu: cpu, bus: bus}, m_cycles + dma_cycles}
   end
 

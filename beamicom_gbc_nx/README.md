@@ -14,25 +14,24 @@ phase in EXLA across frames. It synthesizes every sample in an epoch as one
 vector operation and is useful for further batching work, although it is slower
 for one emulator on the current CPU client.
 
-Add the package to a client and opt in before loading a machine:
+Add the package and select its renderers in the client's compile-time config:
 
 ```elixir
 {:beamicom_gbc_nx, path: "../beamicom_gbc_nx"}
 
-Beamicom.GB.Nx.enable()
+config :beamicom_gbc,
+  ppu_renderer: Beamicom.GB.Nx.PPURenderer,
+  apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
 ```
 
 Select full event-block synthesis explicitly:
 
 ```elixir
-Beamicom.GB.Nx.enable(apu_renderer: Beamicom.GB.Nx.APUSynthRenderer)
+config :beamicom_gbc, apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 ```
 
-To opt in automatically before the client supervision tree starts:
-
-```elixir
-config :beamicom_gbc_nx, auto_enable: true
-```
+Changing a renderer requires recompiling `beamicom_gbc`. Machine creation and
+execution never query the application environment for a backend.
 
 The core retains no Nx or EXLA dependency. PPU and APU programs resolve
 concurrently at the host output boundary, and EXLA-backed audio state is copied
@@ -53,14 +52,12 @@ these medians with identical video and audio hashes:
 
 | PPU | APU | FPS | Difference from native |
 | --- | --- | ---: | ---: |
-| native | native | 46.90 | — |
-| frame-wide Nx | block Nx | 45.59 | -2.8% |
-| frame-wide Nx | event-synthesis Nx | 44.55 | -5.0% |
+| native | native | 51.55 | — |
+| frame-wide Nx | block Nx | 51.45 | -0.2% |
 
-Concurrent resolution recovers much of the deeper kernels' call overhead, but
-the result still cannot accelerate this
-single-instance workload because CPU and bus execution dominate while native
-PPU/APU work is already a small fraction of the frame. Automatic activation
-therefore remains disabled. The raw-row and event-block boundaries are intended
+Moving deferred APU time into the compact bus state and skipping inactive
+device work raised both current paths by roughly 10–13%. The frame-wide Nx path
+is now effectively even with native for this single-instance workload. The
+raw-row and event-block boundaries are intended
 for larger kernels and future leading-axis batching without slowing clients
 that use the native core.

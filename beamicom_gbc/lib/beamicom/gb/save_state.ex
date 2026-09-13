@@ -29,6 +29,7 @@ defmodule Beamicom.GB.SaveState do
   @spec split(Machine.t()) :: {binary(), binary()}
   def split(%Machine{bus: %{cartridge: %{rom: rom}}} = machine) when is_binary(rom) do
     identity = rom_identity(rom)
+    machine = %{machine | bus: Bus.sync_apu(machine.bus)}
     {_count, _pcm, apu} = machine.bus.apu |> APU.flush() |> APU.take_samples()
     apu = snapshot_audio_renderer(apu)
     machine = put_in(machine.bus.apu, apu)
@@ -197,6 +198,7 @@ defmodule Beamicom.GB.SaveState do
          true <- integer_between?(bus.tac, 0, 7),
          true <- integer_between?(bus.timer_reload, 0, 4),
          true <- integer_between?(bus.interrupt_flags, 0, 0x1F),
+         true <- bus.apu_pending == 0,
          true <- integer_between?(bus.control, 0, 0x0F),
          true <- model_control?(model, bus.control),
          true <- integer_between?(bus.svbk, 0, 7),

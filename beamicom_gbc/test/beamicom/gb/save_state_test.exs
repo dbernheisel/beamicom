@@ -3,7 +3,7 @@ defmodule Beamicom.GB.SaveStateTest do
 
   import Bitwise
 
-  alias Beamicom.GB.{APU, Bus, DiagnosticROM, Machine, SaveState, System}
+  alias Beamicom.GB.{Bus, DiagnosticROM, Machine, SaveState, System}
   alias Beamicom.GB.Cartridge
   alias Beamicom.GB.Cartridge.{MBC1, MBC2, MBC3, MBC5}
 
@@ -31,17 +31,19 @@ defmodule Beamicom.GB.SaveStateTest do
     {:ok, machine} = Machine.load(rom)
     machine = put_in(machine.bus, Bus.tick(machine.bus, 4_194_305))
 
-    assert machine.bus.apu.pending_dots == 4_194_305
+    assert machine.bus.apu_pending == 4_194_305
 
     canonical_apu =
-      machine.bus.apu
-      |> APU.flush()
+      machine.bus
+      |> Bus.sync_apu()
+      |> Map.fetch!(:apu)
       |> Map.put(:samples, [])
       |> Map.put(:sample_count, 0)
 
     canonical =
       machine
       |> put_in([Access.key!(:bus), Access.key!(:apu)], canonical_apu)
+      |> put_in([Access.key!(:bus), Access.key!(:apu_pending)], 0)
       |> put_in(
         [Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame)],
         :binary.copy(<<255>>, 160 * 144 * 3)
@@ -50,7 +52,7 @@ defmodule Beamicom.GB.SaveStateTest do
 
     {state, rom_blob} = SaveState.split(machine)
     assert {:ok, restored} = SaveState.merge(state, rom_blob)
-    assert restored.bus.apu.pending_dots == 0
+    assert restored.bus.apu_pending == 0
     assert restored == canonical
 
     {expected_machine, expected_outputs} = System.run_slice(canonical)

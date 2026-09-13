@@ -20,6 +20,7 @@ defmodule Beamicom.GB.PPU do
   alias Beamicom.GB.DeferredFrame
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
+  @renderer Application.compile_env(:beamicom_gbc, :ppu_renderer, :native)
 
   @width 160
   @height 144
@@ -89,7 +90,7 @@ defmodule Beamicom.GB.PPU do
             color_ram: {@blank_color_ram, @blank_color_ram},
             color_cache: {@white_colors, @white_colors},
             color_indexes: {0, 0},
-            renderer: :native,
+            renderer: @renderer,
             renderer_state: nil
 
   @type mode :: 0 | 1 | 2 | 3
@@ -133,13 +134,7 @@ defmodule Beamicom.GB.PPU do
 
     model = Keyword.get(opts, :model, :dmg)
 
-    renderer =
-      case Application.get_env(:beamicom_gbc, :ppu_renderer, :native) do
-        :nx -> Beamicom.GB.Nx.PPURenderer
-        configured -> configured
-      end
-
-    renderer_state = prepare_renderer(renderer, model)
+    renderer_state = if @renderer == :native, do: nil, else: prepare_renderer(@renderer, model)
 
     ppu = %__MODULE__{
       vram: @blank_vram,
@@ -147,7 +142,7 @@ defmodule Beamicom.GB.PPU do
       frame: initial_frame(model),
       registers: registers,
       model: model,
-      renderer: renderer,
+      renderer: @renderer,
       renderer_state: renderer_state
     }
 
@@ -162,8 +157,6 @@ defmodule Beamicom.GB.PPU do
   def set_renderer(ppu, renderer) when is_atom(renderer) do
     %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.model), lines: []}
   end
-
-  defp prepare_renderer(:native, _model), do: nil
 
   defp prepare_renderer(renderer, model) do
     unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
@@ -199,6 +192,9 @@ defmodule Beamicom.GB.PPU do
   @doc "Most recently completed 160x144 framebuffer in pixel_format/1 format."
   @spec frame(t()) :: frame()
   def frame(%__MODULE__{frame: frame}), do: frame
+
+  @doc "Renderer selected when this core build was compiled."
+  def configured_renderer, do: @renderer
 
   @doc "Returns :dmg_shade_index for DMG or :rgb24 for CGB frames."
   @spec pixel_format(t()) :: :dmg_shade_index | :rgb24

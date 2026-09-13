@@ -8,36 +8,20 @@ background tiles and sprites instead of fetching their pattern bytes. At frame
 completion this adapter gathers those rows and composes all 240 by 256 palette
 addresses in one EXLA CPU call.
 
-Adding `beamicom_nes_nx` to a client starts the application and swaps in the
-faster atlas PPU and block APU renderers before a console is loaded:
+Add `beamicom_nes_nx` and select its renderers in the client's compile-time
+configuration:
 
 ```elixir
 {:beamicom_nes_nx, path: "../beamicom_nes_nx"}
+
+config :beamicom_nes,
+  ppu_renderer: Beamicom.NES.Nx.PPUAtlasRenderer,
+  apu_renderer: Beamicom.NES.Nx.APUBlockRenderer
 ```
 
-To load the package without changing renderer defaults, configure it before
-application startup and enable it explicitly later:
-
-```elixir
-config :beamicom_nes_nx, auto_enable: false
-
-Beamicom.NES.Nx.enable()
-Beamicom.NES.Nx.disable()
-```
-
-`enable/1` also accepts `:ppu_renderer` and `:apu_renderer` module overrides.
-The benchmark task accepts renderer choices when run from this project:
-
-```console
-mix nes.bench ../beamicom_nes/roms/castlevania3.nes --seconds 15 --renderer nx
-```
-
-The renderers can also be selected independently through the core boundary:
-
-```elixir
-Application.put_env(:beamicom_nes, :ppu_renderer, Beamicom.NES.Nx.PPURenderer)
-Application.put_env(:beamicom_nes, :apu_renderer, Beamicom.NES.Nx.APUBlockRenderer)
-```
+The values are consumed while `beamicom_nes` is compiled. Changing them
+requires recompilation; startup and frame execution never query the application
+environment for a backend.
 
 It implements the same `Beamicom.NES.APURenderer` callbacks as the core's pure
 Elixir `Beamicom.NES.APUBlockRenderer`. Switching implementations changes only
