@@ -1,6 +1,6 @@
 defmodule Beamicom.NES.Nx.APUBlockRenderer do
   @moduledoc """
-  Frame-block Nx renderer for the 2A03 and MMC5 audio channels.
+  Frame-block Nx renderer for the 2A03, MMC5, and mapper expansion audio.
 
   The native core supplies timestamped register operations while the oscillator
   and filter state remains resident on EXLA between calls.
@@ -25,11 +25,18 @@ defmodule Beamicom.NES.Nx.APUBlockRenderer do
   def restore(state), do: Nx.backend_copy(state, {EXLA.Backend, client: :host})
 
   @impl true
-  def render(state, events, cycles, dmc_samples) do
-    if length(dmc_samples) > 1024, do: raise("DMC sample-level block exceeds capacity")
+  def render(state, events, cycles, sample_inputs) do
+    if length(sample_inputs) > 1024, do: raise("sample-level block exceeds capacity")
+
+    {dmc_samples, expansion_samples} = split_inputs(sample_inputs)
 
     {event_tensor, event_count} = BlockAPU.events(events, cycles, @capacity)
     dmc = Nx.tensor(dmc_samples ++ List.duplicate(0, 1024 - length(dmc_samples)), type: :s32)
+
+    expansion =
+      Nx.tensor(expansion_samples ++ List.duplicate(0.0, 1024 - length(expansion_samples)),
+        type: :f64
+      )
 
     resident = fn tensor -> Nx.backend_copy(tensor, {EXLA.Backend, client: :host}) end
 
@@ -38,7 +45,8 @@ defmodule Beamicom.NES.Nx.APUBlockRenderer do
       resident.(event_tensor),
       resident.(event_count),
       resident.(Nx.tensor(cycles, type: :s32)),
-      resident.(dmc)
+      resident.(dmc),
+      resident.(expansion)
     ]
 
     {state, pcm, count, left, consumed} = apply(compiled(args), args)
@@ -59,7 +67,7 @@ defmodule Beamicom.NES.Nx.APUBlockRenderer do
     case :persistent_term.get(@compiled_key, nil) do
       nil ->
         fun =
-          EXLA.compile(&BlockAPU.run/5, Enum.map(args, &Nx.to_template/1), client: :host)
+          EXLA.compile(&BlockAPU.run/6, Enum.map(args, &Nx.to_template/1), client: :host)
 
         :persistent_term.put(@compiled_key, fun)
         fun
@@ -67,5 +75,14 @@ defmodule Beamicom.NES.Nx.APUBlockRenderer do
       fun ->
         fun
     end
+  end
+
+  defp split_inputs(inputs) do
+    inputs
+    |> Enum.map(fn
+      {dmc, expansion} -> {dmc, expansion}
+      dmc when is_integer(dmc) -> {dmc, 0.0}
+    end)
+    |> Enum.unzip()
   end
 end

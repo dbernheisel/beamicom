@@ -27,6 +27,7 @@ defmodule BeamicomV4L2.MixProject do
       {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
       {:beamicom_host, path: "../beamicom_host"},
+      {:beamicom_ei, path: "../beamicom_ei"},
       {:rustler_precompiled, "~> 0.9"},
       {:rustler, "~> 0.38", optional: true}
     ]

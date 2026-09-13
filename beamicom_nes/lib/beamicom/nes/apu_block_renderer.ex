@@ -14,8 +14,10 @@ defmodule Beamicom.NES.APUBlockRenderer do
   def prepare(apu), do: APU.set_output(apu, true)
 
   @impl true
-  def render(state, events, cycles, dmc_samples) do
+  def render(state, events, cycles, sample_inputs) do
+    {dmc_samples, expansion_samples} = split_inputs(sample_inputs)
     state = APU.set_external_dmc_samples(state, dmc_samples)
+    state = APU.set_external_expansion_samples(state, expansion_samples)
 
     {state, position} =
       Enum.reduce(events, {state, 0}, fn {at, addr, value}, {state, position} ->
@@ -37,7 +39,10 @@ defmodule Beamicom.NES.APUBlockRenderer do
     unless APU.external_dmc_consumed?(state),
       do: raise("Elixir APU block did not consume the complete DMC level stream")
 
-    {count, pcm, state |> APU.clear_external_dmc() |> Map.put(:dmc, nil)}
+    unless APU.external_expansion_consumed?(state),
+      do: raise("Elixir APU block did not consume the complete expansion level stream")
+
+    {count, pcm, state |> APU.clear_external_samples() |> Map.put(:dmc, nil)}
   end
 
   @impl true
@@ -52,4 +57,13 @@ defmodule Beamicom.NES.APUBlockRenderer do
 
   defp advance(state, 0), do: state
   defp advance(state, cycles), do: state |> APU.tick(cycles) |> APU.flush()
+
+  defp split_inputs(inputs) do
+    inputs
+    |> Enum.map(fn
+      {dmc, expansion} -> {dmc, expansion}
+      dmc when is_integer(dmc) -> {dmc, 0.0}
+    end)
+    |> Enum.unzip()
+  end
 end

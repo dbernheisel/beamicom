@@ -1,6 +1,6 @@
 # Beamicom Host
 
-Dependency-free contracts shared by Beamicom emulator cores and clients.
+Contracts shared by Beamicom emulator cores and clients.
 
 The host boundary is deliberately coarse. A core implements
 `Beamicom.Host.System` to load media, run to its next output boundary, and

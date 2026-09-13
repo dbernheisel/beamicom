@@ -24,7 +24,11 @@ defmodule Beamicom.NES.PPU do
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPURenderer}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPUAtlasRenderer}
   @renderer Application.compile_env(:beamicom_nes, :ppu_renderer, :native)
-  @apu_renderer Application.compile_env(:beamicom_nes, :apu_renderer, :native)
+  @apu_renderer Application.compile_env(
+                  :beamicom_nes,
+                  :apu_renderer,
+                  Beamicom.NES.APUBlockRenderer
+                )
 
   # Bit-reversed byte lookup (input is always 0..255), computed at compile time:
   # turns the 8-iteration reduce in horizontal sprite flips into one `elem/2`.

@@ -1,11 +1,13 @@
 defmodule Beamicom.NES.Nx.APU do
   @moduledoc "Resident numeric 2A03/MMC5 oscillator, sequencer, mixer, and filter state. DMC levels are supplied by the native control path."
   import Nx.Defn
+
   @pulse for(n <- 0..30, do: if(n == 0, do: 0.0, else: 95.52 / (8128.0 / n + 100)))
   @tnd for(n <- 0..202, do: if(n == 0, do: 0.0, else: 163.67 / (24329.0 / n + 100)))
   @m5 for(n <- 0..30, do: if(n == 0, do: 0.0, else: 95.88 / (8128 / n + 100)))
   @pcm for(n <- 0..255, do: n / 255 * 0.25)
   @ratio 44_100 / 1_789_773
+
   # LFSR evolution is linear over XOR. Three 5-bit lookup chunks exactly
   # reconstruct any 15-bit state after 0..32 steps, for either feedback tap.
   @noise_jump (fn ->
@@ -17,6 +19,7 @@ defmodule Beamicom.NES.Nx.APU do
                    end)
                  end
                end).()
+
   def pack(s) do
     if s.sunsoft5b != nil,
       do: raise(ArgumentError, "Sunsoft 5B is not implemented in the Nx APU renderer")
@@ -27,7 +30,10 @@ defmodule Beamicom.NES.Nx.APU do
       :samples,
       :dmc_samples,
       :dmc_silent_samples,
+      :expansion_samples,
+      :expansion_silent_samples,
       :external_dmc_samples,
+      :external_expansion_samples,
       :dmc,
       :sunsoft5b
     ])

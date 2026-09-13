@@ -36,17 +36,14 @@ facade over the system-neutral `Beamicom.Host.Output`:
   reference-counted across subscribers, and audio chunks are never dropped.
 
 APU waveform rendering has a backend-neutral frame-block boundary. The default
-`:native` mode emits samples inline. The dependency-free deferred Elixir
-implementation uses the same timestamped operations and DMC-level stream as the
-optional Nx implementation:
-
-```elixir
-Application.put_env(:beamicom_nes, :apu_renderer, Beamicom.NES.APUBlockRenderer)
-```
+dependency-free Elixir renderer replays timestamped 2A03 and MMC5 operations at
+the frame boundary. DMC and Sunsoft 5B remain clocked in the live control state;
+their sample-boundary levels are included in the block so mapper timing remains
+exact. An optional package can replace this renderer at compile time.
 
 Both renderers implement `Beamicom.NES.APURenderer`; the core has no Nx or EXLA
-dependency. CPU-visible length status, DMC DMA, and APU IRQs remain in the live
-native control state for every backend.
+dependency. CPU-visible length status, DMC DMA, APU IRQs, and mapper expansion
+audio remain in the live native control state for every backend.
 
 `Beamicom.NES.Runtime` is the emulation loop (a `GenServer`): it paces frames
 from a fixed monotonic epoch so timing error doesn't accumulate, and publishes
@@ -117,8 +114,8 @@ auto-release unless refreshed by keyboard repeat.
 
 ### EI Unix-socket input
 
-Core Beamicom implements the standard binary EI handshake, device, button, and
-frame interfaces directly in Elixir:
+The shared [`beamicom_ei`](../beamicom_ei/) project implements the standard
+binary EI handshake, device, button, and frame interfaces directly in Elixir:
 
 ```elixir
 {:ok, server} =

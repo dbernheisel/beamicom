@@ -52,12 +52,13 @@ these medians with identical video and audio hashes:
 
 | PPU | APU | FPS | Difference from native |
 | --- | --- | ---: | ---: |
-| native | native | 51.55 | — |
-| frame-wide Nx | block Nx | 51.45 | -0.2% |
+| native | block Elixir | 52.72 | — |
+| frame-wide Nx | block Nx | 51.90 | -1.6% |
 
 Moving deferred APU time into the compact bus state and skipping inactive
-device work raised both current paths by roughly 10–13%. The frame-wide Nx path
-is now effectively even with native for this single-instance workload. The
-raw-row and event-block boundaries are intended
-for larger kernels and future leading-axis batching without slowing clients
-that use the native core.
+device work raised both current paths. The dependency-free core now uses its
+Elixir block mixer by default, while the optional package selects the Nx block
+mixer at compile time. Their matching hashes confirm the same output; on this
+single-instance workload the Elixir path remains slightly faster. The raw-row
+and event-block boundaries remain available for larger kernels and future
+leading-axis batching.

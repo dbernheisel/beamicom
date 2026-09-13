@@ -16,41 +16,38 @@ that can run NES, Game Boy, and Game Boy Color ROMs.
 | Project | Purpose | Start here |
 | --- | --- | --- |
 | [`beamicom_host`](./beamicom_host/) | Shared system, input, video/audio envelope, and coalesced-output contracts | [Host documentation](./beamicom_host/README.md) |
+| [`beamicom_ei`](./beamicom_ei/) | Shared pure-Elixir EI Unix-socket controller server and client | [EI documentation](./beamicom_ei/README.md) |
 | [`beamicom_nes`](./beamicom_nes/) | Headless NES core: CPU, PPU, APU, mappers, input, and audio/video output | [Core documentation](./beamicom_nes/README.md) · [Mapper compatibility](./beamicom_nes/MAPPERS.md) |
 | [`beamicom_nes_nx`](./beamicom_nes_nx/) | Optional EXLA renderers for batched NES video and audio work | [Nx renderer documentation](./beamicom_nes_nx/README.md) |
 | [`beamicom_gbc`](./beamicom_gbc/) | Headless DMG/CGB core with an SM83 CPU, mapped devices, cartridge controllers, video, and audio | [Game Boy core documentation](./beamicom_gbc/README.md) |
 | [`beamicom_gbc_nx`](./beamicom_gbc_nx/) | Optional EXLA frame and audio renderers for the DMG/CGB core | [Nx renderer documentation](./beamicom_gbc_nx/README.md) |
-| [`beamicom_scenic`](./beamicom_scenic/) | NES desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
-| [`beamicom_phx`](./beamicom_phx/) | NES/GB/GBC Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
-| [`beamicom_stream`](./beamicom_stream/) | Local NES/GB/GBC AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
-| [`beamicom_v4l2`](./beamicom_v4l2/) | NES/GB/GBC Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
+| [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
+| [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
+| [`beamicom_stream`](./beamicom_stream/) | Local AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
+| [`beamicom_v4l2`](./beamicom_v4l2/) | Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
 
-Both cores depend on the sibling host contract. The stream, Phoenix, and V4L2
-clients directly depend on both cores and the host; Scenic remains NES-only.
+Both cores depend on the sibling host contract and shared EI controller
+protocol. The client projects that use EI also declare it directly.
 These are sibling path dependencies, so keep the directories together when
 working with an individual project.
 
 ```text
-beamicom_nes ─────> beamicom_host
+beamicom_nes ─────> beamicom_host, beamicom_ei
 beamicom_nes_nx ──> beamicom_nes
-beamicom_gbc ─────> beamicom_host
+beamicom_gbc ─────> beamicom_host, beamicom_ei
 beamicom_gbc_nx ──> beamicom_gbc
-beamicom_stream ──> beamicom_nes
-beamicom_stream ──> beamicom_gbc
-beamicom_stream ──> beamicom_host
-beamicom_scenic ──> beamicom_nes
-beamicom_v4l2 ────> beamicom_nes, beamicom_gbc, beamicom_host
-beamicom_phx ─────> beamicom_nes
-beamicom_phx ─────> beamicom_gbc
-beamicom_phx ─────> beamicom_host
-beamicom_phx ─────> beamicom_stream
+beamicom_stream ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
+beamicom_scenic ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
+beamicom_v4l2 ────> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
+beamicom_phx ─────> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei,
+                    beamicom_stream
 ```
 
 ## Quick start
 
 Each project has its own Mix configuration and should be run from its directory.
 
-Run either core or the shared host test suite:
+Run either core or one of the shared-library test suites:
 
 ```sh
 cd beamicom_nes
@@ -60,6 +57,9 @@ cd ../beamicom_gbc
 mix test
 
 cd ../beamicom_host
+mix test
+
+cd ../beamicom_ei
 mix test
 ```
 

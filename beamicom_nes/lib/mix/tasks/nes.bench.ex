@@ -52,7 +52,10 @@ defmodule Mix.Tasks.Nes.Bench do
       end
 
     if renderer_module != configured_ppu,
-      do: Mix.raise("PPU renderer is compile-time; this build contains #{configured_ppu_name(configured_ppu)}")
+      do:
+        Mix.raise(
+          "PPU renderer is compile-time; this build contains #{configured_ppu_name(configured_ppu)}"
+        )
 
     configured_apu = Beamicom.NES.Bus.configured_apu_renderer()
     audio_renderer = Keyword.get(opts, :audio_renderer, configured_apu_name(configured_apu))
@@ -72,7 +75,11 @@ defmodule Mix.Tasks.Nes.Bench do
         )
 
     if audio_renderer_module != configured_apu,
-      do: Mix.raise("APU renderer is compile-time; this build contains #{configured_apu_name(configured_apu)}")
+      do:
+        Mix.raise(
+          "APU renderer is compile-time; this build contains #{configured_apu_name(configured_apu)}"
+        )
+
     media = File.read!(path)
     seconds = Keyword.get(opts, :seconds, 15)
     repeats = Keyword.get(opts, :repeats, 3)

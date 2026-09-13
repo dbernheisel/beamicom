@@ -99,6 +99,35 @@ defmodule Beamicom.NES.APUTest do
     assert elem(apu.sunsoft5b.regs, 0) == 0
   end
 
+  test "dependency-free block renderer is sample-exact with Sunsoft 5B" do
+    cycles = 40_000
+
+    configure = fn apu ->
+      apu
+      |> APU.sunsoft5b_select(0)
+      |> APU.sunsoft5b_write(100)
+      |> APU.sunsoft5b_select(1)
+      |> APU.sunsoft5b_write(0)
+      |> APU.sunsoft5b_select(7)
+      |> APU.sunsoft5b_write(0x3E)
+      |> APU.sunsoft5b_select(8)
+      |> APU.sunsoft5b_write(15)
+    end
+
+    reference = configure.(APU.new()) |> APU.tick(cycles)
+    {expected_count, expected_pcm, _reference} = APU.take_pcm(reference)
+
+    control = configure.(APU.set_output(APU.new(), false)) |> APU.tick(cycles) |> APU.flush()
+    {sample_inputs, _control} = APU.take_renderer_samples(control)
+    renderer = Beamicom.NES.APUBlockRenderer
+
+    {count, pcm, _state} =
+      renderer.render(renderer.prepare(APU.new()), [], cycles, sample_inputs)
+
+    assert count == expected_count
+    assert pcm == expected_pcm
+  end
+
   test "an enabled noise channel in envelope mode produces sound (whip/whoosh)" do
     # Castlevania 3's whip swing is a noise burst in *envelope* mode: constant
     # flag clear, so volume comes from the decay counter (starts at 15), not the
@@ -194,14 +223,14 @@ defmodule Beamicom.NES.APUTest do
     bus = Console.load(@nestest).bus
     cycles = [37, 41, 29, 113, 7, 251]
     total = Enum.sum(cycles)
-    expected_apu = APU.tick(bus.apu, total)
+    expected_apu = bus.apu |> APU.set_output(true) |> APU.tick(total)
     {expected_samples, expected_apu} = APU.take_samples(expected_apu)
 
     bus = Enum.reduce(cycles, bus, fn count, current -> Bus.flush_ticks(current, count) end)
     {samples, bus} = Bus.take_audio(bus)
 
     assert samples == expected_samples
-    assert bus.apu == expected_apu
+    assert bus.apu_renderer_state == expected_apu
     assert bus.apu_pending == 0
   end
 

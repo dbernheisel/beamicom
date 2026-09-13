@@ -21,8 +21,11 @@ defmodule BeamicomNES.MixProject do
 
   # Run "mix help deps" to learn about dependencies.
   # The core emulator has no third-party dependencies. Its system-neutral host
-  # contract is the sibling `beamicom_host` project.
+  # contract and EI input protocol are sibling projects.
   defp deps do
-    [{:beamicom_host, path: "../beamicom_host"}]
+    [
+      {:beamicom_host, path: "../beamicom_host"},
+      {:beamicom_ei, path: "../beamicom_ei"}
+    ]
   end
 end

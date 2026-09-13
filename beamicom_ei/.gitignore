@@ -2,6 +2,7 @@
 /cover/
 /deps/
 /doc/
-/.elixir_ls/
+/tmp/
 erl_crash.dump
-/roms/
+*.ez
+beamicom_ei-*.tar

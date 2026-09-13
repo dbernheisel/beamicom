@@ -605,6 +605,7 @@ defmodule Beamicom.GB.Bus do
 
     bus = tick_timers(bus, clocks)
     {ppu, signals} = PPU.tick(ppu, dots)
+
     bus = %{
       bus
       | ppu: ppu,

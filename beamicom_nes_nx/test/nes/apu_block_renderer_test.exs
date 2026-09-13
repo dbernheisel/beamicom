@@ -37,6 +37,34 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
     assert length(dmc_levels) == expected_count
   end
 
+  test "block rendering mixes native-timed Sunsoft 5B samples exactly" do
+    cycles = 40_000
+
+    configure = fn apu ->
+      apu
+      |> APU.sunsoft5b_select(0)
+      |> APU.sunsoft5b_write(100)
+      |> APU.sunsoft5b_select(1)
+      |> APU.sunsoft5b_write(0)
+      |> APU.sunsoft5b_select(7)
+      |> APU.sunsoft5b_write(0x3E)
+      |> APU.sunsoft5b_select(8)
+      |> APU.sunsoft5b_write(15)
+    end
+
+    reference = configure.(APU.new()) |> APU.tick(cycles)
+    {expected_count, expected_pcm, _reference} = APU.take_pcm(reference)
+
+    control = configure.(APU.set_output(APU.new(), false)) |> APU.tick(cycles) |> APU.flush()
+    {sample_inputs, _control} = APU.take_renderer_samples(control)
+
+    {count, pcm, _state} =
+      APUBlockRenderer.render(APUBlockRenderer.prepare(APU.new()), [], cycles, sample_inputs)
+
+    assert count == expected_count
+    assert pcm == expected_pcm
+  end
+
   test "live frame event capture is exact and survives save-state restore" do
     media = File.read!("../beamicom_nes/test/support/fixtures/nestest.nes")
     {:ok, accelerated} = Beamicom.NES.System.load(media)

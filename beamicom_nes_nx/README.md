@@ -33,8 +33,8 @@ mix nes.bench ../beamicom_nes/roms/castlevania3.nes --seconds 15 \
   --renderer nx_atlas --audio-renderer nx_block --rgb-consumers 3
 ```
 
-The native renderer remains the default when `beamicom_nes_nx` is absent and
-requires neither Nx nor EXLA.
+The dependency-free Elixir block renderer remains the default when
+`beamicom_nes_nx` is absent and requires neither Nx nor EXLA.
 
 ## Current result
 
@@ -62,19 +62,18 @@ moves into the adapter. CHR RAM and latch-driven cartridges automatically use
 the byte-capture path.
 
 The block APU retains oscillator and filter state on EXLA. The native bus records
-timestamped register operations and continues to maintain frame/DMC IRQs, length
-status, and DMC DMA. For DMC playback it sends one DAC level per output sample so
-the compiled nonlinear triangle/noise/DMC mixer remains exact without placing a
-variable-length DMA buffer in the graph. Sunsoft 5B cartridges automatically stay
-on native audio.
+timestamped 2A03 and MMC5 register operations and continues to maintain
+frame/DMC IRQs, length status, DMC DMA, and Sunsoft 5B timing. For DMC and
+Sunsoft 5B playback it sends one resolved level per output sample, keeping the
+compiled mixer exact without placing variable-length mapper or DMA state in the
+graph. Mapper 5 and mapper 69 cartridges therefore use the same Nx block path.
 
 The PPU and APU programs execute concurrently at the frame output boundary. In
-three repeated 902-frame Castlevania III runs, the combined `nx_atlas` +
-`nx_block` path produced identical RGB, PCM, and canonical state hashes at a
-median **107.94 FPS** (106.74–110.40). That is 36.5% faster than the 79.09 FPS Nx
-atlas/native-audio path and 62.2% faster than the 66.54 FPS fully native
-three-consumer workload. The renderer also survives save-state snapshot and
-restore with its resident state reconstructed on EXLA.
+the latest three repeated 902-frame Castlevania III runs, the combined
+`nx_atlas` + `nx_block` path produced identical RGB and PCM hashes at a median
+**112.37 FPS** (110.53–113.80). The dependency-free block build reached 64.17
+FPS (64.04–64.41) with the same three RGB consumers. The renderer also survives
+save-state snapshot and restore with its resident state reconstructed on EXLA.
 
 The dependency-free Elixir block renderer produces the same Castlevania III PCM
 and framebuffer hashes. With a native PPU it reaches 65.69 FPS versus 66.54 FPS

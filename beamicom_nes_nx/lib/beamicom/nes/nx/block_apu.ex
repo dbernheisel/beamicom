@@ -2,8 +2,10 @@ defmodule Beamicom.NES.Nx.BlockAPU do
   @moduledoc "Timestamped Nx audio blocks: vector waveform evaluation between control events, sequential filters."
   import Nx.Defn
   alias Beamicom.NES.Nx.APU
+
   @ratio 44_100 / 1_789_773
   @width 128
+
   # Binary powers of the exact 15-bit linear noise transition. Arbitrary jumps
   # within an epoch require 13 stages, applied across all sample times at once.
   @jump (fn ->
@@ -38,21 +40,21 @@ defmodule Beamicom.NES.Nx.BlockAPU do
     {Nx.tensor(rows, type: :s32), Nx.tensor(length(entries), type: :s32)}
   end
 
-  defn run(s, events, event_count, cycles, dmc) do
-    {s, pos, index, pcm, count, _, _, _, _} =
+  defn run(s, events, event_count, cycles, dmc, expansion) do
+    {s, pos, index, pcm, count, _, _, _, _, _} =
       while {s, pos = Nx.tensor(0, type: :s32), index = Nx.tensor(0, type: :s32),
              pcm = Nx.broadcast(Nx.tensor(0, type: :s16), {1024}),
-             count = Nx.tensor(0, type: :s32), events, event_count, cycles, dmc},
+             count = Nx.tensor(0, type: :s32), events, event_count, cycles, dmc, expansion},
             count < 1024 and (pos < cycles or (index < event_count and events[index][0] == pos)) do
         next_write = Nx.select(index < event_count, events[index][0], cycles + 1)
 
         if next_write == pos do
           s = Beamicom.NES.Nx.APUWrites.apply(s, events[index][1], events[index][2])
-          {s, pos, index + 1, pcm, count, events, event_count, cycles, dmc}
+          {s, pos, index + 1, pcm, count, events, event_count, cycles, dmc, expansion}
         else
           dc = Nx.min(cycles - pos, Nx.min(next_write - pos, boundary(s)))
-          {s, used, pcm, count} = segment(s, dc, pcm, count, dmc)
-          {s, pos + used, index, pcm, count, events, event_count, cycles, dmc}
+          {s, used, pcm, count} = segment(s, dc, pcm, count, dmc, expansion)
+          {s, pos + used, index, pcm, count, events, event_count, cycles, dmc, expansion}
         end
       end
 
@@ -80,7 +82,7 @@ defmodule Beamicom.NES.Nx.BlockAPU do
     )
   end
 
-  defnp segment(s, dc, pcm, count, dmc) do
+  defnp segment(s, dc, pcm, count, dmc, expansion) do
     # Only the sample clock is recurrent here; channel maps are not loop carries.
     {acc, used, n, offsets, _, _} =
       while {acc = s.sample_acc, used = Nx.tensor(0, type: :s32), n = Nx.tensor(0, type: :s32),
@@ -101,7 +103,11 @@ defmodule Beamicom.NES.Nx.BlockAPU do
 
     # All waveform evaluations in this epoch run as tensor operations.
     sample_indices = Nx.min(count + Nx.iota({@width}, type: :s32), 1023)
-    values = APU.mix(clock(s, offsets), Nx.take(dmc, sample_indices))
+
+    values =
+      APU.mix(clock(s, offsets), Nx.take(dmc, sample_indices)) +
+        Nx.take(expansion, sample_indices)
+
     final = clock(s, used)
 
     {hp, previous, lp, pcm, _, _, _, _} =

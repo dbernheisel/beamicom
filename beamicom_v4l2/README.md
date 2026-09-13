@@ -279,7 +279,8 @@ Select another path when launching if needed:
 mix beamicom.v4l2 game.nes --socket /tmp/my-controller.sock
 ```
 
-The reusable EI server, client, and codec live in core Beamicom without a NIF.
+The reusable EI server, client, and codec live in the sibling
+[`beamicom_ei`](../beamicom_ei/) project without a NIF.
 
 #### Direct API
 

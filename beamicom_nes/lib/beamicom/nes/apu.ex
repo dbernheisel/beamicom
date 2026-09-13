@@ -98,9 +98,15 @@ defmodule Beamicom.NES.APU do
             # each audio sample. DMA/status/IRQ timing still advances natively.
             dmc_samples: [],
             dmc_silent_samples: 0,
+            # Sunsoft 5B is clocked by the live mapper-facing state. Its output
+            # level at each PCM boundary is forwarded to block renderers so the
+            # optional Nx implementation does not duplicate the AY oscillator.
+            expansion_samples: [],
+            expansion_silent_samples: 0,
             # Deferred renderers can supply the CPU-timed DMC DAC stream while a
             # private APU state synthesizes the remaining channels.
             external_dmc_samples: nil,
+            external_expansion_samples: nil,
             # The DMC IRQ line is kept top-level (not in `dmc`) so `irq?/1` — polled
             # every CPU instruction — stays a single read.
             dmc_irq: false,
@@ -126,10 +132,18 @@ defmodule Beamicom.NES.APU do
     do: %{apu | external_dmc_samples: samples}
 
   @doc false
+  def set_external_expansion_samples(apu, samples) when is_list(samples),
+    do: %{apu | external_expansion_samples: samples}
+
+  @doc false
   def external_dmc_consumed?(apu), do: apu.external_dmc_samples == []
 
   @doc false
-  def clear_external_dmc(apu), do: %{apu | external_dmc_samples: nil}
+  def external_expansion_consumed?(apu), do: apu.external_expansion_samples == []
+
+  @doc false
+  def clear_external_samples(apu),
+    do: %{apu | external_dmc_samples: nil, external_expansion_samples: nil}
 
   @doc "Select a Sunsoft 5B internal audio register ($C000-$DFFF)."
   def sunsoft5b_select(apu, value) do
@@ -189,9 +203,29 @@ defmodule Beamicom.NES.APU do
   end
 
   @doc false
+  def take_renderer_samples(apu) do
+    dmc = List.duplicate(0, apu.dmc_silent_samples) ++ Enum.reverse(apu.dmc_samples)
+
+    expansion =
+      List.duplicate(0.0, apu.expansion_silent_samples) ++ Enum.reverse(apu.expansion_samples)
+
+    unless length(dmc) == length(expansion),
+      do: raise("deferred APU sample inputs lost synchronization")
+
+    {Enum.zip(dmc, expansion),
+     %{
+       apu
+       | dmc_samples: [],
+         dmc_silent_samples: 0,
+         expansion_samples: [],
+         expansion_silent_samples: 0
+     }}
+  end
+
+  @doc false
   def take_dmc_samples(apu) do
-    levels = List.duplicate(0, apu.dmc_silent_samples) ++ Enum.reverse(apu.dmc_samples)
-    {levels, %{apu | dmc_samples: [], dmc_silent_samples: 0}}
+    {samples, apu} = take_renderer_samples(apu)
+    {Enum.map(samples, &elem(&1, 0)), apu}
   end
 
   # Samples are accumulated newest-first. Consing each encoded sample while
@@ -402,6 +436,16 @@ defmodule Beamicom.NES.APU do
     run(advance_control(apu, dc), n - dc)
   end
 
+  defp run(%{output_enabled: false, sunsoft5b: %Sunsoft5B{}} = apu, n) do
+    dc =
+      min(
+        n,
+        min(to_sample(apu), min(to_frame(apu), if(apu.m5_active, do: to_m5(apu), else: n)))
+      )
+
+    run(advance_control(apu, dc), n - dc)
+  end
+
   defp run(%{output_enabled: false, dmc: %DMC{}} = apu, n) do
     dc = min(n, min(to_sample(apu), to_frame(apu)))
     run(advance_control(apu, dc), n - dc)
@@ -489,12 +533,17 @@ defmodule Beamicom.NES.APU do
     sample_total = apu.sample_acc + dc * @rate_ratio
 
     {sample_acc, silent_samples} =
-      if apu.dmc do
+      if apu.dmc != nil or apu.sunsoft5b != nil do
         {sample_total, apu.dmc_silent_samples}
       else
         emitted = trunc(sample_total)
         {sample_total - emitted, apu.dmc_silent_samples + emitted}
       end
+
+    expansion_silent_samples =
+      if apu.sunsoft5b,
+        do: apu.expansion_silent_samples,
+        else: apu.expansion_silent_samples + trunc(sample_total)
 
     apu =
       %{
@@ -502,6 +551,7 @@ defmodule Beamicom.NES.APU do
         | seq_cycle: apu.seq_cycle + dc,
           sample_acc: sample_acc,
           dmc_silent_samples: silent_samples,
+          expansion_silent_samples: expansion_silent_samples,
           apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
       }
       |> frame_action()
@@ -516,7 +566,19 @@ defmodule Beamicom.NES.APU do
 
     if apu.sample_acc >= 1.0 do
       level = if apu.dmc, do: apu.dmc.output, else: 0
-      %{apu | sample_acc: apu.sample_acc - 1.0, dmc_samples: [level | apu.dmc_samples]}
+      expansion = if apu.sunsoft5b, do: Sunsoft5B.output(apu.sunsoft5b), else: 0.0
+
+      expansion_samples =
+        if apu.sunsoft5b,
+          do: [expansion | apu.expansion_samples],
+          else: apu.expansion_samples
+
+      %{
+        apu
+        | sample_acc: apu.sample_acc - 1.0,
+          dmc_samples: [level | apu.dmc_samples],
+          expansion_samples: expansion_samples
+      }
     else
       apu
     end
@@ -827,6 +889,8 @@ defmodule Beamicom.NES.APU do
         true -> 0.0
       end
 
+    expansion = expansion + external_expansion_level(apu)
+
     pulse_out + elem(@tnd_table, tnd) + expansion
   end
 
@@ -834,10 +898,18 @@ defmodule Beamicom.NES.APU do
   defp dmc_level(%{dmc: %DMC{output: o}}), do: o
   defp dmc_level(_), do: 0
 
-  defp consume_external_dmc(%{external_dmc_samples: [_ | rest]} = apu),
-    do: %{apu | external_dmc_samples: rest}
+  defp external_expansion_level(%{external_expansion_samples: [level | _]}), do: level
+  defp external_expansion_level(_), do: 0.0
 
-  defp consume_external_dmc(apu), do: apu
+  defp consume_external_dmc(%{external_dmc_samples: [_ | rest]} = apu),
+    do: consume_external_expansion(%{apu | external_dmc_samples: rest})
+
+  defp consume_external_dmc(apu), do: consume_external_expansion(apu)
+
+  defp consume_external_expansion(%{external_expansion_samples: [_ | rest]} = apu),
+    do: %{apu | external_expansion_samples: rest}
+
+  defp consume_external_expansion(apu), do: apu
 
   # NES RCA output circuit: a DC-blocking first-order high-pass (90Hz) then a
   # first-order low-pass, applied per 44.1kHz sample. The low-pass sits at 8kHz

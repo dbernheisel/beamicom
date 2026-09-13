@@ -17,7 +17,11 @@ defmodule Beamicom.GB.APU do
   import Bitwise
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
-  @renderer Application.compile_env(:beamicom_gbc, :apu_renderer, :native)
+  @renderer Application.compile_env(
+              :beamicom_gbc,
+              :apu_renderer,
+              Beamicom.GB.APUBlockRenderer
+            )
 
   @clock_rate 4_194_304
   @sample_rate 44_100

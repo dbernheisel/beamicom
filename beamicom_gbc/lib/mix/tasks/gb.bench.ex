@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Gb.Bench do
   @shortdoc "Measure deterministic uncapped Game Boy audio/video emulation"
   @moduledoc """
-  mix gb.bench ROM [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|nx_block|nx_synth]
+  mix gb.bench ROM [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|elixir_block|nx_block|nx_synth]
 
   Runs from either the dependency-free core or an optional renderer project.
   One complete untimed run warms loaded code and compiled renderer programs.
@@ -25,10 +25,14 @@ defmodule Mix.Tasks.Gb.Bench do
     repeats = Keyword.get(opts, :repeats, 3)
     configured_ppu = Beamicom.GB.PPU.configured_renderer()
     configured_apu = Beamicom.GB.APU.configured_renderer()
-    renderer = renderer(Keyword.get(opts, :renderer, renderer_name(configured_ppu) |> to_string()))
+
+    renderer =
+      renderer(Keyword.get(opts, :renderer, renderer_name(configured_ppu) |> to_string()))
 
     audio_renderer =
-      audio_renderer(Keyword.get(opts, :audio_renderer, renderer_name(configured_apu) |> to_string()))
+      audio_renderer(
+        Keyword.get(opts, :audio_renderer, renderer_name(configured_apu) |> to_string())
+      )
 
     if frames < 1 or repeats < 1, do: Mix.raise("frames and repeats must be positive")
 
@@ -79,6 +83,7 @@ defmodule Mix.Tasks.Gb.Bench do
   defp renderer(_), do: Mix.raise("renderer must be native or nx")
 
   defp audio_renderer("native"), do: :native
+  defp audio_renderer("elixir_block"), do: Beamicom.GB.APUBlockRenderer
 
   defp audio_renderer("nx_block") do
     ensure_renderer!(Beamicom.GB.Nx.APUBlockRenderer)
@@ -88,7 +93,8 @@ defmodule Mix.Tasks.Gb.Bench do
     ensure_renderer!(Beamicom.GB.Nx.APUSynthRenderer)
   end
 
-  defp audio_renderer(_), do: Mix.raise("audio-renderer must be native, nx_block, or nx_synth")
+  defp audio_renderer(_),
+    do: Mix.raise("audio-renderer must be native, elixir_block, nx_block, or nx_synth")
 
   defp ensure_renderer!(module) do
     if Code.ensure_loaded?(module),
@@ -106,6 +112,7 @@ defmodule Mix.Tasks.Gb.Bench do
   end
 
   defp renderer_name(:native), do: :native
+  defp renderer_name(Beamicom.GB.APUBlockRenderer), do: :elixir_block
   defp renderer_name(Beamicom.GB.Nx.PPURenderer), do: :nx
   defp renderer_name(Beamicom.GB.Nx.APUBlockRenderer), do: :nx_block
   defp renderer_name(Beamicom.GB.Nx.APUSynthRenderer), do: :nx_synth

@@ -22,6 +22,7 @@ defmodule BeamicomScenic.MixProject do
       {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
       {:beamicom_host, path: "../beamicom_host"},
+      {:beamicom_ei, path: "../beamicom_ei"},
       {:scenic, "~> 0.11"},
       {:scenic_driver_local, "~> 0.11"}
     ]

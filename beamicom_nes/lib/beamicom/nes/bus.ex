@@ -23,7 +23,11 @@ defmodule Beamicom.NES.Bus do
   # Match APU's lazy-run threshold, but keep the per-instruction accumulator on
   # the smaller Bus state so the large APU struct is not rebuilt every step.
   @apu_flush_threshold 100
-  @apu_renderer Application.compile_env(:beamicom_nes, :apu_renderer, :native)
+  @apu_renderer Application.compile_env(
+                  :beamicom_nes,
+                  :apu_renderer,
+                  Beamicom.NES.APUBlockRenderer
+                )
 
   @default_mapper_state %{
     submapper: 0,
@@ -90,19 +94,7 @@ defmodule Beamicom.NES.Bus do
 
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
     apu = Beamicom.NES.APU.new()
-    # Sunsoft 5B synthesis is still native; mapper 69 must not enter a renderer
-    # that only implements the 2A03/MMC5 block contract.
-    renderer = if cart.mapper == 69, do: :native, else: @apu_renderer
-
-    {apu, renderer_state} =
-      if renderer == :native do
-        {apu, nil}
-      else
-        unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
-          do: raise("invalid NES APU renderer: #{inspect(renderer)}")
-
-        {Beamicom.NES.APU.set_output(apu, false), apply(renderer, :prepare, [apu])}
-      end
+    {apu, renderer_state} = prepare_apu_renderer(apu)
 
     bus = %__MODULE__{
       ram: <<0::size(0x800 * 8)>>,
@@ -116,11 +108,22 @@ defmodule Beamicom.NES.Bus do
           prg_ram_size: (cart.prg_ram_size || 0) + (cart.prg_nvram_size || 0)
       },
       apu: apu,
-      apu_renderer: renderer,
+      apu_renderer: @apu_renderer,
       apu_renderer_state: renderer_state
     }
 
     Mapper.reset(bus)
+  end
+
+  if @apu_renderer == :native do
+    defp prepare_apu_renderer(apu), do: {apu, nil}
+  else
+    defp prepare_apu_renderer(apu) do
+      unless Code.ensure_loaded?(@apu_renderer) and function_exported?(@apu_renderer, :prepare, 1),
+        do: raise("invalid NES APU renderer: #{inspect(@apu_renderer)}")
+
+      {Beamicom.NES.APU.set_output(apu, false), apply(@apu_renderer, :prepare, [apu])}
+    end
   end
 
   @doc "Advance the clock by `cycles` CPU cycles (3 PPU dots each; APU per cycle)."
@@ -199,14 +202,14 @@ defmodule Beamicom.NES.Bus do
       {sample_count, pcm, apu} = Beamicom.NES.APU.take_pcm(bus.apu)
       {sample_count, pcm, %{bus | apu: apu}}
     else
-      {dmc_samples, apu} = Beamicom.NES.APU.take_dmc_samples(bus.apu)
+      {sample_inputs, apu} = Beamicom.NES.APU.take_renderer_samples(bus.apu)
 
       {sample_count, pcm, state} =
         apply(bus.apu_renderer, :render, [
           bus.apu_renderer_state,
           Enum.reverse(bus.apu_events),
           bus.apu_cycles,
-          dmc_samples
+          sample_inputs
         ])
 
       bus = %{

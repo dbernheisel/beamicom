@@ -23,6 +23,7 @@ defmodule BeamicomStream.MixProject do
       {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
       {:beamicom_host, path: "../beamicom_host"},
+      {:beamicom_ei, path: "../beamicom_ei"},
       {:membrane_core, "~> 1.3"},
       {:membrane_ffmpeg_swscale_plugin, "~> 0.16"},
       {:membrane_ffmpeg_swresample_plugin, "~> 0.20"},
