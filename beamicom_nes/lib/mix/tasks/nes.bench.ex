@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Nes.Bench do
   @shortdoc "Measure a deterministic, uncapped NES workload (audio and video enabled)"
   @moduledoc """
-  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--audio-renderer native|elixir_block|nx_block] [--rgb-consumers 0] [--output result.json] [--profile]
+  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx] [--video-filter native|composite|svideo|rgb|monochrome] [--audio-renderer native|elixir_block|nx_block] [--rgb-consumers 0] [--output result.json] [--profile]
 
   Each run cold-boots with no buttons pressed. One untimed run warms code before
   measurements. Hashing is outside the per-frame timer, but included in wall time.
@@ -11,8 +11,8 @@ defmodule Mix.Tasks.Nes.Bench do
   use Mix.Task
   @compile {:no_warn_undefined, :tprof}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPURenderer}
-  @compile {:no_warn_undefined, Beamicom.NES.Nx.PPUAtlasRenderer}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.APUBlockRenderer}
+  @compile {:no_warn_undefined, Beamicom.NES.Nx.BlarggNTSC.Renderer}
 
   @impl true
   def run(args) do
@@ -23,6 +23,7 @@ defmodule Mix.Tasks.Nes.Bench do
           repeats: :integer,
           output: :string,
           renderer: :string,
+          video_filter: :string,
           audio_renderer: :string,
           rgb_consumers: :integer,
           profile: :boolean,
@@ -38,17 +39,16 @@ defmodule Mix.Tasks.Nes.Bench do
       |> Keyword.get(:renderer, configured_ppu_name(configured_ppu))
       |> String.to_existing_atom()
 
-    if renderer not in [:native, :nx, :nx_atlas],
-      do: Mix.raise("renderer must be native, nx, or nx_atlas")
+    if renderer not in [:native, :nx],
+      do: Mix.raise("renderer must be native or nx")
 
-    if renderer in [:nx, :nx_atlas] and not Code.ensure_loaded?(Beamicom.NES.Nx.PPURenderer),
+    if renderer == :nx and not Code.ensure_loaded?(Beamicom.NES.Nx.PPURenderer),
       do: Mix.raise("the nx renderer requires running this task from the beamicom_nes_nx project")
 
     renderer_module =
       case renderer do
         :native -> :native
         :nx -> Beamicom.NES.Nx.PPURenderer
-        :nx_atlas -> Beamicom.NES.Nx.PPUAtlasRenderer
       end
 
     if renderer_module != configured_ppu,
@@ -56,6 +56,35 @@ defmodule Mix.Tasks.Nes.Bench do
         Mix.raise(
           "PPU renderer is compile-time; this build contains #{configured_ppu_name(configured_ppu)}"
         )
+
+    video_filter = Keyword.get(opts, :video_filter, "native")
+
+    video_filter_atom =
+      case video_filter do
+        "native" -> :native
+        "composite" -> :composite
+        "svideo" -> :svideo
+        "rgb" -> :rgb
+        "monochrome" -> :monochrome
+        _ -> Mix.raise("video-filter must be native, composite, svideo, rgb, or monochrome")
+      end
+
+    load_options =
+      case video_filter_atom do
+        :native ->
+          []
+
+        preset ->
+          if not Code.ensure_loaded?(Beamicom.NES.Nx.BlarggNTSC.Renderer),
+            do:
+              Mix.raise(
+                "video filters require running this task from the beamicom_nes_nx project"
+              )
+
+          [
+            ppu_renderer: {Beamicom.NES.Nx.BlarggNTSC.Renderer, [preset: preset]}
+          ]
+      end
 
     configured_apu = Beamicom.NES.Bus.configured_apu_renderer()
     audio_renderer = Keyword.get(opts, :audio_renderer, configured_apu_name(configured_apu))
@@ -91,11 +120,11 @@ defmodule Mix.Tasks.Nes.Bench do
     frames = ceil(seconds * 60.0988)
 
     if opts[:profile_only] do
-      profile(media, frames, rgb_consumers)
+      profile(media, frames, rgb_consumers, load_options)
     else
       {:ok, cart} = Beamicom.NES.Cart.parse(media)
-      execute(media, frames, rgb_consumers)
-      runs = for _ <- 1..repeats, do: execute(media, frames, rgb_consumers)
+      execute(media, frames, rgb_consumers, load_options)
+      runs = for _ <- 1..repeats, do: execute(media, frames, rgb_consumers, load_options)
       hashes = Enum.map(runs, &{&1.video_sha256, &1.audio_sha256, &1.state_sha256})
       if length(Enum.uniq(hashes)) != 1, do: Mix.raise("non-deterministic output")
 
@@ -109,6 +138,7 @@ defmodule Mix.Tasks.Nes.Bench do
         otp: List.to_string(:erlang.system_info(:otp_release)),
         schedulers: :erlang.system_info(:schedulers_online),
         renderer: renderer,
+        video_filter: video_filter_atom,
         audio_renderer: String.to_atom(audio_renderer),
         rgb_consumers: rgb_consumers,
         runs: runs
@@ -119,22 +149,22 @@ defmodule Mix.Tasks.Nes.Bench do
       if path = opts[:output], do: File.write!(path, json <> "\n")
 
       if opts[:profile] do
-        profile(media, frames, rgb_consumers)
+        profile(media, frames, rgb_consumers, load_options)
       end
     end
   end
 
-  defp profile(media, frames, rgb_consumers) do
+  defp profile(media, frames, rgb_consumers, load_options) do
     Mix.ensure_application!(:tools)
 
     :tprof.profile(
-      fn -> execute(media, frames, rgb_consumers) end,
+      fn -> execute(media, frames, rgb_consumers, load_options) end,
       %{type: :call_time, report: {:total, {:measurement, :descending}}}
     )
   end
 
-  defp execute(media, frames, rgb_consumers) do
-    {:ok, machine} = Beamicom.NES.System.load(media)
+  defp execute(media, frames, rgb_consumers, load_options) do
+    {:ok, machine} = Beamicom.NES.System.load(media, load_options)
     :erlang.garbage_collect()
     {_, reductions0} = Process.info(self(), :reductions)
     started = System.monotonic_time(:microsecond)
@@ -200,8 +230,7 @@ defmodule Mix.Tasks.Nes.Bench do
       Map.fetch!(
         %{
           :native => "native",
-          Beamicom.NES.Nx.PPURenderer => "nx",
-          Beamicom.NES.Nx.PPUAtlasRenderer => "nx_atlas"
+          Beamicom.NES.Nx.PPURenderer => "nx"
         },
         renderer
       )

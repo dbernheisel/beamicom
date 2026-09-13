@@ -6,18 +6,23 @@ defmodule Beamicom.NES.Runtime do
 
   Video-only pacing (milestone one): the next frame's deadline is computed from a
   fixed epoch rather than by adding a period each tick, so timing error doesn't
-  accumulate (spec §5.5). Pass `pace: false` to run flat-out (tests, batch).
+  accumulate (spec §5.5). A long scheduler or renderer stall rebases that epoch
+  so audio produced before the stall is not emitted in a burst afterward. Pass
+  `pace: false` to run flat-out (tests, batch).
 
   ## Sources
     * spec §5.5 — monotonic-clock pacing from a fixed epoch; fire-and-forget publish.
   """
   use GenServer
 
-  alias Beamicom.NES.{Bus, CPU, Console, Output}
+  alias Beamicom.NES.{Bus, CPU, Console, Output, PPU}
 
   # NTSC ~60.0988 fps.
   @period_ns round(1_000_000_000 / 60.0988)
   @cpu_cycles_per_frame round(1_789_773 / 60.0988)
+  # Short overruns still catch up against the fixed epoch. Longer discontinuities
+  # (notably first-use Nx/EXLA compilation) must not become queued stale audio.
+  @max_catchup_ns 50_000_000
   @enhancements [:hide_horizontal_overscan, :unlimited_sprites]
 
   def start_link(opts) do
@@ -131,11 +136,11 @@ defmodule Beamicom.NES.Runtime do
 
   defp run_frame(state) do
     {console, frame} = next_frame(state.console, state.frame)
-    Output.publish(frame)
-    # Drain this frame's audio and stream it to subscribers (also bounds memory).
-    {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
-    Output.publish_audio(sample_count, pcm)
+    {frame, sample_count, pcm, bus} = render_outputs(frame, console.bus)
+    bus = put_in(bus.ppu.frame_ready, frame)
     console = %{console | bus: bus}
+    Output.publish(frame)
+    Output.publish_audio(sample_count, pcm)
     %{state | console: console, frame: frame.number, published: state.published + 1}
   end
 
@@ -146,18 +151,35 @@ defmodule Beamicom.NES.Runtime do
     console = run_cycles(state.console, target)
     fb = console.bus.ppu.frame_ready
 
-    {frame, published} =
+    {console, frame, published, sample_count, pcm} =
       if fb && fb.number > state.frame do
+        {fb, sample_count, pcm, bus} = render_outputs(fb, console.bus)
+        bus = put_in(bus.ppu.frame_ready, fb)
+        console = %{console | bus: bus}
         Output.publish(fb)
-        {fb.number, state.published + 1}
+        {console, fb.number, state.published + 1, sample_count, pcm}
       else
-        {state.frame, state.published}
+        {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
+        {%{console | bus: bus}, state.frame, state.published, sample_count, pcm}
       end
 
-    {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
     Output.publish_audio(sample_count, pcm)
-    console = %{console | bus: bus}
     %{state | console: console, frame: frame, published: published}
+  end
+
+  # Deferred Nx video and block audio are independent computations over the same
+  # immutable bus snapshot. Render them concurrently so the real-time runtime has
+  # the same critical path as System.run_slice/2 and does not add their latencies.
+  defp render_outputs(%{render: nil} = frame, bus) do
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(bus)
+    {frame, sample_count, pcm, bus}
+  end
+
+  defp render_outputs(frame, bus) do
+    audio = Task.async(fn -> Bus.take_audio_pcm(bus) end)
+    frame = PPU.resolve_frame(frame)
+    {sample_count, pcm, bus} = Task.await(audio, :infinity)
+    {frame, sample_count, pcm, bus}
   end
 
   defp run_cycles(%Console{} = console, target) do
@@ -201,9 +223,20 @@ defmodule Beamicom.NES.Runtime do
   end
 
   defp schedule(state) do
-    deadline = state.epoch + round(state.slice * state.slice_ns / state.speed)
-    Process.send_after(self(), :tick, max(0, div(deadline - now(), 1_000_000)))
-    state
+    current = now()
+    period = round(state.slice_ns / state.speed)
+    deadline = state.epoch + state.slice * period
+
+    if current - deadline > @max_catchup_ns do
+      # The emulator clock was stopped for long enough that catching wall time
+      # would only flood the audio player with historical PCM. Continue one
+      # period from now; video and audio remain on the same emulated timeline.
+      Process.send_after(self(), :tick, max(0, div(period, 1_000_000)))
+      %{state | epoch: current, slice: 1}
+    else
+      Process.send_after(self(), :tick, max(0, div(deadline - current, 1_000_000)))
+      state
+    end
   end
 
   defp now, do: System.monotonic_time(:nanosecond)

@@ -13,13 +13,18 @@ defmodule Beamicom.NES.System do
   def id, do: :nes
 
   @impl true
-  def capabilities do
+  def capabilities(options \\ []) do
+    renderer = Keyword.get(options, :ppu_renderer, :native)
+    {width, height} = PPU.renderer_dimensions(renderer)
+    pixel_scale = PPU.renderer_pixel_scale(renderer)
+
     %{
       media_extensions: [".nes"],
       input: InputCapabilities.new(%{1 => @buttons, 2 => @buttons}),
       video: %{
-        width: 256,
-        height: 240,
+        width: width,
+        height: height,
+        pixel_scale: pixel_scale,
         pixel_formats: [{:native, :nes_framebuffer}],
         frame_rate: 60.0988
       },
@@ -28,9 +33,9 @@ defmodule Beamicom.NES.System do
   end
 
   @impl true
-  def load(media, _opts \\ []) when is_binary(media) do
+  def load(media, options \\ []) when is_binary(media) do
     case Beamicom.NES.Cart.parse(media) do
-      {:ok, _cart} -> {:ok, Console.load_binary(media)}
+      {:ok, _cart} -> {:ok, Console.load_binary(media, options)}
       {:error, reason} -> {:error, reason}
     end
   end

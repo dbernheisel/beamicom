@@ -1,7 +1,7 @@
 defmodule Beamicom.NES.SaveState do
   @moduledoc "Serialize/deserialize NES console state, ROM-stripped."
 
-  alias Beamicom.NES.{Bus, Cart, Console}
+  alias Beamicom.NES.{Bus, Cart, Console, PPU}
 
   @doc "Split a console into {state_bin, rom_blob}. Both are zlib-compressed term binaries."
   def split(%Console{} = console) do
@@ -88,6 +88,7 @@ defmodule Beamicom.NES.SaveState do
       )
 
     bus = bus |> Map.drop(Map.keys(defaults)) |> then(&Map.merge(%Bus{}, &1))
+    bus = %{bus | ppu: Map.merge(%PPU{}, bus.ppu)}
     %{console | bus: %{bus | mapper_state: mapper_state}}
   end
 
@@ -106,7 +107,11 @@ defmodule Beamicom.NES.SaveState do
     ppu =
       if bus.ppu.renderer == :native,
         do: bus.ppu,
-        else: Beamicom.NES.PPU.set_renderer(bus.ppu, bus.ppu.renderer)
+        else:
+          Beamicom.NES.PPU.set_renderer(
+            bus.ppu,
+            {bus.ppu.renderer, Map.get(bus.ppu, :renderer_options, [])}
+          )
 
     audio_state =
       if bus.apu_renderer != :native and function_exported?(bus.apu_renderer, :restore, 1),

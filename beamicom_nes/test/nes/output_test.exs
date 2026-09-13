@@ -5,6 +5,31 @@ defmodule Beamicom.NES.OutputTest do
   alias Beamicom.Host.{AudioChunk, VideoFrame}
   alias Beamicom.NES.{Framebuffer, Output, Runtime}
 
+  defmodule DeferredRenderer do
+    def prepare_chr(_chr), do: nil
+    def output_dimensions(_state), do: {2, 1}
+
+    def render(lines, _palette, _grayscale, _edge_mask, _state, _frame_number)
+        when length(lines) == 240 do
+      {:binary.copy(<<0>>, 256 * 240), <<1, 2, 3, 4, 5, 6>>}
+    end
+  end
+
+  defmodule SlowFirstRenderer do
+    def prepare_chr(_chr), do: nil
+    def output_dimensions(_state), do: {1, 1}
+
+    def render(lines, _palette, _grayscale, _edge_mask, _state, _frame_number)
+        when length(lines) == 240 do
+      unless Process.get({__MODULE__, :warmed_up}) do
+        Process.put({__MODULE__, :warmed_up}, true)
+        Process.sleep(80)
+      end
+
+      {:binary.copy(<<0>>, 256 * 240), <<0, 0, 0>>}
+    end
+  end
+
   test "publish stores the latest frame and notifies subscribers" do
     Output.subscribe()
     frame = %Framebuffer{number: 7, pixels: <<>>, palette: <<>>}
@@ -96,5 +121,52 @@ defmodule Beamicom.NES.OutputTest do
 
     assert {:error, :invalid_enhancement} =
              Runtime.set_enhancement(:test_runtime, :unknown, true)
+  end
+
+  test "runtime resolves deferred renderer output before publishing" do
+    Output.subscribe_video()
+
+    console =
+      minimal_rom()
+      |> Beamicom.NES.Console.load_binary(ppu_renderer: DeferredRenderer)
+
+    start_supervised!({Runtime, console: console, pace: false, name: :deferred_runtime})
+
+    assert_receive {:frame, _number}, 2_000
+
+    assert %Framebuffer{
+             pixels: pixels,
+             rgb: <<1, 2, 3, 4, 5, 6>>,
+             rgb_width: 2,
+             rgb_height: 1,
+             render: nil
+           } = Output.latest()
+
+    assert byte_size(pixels) == 256 * 240
+    {snapshot, frame} = Runtime.snapshot(:deferred_runtime)
+    assert frame.render == nil
+    assert snapshot.bus.ppu.frame_ready.render == nil
+  end
+
+  test "runtime rebases pacing after a long renderer stall" do
+    Output.subscribe_video()
+
+    console =
+      minimal_rom()
+      |> Beamicom.NES.Console.load_binary(ppu_renderer: SlowFirstRenderer)
+
+    started_at = System.monotonic_time(:nanosecond)
+    start_supervised!({Runtime, console: console, pace: true, name: :stalled_runtime})
+
+    assert_receive {:frame, _number}, 2_000
+    state = :sys.get_state(:stalled_runtime)
+
+    assert state.slice == 1
+    assert state.epoch - started_at >= 50_000_000
+  end
+
+  defp minimal_rom do
+    prg = <<0x4C, 0x00, 0x80, 0::size((0x3FFC - 3) * 8), 0x00, 0x80, 0::16>>
+    <<"NES", 0x1A, 1, 1, 0::size(10 * 8)>> <> prg <> <<0::size(8192 * 8)>>
   end
 end

@@ -22,7 +22,6 @@ defmodule Beamicom.NES.PPU do
   import Bitwise
 
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPURenderer}
-  @compile {:no_warn_undefined, Beamicom.NES.Nx.PPUAtlasRenderer}
   @renderer Application.compile_env(:beamicom_nes, :ppu_renderer, :native)
   @apu_renderer Application.compile_env(
                   :beamicom_nes,
@@ -118,6 +117,7 @@ defmodule Beamicom.NES.PPU do
             # 240x256 EXLA operation. Fetches and observable PPU state changes
             # always remain in this module at their original scanline cadence.
             renderer: @renderer,
+            renderer_options: [],
             renderer_state: nil,
             fb: [],
             # Tile-row cache: the 33 fetched {nametable, attribute} pairs plus the
@@ -132,13 +132,16 @@ defmodule Beamicom.NES.PPU do
             frame_ready: nil
 
   @doc "Build a PPU over the cartridge's CHR data and nametable mirroring."
-  def new(chr, mirroring) do
-    renderer_state = if @renderer == :native, do: nil, else: prepare_renderer(@renderer, chr)
+  def new(chr, mirroring, options \\ []) do
+    renderer = Keyword.get(options, :ppu_renderer, @renderer)
+    {renderer, renderer_options} = normalize_renderer(renderer)
+    renderer_state = prepare_renderer(renderer, chr, renderer_options)
 
     %__MODULE__{
       chr: chr,
       mirroring: mirroring,
-      renderer: @renderer,
+      renderer: renderer,
+      renderer_options: renderer_options,
       renderer_state: renderer_state
     }
   end
@@ -146,17 +149,83 @@ defmodule Beamicom.NES.PPU do
   @doc "Renderer selected when this core build was compiled."
   def configured_renderer, do: @renderer
 
-  @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, `:nx_atlas`, or a module)."
-  def set_renderer(ppu, :native), do: %{ppu | renderer: :native, renderer_state: nil}
+  @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, or a module)."
+  def set_renderer(ppu, :native),
+    do: %{ppu | renderer: :native, renderer_options: [], renderer_state: nil}
+
   def set_renderer(ppu, :nx), do: set_renderer(ppu, Beamicom.NES.Nx.PPURenderer)
-  def set_renderer(ppu, :nx_atlas), do: set_renderer(ppu, Beamicom.NES.Nx.PPUAtlasRenderer)
+
+  def set_renderer(ppu, {renderer, options}) when is_atom(renderer) and is_list(options),
+    do: set_renderer(ppu, renderer, options)
 
   def set_renderer(ppu, renderer) when is_atom(renderer),
-    do: %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.chr)}
+    do: set_renderer(ppu, renderer, [])
 
-  defp prepare_renderer(renderer, chr) do
-    if Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare_chr, 1),
-      do: apply(renderer, :prepare_chr, [chr])
+  def set_renderer(ppu, renderer, options) when is_atom(renderer) and is_list(options),
+    do: %{
+      ppu
+      | renderer: renderer,
+        renderer_options: options,
+        renderer_state: prepare_renderer(renderer, ppu.chr, options)
+    }
+
+  @doc "Presentation dimensions produced by a runtime renderer specification."
+  def renderer_dimensions(renderer) do
+    {renderer, options} = normalize_renderer(renderer)
+
+    cond do
+      renderer == :native ->
+        {256, 240}
+
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :output_dimensions, 1) ->
+        apply(renderer, :output_dimensions, [options])
+
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :output_dimensions, 0) ->
+        apply(renderer, :output_dimensions, [])
+
+      true ->
+        {256, 240}
+    end
+  end
+
+  @doc "Square-pixel presentation multiplier requested by a runtime renderer."
+  def renderer_pixel_scale(renderer) do
+    {renderer, options} = normalize_renderer(renderer)
+
+    cond do
+      renderer == :native ->
+        {1, 1}
+
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :pixel_scale, 1) ->
+        apply(renderer, :pixel_scale, [options])
+
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :pixel_scale, 0) ->
+        apply(renderer, :pixel_scale, [])
+
+      true ->
+        {1, 1}
+    end
+  end
+
+  defp normalize_renderer({renderer, options}) when is_atom(renderer) and is_list(options),
+    do: {renderer, options}
+
+  defp normalize_renderer(:nx), do: {Beamicom.NES.Nx.PPURenderer, []}
+  defp normalize_renderer(renderer) when is_atom(renderer), do: {renderer, []}
+
+  defp prepare_renderer(:native, _chr, _options), do: nil
+
+  defp prepare_renderer(renderer, chr, options) do
+    cond do
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare_chr, 2) ->
+        apply(renderer, :prepare_chr, [chr, options])
+
+      Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare_chr, 1) ->
+        apply(renderer, :prepare_chr, [chr])
+
+      true ->
+        raise ArgumentError, "invalid NES PPU renderer: #{inspect(renderer)}"
+    end
   end
 
   @doc "Enable or disable a runtime-selectable PPU enhancement."
@@ -284,10 +353,17 @@ defmodule Beamicom.NES.PPU do
 
       {line, ppu} =
         cond do
-          atlas? -> capture_nx_atlas_line(ppu, tiles, ppu.x)
-          ppu.renderer_state != nil -> capture_nx_hybrid_line(ppu, tiles, ppu.x, blank?)
-          nx_renderer?(ppu) -> capture_nx_line(ppu, tiles, ppu.x, blank?)
-          true -> compose_line(ppu, tiles, ppu.x, blank?)
+          atlas? ->
+            capture_nx_atlas_line(ppu, tiles, ppu.x)
+
+          renderer_atlas_state(ppu) != nil ->
+            capture_nx_hybrid_line(ppu, tiles, ppu.x, blank?)
+
+          nx_renderer?(ppu) ->
+            capture_nx_line(ppu, tiles, ppu.x, blank?)
+
+          true ->
+            compose_line(ppu, tiles, ppu.x, blank?)
         end
 
       ppu = %{ppu | fb: [line | ppu.fb], v: line_v}
@@ -297,22 +373,35 @@ defmodule Beamicom.NES.PPU do
 
   defp nx_renderer?(ppu), do: ppu.renderer != :native and not ppu.unlimited_sprites
 
-  defp atlas_bg?(%{renderer_state: nil}), do: false
-
   defp atlas_bg?(ppu) do
-    nx_renderer?(ppu) and ppu.chr_latch == nil and byte_size(ppu.chr) > 0 and
+    renderer_atlas_state(ppu) != nil and nx_renderer?(ppu) and ppu.chr_latch == nil and
+      byte_size(ppu.chr) > 0 and
       rom_banks?(bg_banks(ppu)) and rom_banks?(ppu.chr_banks)
+  end
+
+  defp renderer_atlas_state(%{renderer_state: nil}), do: nil
+
+  defp renderer_atlas_state(ppu) do
+    if function_exported?(ppu.renderer, :atlas_state, 1),
+      do: apply(ppu.renderer, :atlas_state, [ppu.renderer_state]),
+      else: ppu.renderer_state
   end
 
   defp rom_banks?({a, b, c, d, e, f, g, h}),
     do: a >= 0 and b >= 0 and c >= 0 and d >= 0 and e >= 0 and f >= 0 and g >= 0 and h >= 0
 
-  defp nx_blank_line(%{renderer_state: nil}) do
+  defp nx_blank_line(ppu) do
+    if renderer_atlas_state(ppu) == nil,
+      do: nx_byte_blank_line(),
+      else: nx_atlas_blank_line(ppu)
+  end
+
+  defp nx_byte_blank_line do
     {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, 0, 0, <<0::size(8 * 8)>>,
      <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
   end
 
-  defp nx_blank_line(ppu) do
+  defp nx_atlas_blank_line(ppu) do
     zeros = <<0::size(33 * 8)>>
     refs = <<0::size(33 * 32)>>
 
@@ -1107,25 +1196,31 @@ defmodule Beamicom.NES.PPU do
 
     defer? = nx_renderer?(ppu) and @apu_renderer != :native
 
-    {pixels, rgb, render} =
+    {pixels, rgb, rgb_width, rgb_height, render} =
       cond do
         defer? ->
-          {<<>>, nil, {ppu.renderer, lines, palette, grayscale, edge_mask, ppu.renderer_state}}
+          {width, height} = renderer_dimensions(ppu.renderer, ppu.renderer_state)
+
+          {<<>>, nil, width, height,
+           {ppu.renderer, lines, palette, grayscale, edge_mask, ppu.renderer_state, ppu.frame}}
 
         nx_renderer?(ppu) ->
           {pixels, rgb} =
-            apply(ppu.renderer, :render, [
+            render_with(
+              ppu.renderer,
               lines,
               palette,
               grayscale,
               edge_mask,
-              ppu.renderer_state
-            ])
+              ppu.renderer_state,
+              ppu.frame
+            )
 
-          {pixels, rgb, nil}
+          {width, height} = renderer_dimensions(ppu.renderer, ppu.renderer_state)
+          {pixels, rgb, width, height, nil}
 
         true ->
-          {IO.iodata_to_binary(lines), nil, nil}
+          {IO.iodata_to_binary(lines), nil, nil, nil, nil}
       end
 
     frame = %Beamicom.NES.Framebuffer{
@@ -1133,6 +1228,8 @@ defmodule Beamicom.NES.PPU do
       pixels: pixels,
       palette: palette,
       rgb: rgb,
+      rgb_width: rgb_width,
+      rgb_height: rgb_height,
       render: render,
       edge_mask: edge_mask,
       grayscale: grayscale,
@@ -1146,11 +1243,27 @@ defmodule Beamicom.NES.PPU do
   def resolve_frame(%Beamicom.NES.Framebuffer{render: nil} = frame), do: frame
 
   def resolve_frame(
-        %Beamicom.NES.Framebuffer{render: {renderer, lines, palette, grayscale, edge_mask, state}} =
+        %Beamicom.NES.Framebuffer{
+          render: {renderer, lines, palette, grayscale, edge_mask, state, frame_number}
+        } =
           frame
       ) do
-    {pixels, rgb} = apply(renderer, :render, [lines, palette, grayscale, edge_mask, state])
+    {pixels, rgb} =
+      render_with(renderer, lines, palette, grayscale, edge_mask, state, frame_number)
+
     %{frame | pixels: pixels, rgb: rgb, render: nil}
+  end
+
+  defp render_with(renderer, lines, palette, grayscale, edge_mask, state, frame_number) do
+    if function_exported?(renderer, :render, 6),
+      do: apply(renderer, :render, [lines, palette, grayscale, edge_mask, state, frame_number]),
+      else: apply(renderer, :render, [lines, palette, grayscale, edge_mask, state])
+  end
+
+  defp renderer_dimensions(renderer, state) do
+    if function_exported?(renderer, :output_dimensions, 1),
+      do: apply(renderer, :output_dimensions, [state]),
+      else: renderer_dimensions(renderer)
   end
 
   # --- CPU-facing register interface ($2000-$2007, mirrored every 8) ---

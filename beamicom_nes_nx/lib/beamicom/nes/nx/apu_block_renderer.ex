@@ -14,9 +14,24 @@ defmodule Beamicom.NES.Nx.APUBlockRenderer do
 
   @impl true
   def prepare(native_apu) do
-    native_apu
-    |> APU.pack()
-    |> Nx.backend_copy({EXLA.Backend, client: :host})
+    state =
+      native_apu
+      |> APU.pack()
+      |> Nx.backend_copy({EXLA.Backend, client: :host})
+
+    # Compile while the console is loading. Scenic starts its audio player only
+    # after load returns, so first-use EXLA compilation cannot starve the player
+    # or make the runtime enqueue a catch-up burst.
+    compiled([
+      state,
+      Nx.template({@capacity, 3}, :s32),
+      Nx.template({}, :s32),
+      Nx.template({}, :s32),
+      Nx.template({1024}, :s32),
+      Nx.template({1024}, :f64)
+    ])
+
+    state
   end
 
   @impl true

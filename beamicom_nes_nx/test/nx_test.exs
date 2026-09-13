@@ -3,7 +3,7 @@ defmodule Beamicom.NES.NxTest do
 
   test "wrapper compiles the core against both optional renderers" do
     assert Beamicom.NES.Nx.backends() == %{
-             ppu: Beamicom.NES.Nx.PPUAtlasRenderer,
+             ppu: Beamicom.NES.Nx.PPURenderer,
              apu: Beamicom.NES.Nx.APUBlockRenderer
            }
   end

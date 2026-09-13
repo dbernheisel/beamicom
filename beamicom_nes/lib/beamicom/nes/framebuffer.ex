@@ -17,6 +17,11 @@ defmodule Beamicom.NES.Framebuffer do
             pixels: <<>>,
             palette: <<>>,
             rgb: nil,
+            # RGB renderers may produce a presentation image with different
+            # geometry while `pixels` remains the native 256x240 palette-address
+            # plane. Blargg NTSC, for example, expands each row to 602 pixels.
+            rgb_width: nil,
+            rgb_height: nil,
             # Optional frame-wide renderer invocation resolved by NES.System so
             # video and audio EXLA programs can run concurrently.
             render: nil,

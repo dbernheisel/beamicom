@@ -37,15 +37,22 @@ defmodule Beamicom.NES.Nx.PPURendererTest do
     %{ppu | frame_ready: PPU.resolve_frame(ppu.frame_ready)}
   end
 
-  test "frame-wide Nx composition is pixel-exact with native composition" do
+  test "atlas-backed Nx composition is pixel-exact with native composition" do
     native = scene(:native)
     nx = scene(:nx)
 
+    refute is_nil(nx.renderer_state)
     assert nx.frame_ready.pixels == native.frame_ready.pixels
     assert nx.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
     assert Palette.to_rgb(nx.frame_ready) == Palette.to_rgb(native.frame_ready)
     assert nx.status == native.status
     assert byte_size(nx.frame_ready.pixels) == 256 * 240
+  end
+
+  test "runtime :nx shorthand selects the atlas renderer" do
+    ppu = PPU.new(chr(), :horizontal, ppu_renderer: :nx)
+    assert ppu.renderer == Beamicom.NES.Nx.PPURenderer
+    refute is_nil(ppu.renderer_state)
   end
 
   test "Nx RGB expansion applies grayscale and presentation edge masking" do
@@ -56,20 +63,10 @@ defmodule Beamicom.NES.Nx.PPURendererTest do
     assert binary_part(nx.frame_ready.rgb, 0, 8 * 3) == <<0::size(8 * 3 * 8)>>
   end
 
-  test "resident CHR atlas rendering is pixel-exact with native composition" do
-    native = scene(:native)
-    atlas = scene(:nx_atlas)
-
-    refute is_nil(atlas.renderer_state)
-    assert atlas.frame_ready.pixels == native.frame_ready.pixels
-    assert atlas.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
-    assert atlas.status == native.status
-  end
-
   test "atlas renderer falls back to byte capture for CHR-latch cartridges" do
     latch = %{l0: :fd, l1: :fd, fd0: 0, fe0: 0, fd1: 0x1000, fe1: 0x1000}
     native = scene(:native, chr_latch: latch)
-    fallback = scene(:nx_atlas, chr_latch: latch)
+    fallback = scene(:nx, chr_latch: latch)
 
     refute is_nil(fallback.renderer_state)
     assert fallback.frame_ready.pixels == native.frame_ready.pixels

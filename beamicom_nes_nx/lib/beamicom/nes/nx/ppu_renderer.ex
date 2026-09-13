@@ -1,10 +1,10 @@
 defmodule Beamicom.NES.Nx.PPURenderer do
   @moduledoc """
-  Frame-wide NES pixel compositor.
+  Adaptive frame-wide NES pixel compositor.
 
-  The native PPU captures mapper-resolved tile rows and evaluated sprites at the
-  correct scanline. This module performs only the regular 240 by 256 background
-  decode, sprite priority, and RGB palette expansion in one compiled EXLA call.
+  Immutable CHR ROM is decoded into an EXLA-resident tile atlas at cartridge
+  load. CHR RAM and mapper-sensitive cases automatically use byte or hybrid
+  capture inside the same renderer.
   """
 
   import Nx.Defn
@@ -15,7 +15,7 @@ defmodule Beamicom.NES.Nx.PPURenderer do
   @sprites 8
   @compiled_key {__MODULE__, :compiled}
 
-  def prepare_chr(_chr), do: nil
+  def prepare_chr(chr), do: prepare_chr_atlas(chr)
 
   def prepare_chr_atlas(<<>>), do: nil
 
@@ -39,6 +39,92 @@ defmodule Beamicom.NES.Nx.PPURenderer do
 
   def render(lines, palette, grayscale, edge_mask, renderer_state)
       when length(lines) == @height do
+    {kind, args} = render_args(lines, palette, grayscale, edge_mask, renderer_state)
+    {pixels, rgb} = compiled(kind, args, :rgb) |> apply(args)
+    {Nx.to_binary(pixels), Nx.to_binary(rgb)}
+  end
+
+  @doc false
+  def render_pixels_tensor(lines, _palette, _grayscale, _edge_mask, renderer_state)
+      when length(lines) == @height do
+    {pixels, _masks} = render_pixels_and_masks_tensor(lines, renderer_state)
+    pixels
+  end
+
+  @doc false
+  def render_pixels_and_masks_tensor(lines, renderer_state) when length(lines) == @height do
+    {kind, args} = render_pixels_args(lines, renderer_state)
+    pixels = compiled(kind, args, :pixels) |> apply(args)
+
+    mask_index =
+      case kind do
+        :bytes -> 4
+        :atlas -> 3
+        :hybrid -> 6
+      end
+
+    {pixels, Enum.at(args, mask_index)}
+  end
+
+  defp render_pixels_args(lines, renderer_state) do
+    cond do
+      renderer_state == nil ->
+        {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_bytes(lines)
+
+        {:bytes,
+         [
+           tensor(lo, {@height, @tiles}),
+           tensor(hi, {@height, @tiles}),
+           tensor(attr, {@height, @tiles}),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(slo, {@height, @sprites}),
+           tensor(shi, {@height, @sprites}),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites})
+         ]}
+
+      atlas_only?(lines) ->
+        {attr, refs, fine_x, mask, sx, sprite_refs, sattr, svalid} = pack_atlas(lines)
+
+        {:atlas,
+         [
+           tensor(attr, {@height, @tiles}),
+           tensor(refs, {@height, @tiles}, :u32),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(sprite_refs, {@height, @sprites}, :u32),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites}),
+           atlas(renderer_state)
+         ]}
+
+      true ->
+        {lo, hi, attr, refs, bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid} =
+          pack_hybrid(lines)
+
+        {:hybrid,
+         [
+           tensor(lo, {@height, @tiles}),
+           tensor(hi, {@height, @tiles}),
+           tensor(attr, {@height, @tiles}),
+           tensor(refs, {@height, @tiles}, :u32),
+           tensor(bg_mode, {@height, 1}),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(slo, {@height, @sprites}),
+           tensor(shi, {@height, @sprites}),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites}),
+           atlas(renderer_state)
+         ]}
+    end
+  end
+
+  defp render_args(lines, palette, grayscale, edge_mask, renderer_state) do
     common = [
       tensor(palette, {32}),
       tensor(Beamicom.NES.Palette.master_binary(), {64, 3}),
@@ -46,66 +132,86 @@ defmodule Beamicom.NES.Nx.PPURenderer do
       Nx.tensor(edge_mask, type: :u8)
     ]
 
-    {kind, args} =
-      cond do
-        renderer_state == nil ->
-          {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_bytes(lines)
+    cond do
+      renderer_state == nil ->
+        {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_bytes(lines)
 
-          {:bytes,
-           [
-             tensor(lo, {@height, @tiles}),
-             tensor(hi, {@height, @tiles}),
-             tensor(attr, {@height, @tiles}),
-             tensor(fine_x, {@height, 1}),
-             tensor(mask, {@height, 1}),
-             tensor(sx, {@height, @sprites}),
-             tensor(slo, {@height, @sprites}),
-             tensor(shi, {@height, @sprites}),
-             tensor(sattr, {@height, @sprites}),
-             tensor(svalid, {@height, @sprites})
-             | common
-           ]}
+        {:bytes,
+         [
+           tensor(lo, {@height, @tiles}),
+           tensor(hi, {@height, @tiles}),
+           tensor(attr, {@height, @tiles}),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(slo, {@height, @sprites}),
+           tensor(shi, {@height, @sprites}),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites})
+           | common
+         ]}
 
-        atlas_only?(lines) ->
-          {attr, refs, fine_x, mask, sx, sprite_refs, sattr, svalid} = pack_atlas(lines)
+      atlas_only?(lines) ->
+        {attr, refs, fine_x, mask, sx, sprite_refs, sattr, svalid} = pack_atlas(lines)
 
-          {:atlas,
-           [
-             tensor(attr, {@height, @tiles}),
-             tensor(refs, {@height, @tiles}, :u32),
-             tensor(fine_x, {@height, 1}),
-             tensor(mask, {@height, 1}),
-             tensor(sx, {@height, @sprites}),
-             tensor(sprite_refs, {@height, @sprites}, :u32),
-             tensor(sattr, {@height, @sprites}),
-             tensor(svalid, {@height, @sprites})
-             | common
-           ] ++ [atlas(renderer_state)]}
+        {:atlas,
+         [
+           tensor(attr, {@height, @tiles}),
+           tensor(refs, {@height, @tiles}, :u32),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(sprite_refs, {@height, @sprites}, :u32),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites})
+           | common
+         ] ++ [atlas(renderer_state)]}
 
-        true ->
-          {lo, hi, attr, refs, bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid} =
-            pack_hybrid(lines)
+      true ->
+        {lo, hi, attr, refs, bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid} =
+          pack_hybrid(lines)
 
-          {:hybrid,
-           [
-             tensor(lo, {@height, @tiles}),
-             tensor(hi, {@height, @tiles}),
-             tensor(attr, {@height, @tiles}),
-             tensor(refs, {@height, @tiles}, :u32),
-             tensor(bg_mode, {@height, 1}),
-             tensor(fine_x, {@height, 1}),
-             tensor(mask, {@height, 1}),
-             tensor(sx, {@height, @sprites}),
-             tensor(slo, {@height, @sprites}),
-             tensor(shi, {@height, @sprites}),
-             tensor(sattr, {@height, @sprites}),
-             tensor(svalid, {@height, @sprites})
-             | common
-           ] ++ [atlas(renderer_state)]}
-      end
+        {:hybrid,
+         [
+           tensor(lo, {@height, @tiles}),
+           tensor(hi, {@height, @tiles}),
+           tensor(attr, {@height, @tiles}),
+           tensor(refs, {@height, @tiles}, :u32),
+           tensor(bg_mode, {@height, 1}),
+           tensor(fine_x, {@height, 1}),
+           tensor(mask, {@height, 1}),
+           tensor(sx, {@height, @sprites}),
+           tensor(slo, {@height, @sprites}),
+           tensor(shi, {@height, @sprites}),
+           tensor(sattr, {@height, @sprites}),
+           tensor(svalid, {@height, @sprites})
+           | common
+         ] ++ [atlas(renderer_state)]}
+    end
+  end
 
-    {pixels, rgb} = compiled(kind, args) |> apply(args)
-    {Nx.to_binary(pixels), Nx.to_binary(rgb)}
+  defn compose_bytes_pixels(
+         lo,
+         hi,
+         attr,
+         fine_x,
+         mask,
+         sx,
+         slo,
+         shi,
+         sattr,
+         svalid
+       ) do
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    source_x = x + Nx.as_type(fine_x, :s32)
+    tile = Nx.quotient(source_x, 8)
+    bit = 7 - band(source_x, 7)
+    bg_lo = Nx.take_along_axis(lo, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_hi = Nx.take_along_axis(hi, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
+    pattern = bor(band(shr(bg_lo, bit), 1), band(shr(bg_hi, bit), 1) * 2)
+
+    compose_pixel_plane(pattern, bg_attr, x, mask, sx, slo, shi, sattr, svalid)
   end
 
   defn compose_bytes(
@@ -166,6 +272,33 @@ defmodule Beamicom.NES.Nx.PPURenderer do
           edge_mask,
           atlas
         ) do
+    pixels =
+      compose_pixel_plane_atlas(
+        pattern,
+        bg_attr,
+        x,
+        mask,
+        sx,
+        sprite_refs,
+        sattr,
+        svalid,
+        atlas
+      )
+
+    finish_rgb(pixels, x, palette, master, color_mask, edge_mask)
+  end
+
+  defnp compose_pixel_plane_atlas(
+          pattern,
+          bg_attr,
+          x,
+          mask,
+          sx,
+          sprite_refs,
+          sattr,
+          svalid,
+          atlas
+        ) do
     bg =
       Nx.select(
         pattern == 0 or band(mask, 8) == 0 or (x < 8 and band(mask, 2) == 0),
@@ -182,7 +315,7 @@ defmodule Beamicom.NES.Nx.PPURenderer do
     sprite = scatter_sprite_atlas(sprite, 2, mask, sx, sprite_refs, sattr, svalid, atlas)
     sprite = scatter_sprite_atlas(sprite, 1, mask, sx, sprite_refs, sattr, svalid, atlas)
     sprite = scatter_sprite_atlas(sprite, 0, mask, sx, sprite_refs, sattr, svalid, atlas)
-    finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask)
+    finish_pixel_plane(bg, sprite)
   end
 
   defn compose_atlas(
@@ -221,6 +354,38 @@ defmodule Beamicom.NES.Nx.PPURenderer do
       master,
       color_mask,
       edge_mask,
+      atlas
+    )
+  end
+
+  defn compose_atlas_pixels(
+         attr,
+         refs,
+         fine_x,
+         mask,
+         sx,
+         sprite_refs,
+         sattr,
+         svalid,
+         atlas
+       ) do
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    source_x = x + Nx.as_type(fine_x, :s32)
+    tile = Nx.quotient(source_x, 8)
+    bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_ref = Nx.take_along_axis(refs, tile, axis: 1) |> Nx.as_type(:s32)
+    column = band(source_x, 7)
+    pattern = Nx.gather(atlas, Nx.stack([bg_ref, column], axis: 2))
+
+    compose_pixel_plane_atlas(
+      pattern,
+      bg_attr,
+      x,
+      mask,
+      sx,
+      sprite_refs,
+      sattr,
+      svalid,
       atlas
     )
   end
@@ -274,6 +439,37 @@ defmodule Beamicom.NES.Nx.PPURenderer do
     )
   end
 
+  defn compose_hybrid_pixels(
+         lo,
+         hi,
+         attr,
+         refs,
+         bg_mode,
+         fine_x,
+         mask,
+         sx,
+         slo,
+         shi,
+         sattr,
+         svalid,
+         atlas
+       ) do
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    source_x = x + Nx.as_type(fine_x, :s32)
+    tile = Nx.quotient(source_x, 8)
+    bit = 7 - band(source_x, 7)
+    bg_lo = Nx.take_along_axis(lo, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_hi = Nx.take_along_axis(hi, tile, axis: 1) |> Nx.as_type(:s32)
+    byte_pattern = bor(band(shr(bg_lo, bit), 1), band(shr(bg_hi, bit), 1) * 2)
+    bg_ref = Nx.take_along_axis(refs, tile, axis: 1) |> Nx.as_type(:s32)
+    atlas_pattern = Nx.gather(atlas, Nx.stack([bg_ref, band(source_x, 7)], axis: 2))
+    use_atlas = Nx.broadcast(bg_mode != 0, {@height, @width})
+    pattern = Nx.select(use_atlas, atlas_pattern, byte_pattern)
+    bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
+
+    compose_pixel_plane(pattern, bg_attr, x, mask, sx, slo, shi, sattr, svalid)
+  end
+
   defnp compose_pixels(
           pattern,
           bg_attr,
@@ -289,6 +485,11 @@ defmodule Beamicom.NES.Nx.PPURenderer do
           color_mask,
           edge_mask
         ) do
+    pixels = compose_pixel_plane(pattern, bg_attr, x, mask, sx, slo, shi, sattr, svalid)
+    finish_rgb(pixels, x, palette, master, color_mask, edge_mask)
+  end
+
+  defnp compose_pixel_plane(pattern, bg_attr, x, mask, sx, slo, shi, sattr, svalid) do
     bg =
       Nx.select(
         pattern == 0 or band(mask, 8) == 0 or (x < 8 and band(mask, 2) == 0),
@@ -310,16 +511,19 @@ defmodule Beamicom.NES.Nx.PPURenderer do
     sprite = scatter_sprite(sprite, 1, mask, sx, slo, shi, sattr, svalid)
     sprite = scatter_sprite(sprite, 0, mask, sx, slo, shi, sattr, svalid)
 
-    finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask)
+    finish_pixel_plane(bg, sprite)
   end
 
-  defnp finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask) do
+  defnp finish_pixel_plane(bg, sprite) do
     sprite = Nx.slice_along_axis(sprite, 0, @width, axis: 1)
     sprite_addr = band(sprite, 0x3F)
     sprite_front = band(sprite, 0x40) != 0
     visible = sprite_addr != 0
 
-    pixels = Nx.select(visible and (bg == 0 or sprite_front), sprite_addr, bg) |> Nx.as_type(:u8)
+    Nx.select(visible and (bg == 0 or sprite_front), sprite_addr, bg) |> Nx.as_type(:u8)
+  end
+
+  defnp finish_rgb(pixels, x, palette, master, color_mask, edge_mask) do
     colors = Nx.take(palette, pixels) |> band(color_mask)
     rgb = Nx.take(master, colors)
     in_picture = x >= edge_mask and x < @width - edge_mask
@@ -450,21 +654,36 @@ defmodule Beamicom.NES.Nx.PPURenderer do
   defp tensor(binary, shape), do: tensor(binary, shape, :u8)
   defp tensor(binary, shape, type), do: binary |> Nx.from_binary(type) |> Nx.reshape(shape)
 
-  defp compiled(kind, args) do
-    key = {@compiled_key, kind, Nx.shape(List.last(args))}
+  defp compiled(kind, args, output) do
+    key = {@compiled_key, kind, output, Nx.shape(List.last(args))}
 
     case :persistent_term.get(key, nil) do
       nil ->
         fun =
-          case kind do
-            :bytes ->
+          case {kind, output} do
+            {:bytes, :rgb} ->
               EXLA.compile(&compose_bytes/14, Enum.map(args, &Nx.to_template/1), client: :host)
 
-            :atlas ->
+            {:atlas, :rgb} ->
               EXLA.compile(&compose_atlas/13, Enum.map(args, &Nx.to_template/1), client: :host)
 
-            :hybrid ->
+            {:hybrid, :rgb} ->
               EXLA.compile(&compose_hybrid/17, Enum.map(args, &Nx.to_template/1), client: :host)
+
+            {:bytes, :pixels} ->
+              EXLA.compile(&compose_bytes_pixels/10, Enum.map(args, &Nx.to_template/1),
+                client: :host
+              )
+
+            {:atlas, :pixels} ->
+              EXLA.compile(&compose_atlas_pixels/9, Enum.map(args, &Nx.to_template/1),
+                client: :host
+              )
+
+            {:hybrid, :pixels} ->
+              EXLA.compile(&compose_hybrid_pixels/13, Enum.map(args, &Nx.to_template/1),
+                client: :host
+              )
           end
 
         :persistent_term.put(key, fun)

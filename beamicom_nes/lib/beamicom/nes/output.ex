@@ -83,8 +83,8 @@ defmodule Beamicom.NES.Output do
     %VideoFrame{
       system: :nes,
       number: frame.number,
-      width: frame.width,
-      height: frame.height,
+      width: frame.rgb_width || frame.width,
+      height: frame.rgb_height || frame.height,
       pixel_format: {:native, :nes_framebuffer},
       data: frame,
       duration_ns: @period_ns
