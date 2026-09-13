@@ -13,7 +13,12 @@ defmodule Beamicom.GB.Nx.APUBlockRenderer do
   @capacity 1024
 
   @impl true
-  def prepare(%Beamicom.GB.APU{}), do: nil
+  def prepare(%Beamicom.GB.APU{}) do
+    # Compile while the machine is loading, before Scenic opens its audio
+    # stream. The first rendered frame can then mix without an EXLA cold stall.
+    compiled([Nx.template({@capacity, 6}, :s16)])
+    nil
+  end
 
   @impl true
   def render(state, entries, count) do

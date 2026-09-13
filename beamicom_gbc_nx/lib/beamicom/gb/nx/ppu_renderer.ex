@@ -51,6 +51,14 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     {Nx.to_binary(frame), state}
   end
 
+  @doc "Apply the LCD Pixel Transparency presentation shader to a CGB RGB24 frame."
+  def pixel_transparency(frame, output_size, options \\ []),
+    do: Beamicom.GB.Nx.PixelTransparency.filter(frame, {@width, @height}, output_size, options)
+
+  @doc "Tensor form of `pixel_transparency/3` for chaining resident Nx results."
+  def pixel_transparency_tensor(frame, output_size, options \\ []),
+    do: Beamicom.GB.Nx.PixelTransparency.filter_tensor(frame, output_size, options)
+
   defn render_dmg_static(controls, vram, oam, palettes) do
     events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
     render_dmg(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))

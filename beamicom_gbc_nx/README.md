@@ -34,6 +34,11 @@ config :beamicom_gbc, apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 Changing a renderer requires recompiling `beamicom_gbc`. Machine creation and
 execution never query the application environment for a backend.
 
+The default APU graph and the common static/visible-write PPU startup graphs are
+compiled while the machine loads, before a host opens audio playback. Uncommon
+PPU event shapes remain cached on first use; the shared runtime treats such a
+compile as a clock discontinuity instead of emitting catch-up audio.
+
 The core retains no Nx or EXLA dependency. PPU and APU programs resolve
 concurrently at the host output boundary, and EXLA-backed audio state is copied
 through the renderer's snapshot/restore callbacks for portable save states.
@@ -71,3 +76,10 @@ one compact event. Sparse timed reads overlay those events at lookup sites, so
 the graph does not materialize a 144×16 KB copy of VRAM. Runtime renderer
 detection is compiled out of normal PPU and APU builds; it is enabled only by
 the Nx cross-backend test configuration.
+
+`Beamicom.GB.Nx.PixelTransparency` ports Matt Akins'
+[Pixel Transparency](https://github.com/mattakins/Pixel_Transparency) shader.
+It treats bright pixels as translucent LCD cells over a textured backing and adds
+subpixel modulation, polarizer tint, and static blurred shadows. Scenic exposes it
+as `video_filter: :pixel_transparency`; direct callers can use
+`PixelTransparency.filter/4` or the resident-tensor `filter_tensor/3`.
