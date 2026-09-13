@@ -4,7 +4,7 @@ defmodule Beamicom.NES.System do
   @behaviour Beamicom.Host.System
 
   alias Beamicom.Host.{AudioChunk, Input, InputCapabilities}
-  alias Beamicom.NES.{Bus, CPU, Console, Output}
+  alias Beamicom.NES.{Bus, CPU, Console, Output, PPU}
 
   @buttons ~w(up down left right a b start select)a
   @max_instructions_per_frame 1_000_000
@@ -44,7 +44,8 @@ defmodule Beamicom.NES.System do
       end
 
     {console, frame} = next_frame(console, after_number, @max_instructions_per_frame)
-    {sample_count, pcm, bus} = Bus.take_audio_pcm(console.bus)
+    {frame, sample_count, pcm, bus} = render_outputs(frame, console.bus)
+    bus = put_in(bus.ppu.frame_ready, frame)
     console = %{console | bus: bus}
 
     audio = %AudioChunk{
@@ -57,6 +58,18 @@ defmodule Beamicom.NES.System do
     }
 
     {console, [Output.video_frame(frame), audio]}
+  end
+
+  defp render_outputs(%{render: nil} = frame, bus) do
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(bus)
+    {frame, sample_count, pcm, bus}
+  end
+
+  defp render_outputs(frame, bus) do
+    audio = Task.async(fn -> Bus.take_audio_pcm(bus) end)
+    frame = PPU.resolve_frame(frame)
+    {sample_count, pcm, bus} = Task.await(audio, :infinity)
+    {frame, sample_count, pcm, bus}
   end
 
   @impl true

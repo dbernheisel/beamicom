@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Nes.Bench do
   @shortdoc "Measure a deterministic, uncapped NES workload (audio and video enabled)"
   @moduledoc """
-  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--rgb-consumers 0] [--output result.json] [--profile]
+  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--audio-renderer native|nx_block] [--rgb-consumers 0] [--output result.json] [--profile]
 
   Each run cold-boots with no buttons pressed. One untimed run warms code before
   measurements. Hashing is outside the per-frame timer, but included in wall time.
@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Nes.Bench do
   @compile {:no_warn_undefined, :tprof}
   @compile {:no_warn_undefined, BeamicomNx.NES.PPURenderer}
   @compile {:no_warn_undefined, BeamicomNx.NES.PPUAtlasRenderer}
+  @compile {:no_warn_undefined, BeamicomNx.NES.APUBlockRenderer}
 
   @impl true
   def run(args) do
@@ -22,6 +23,7 @@ defmodule Mix.Tasks.Nes.Bench do
           repeats: :integer,
           output: :string,
           renderer: :string,
+          audio_renderer: :string,
           rgb_consumers: :integer,
           profile: :boolean,
           profile_only: :boolean
@@ -45,6 +47,20 @@ defmodule Mix.Tasks.Nes.Bench do
       end
 
     Application.put_env(:beamicom, :ppu_renderer, renderer_module)
+    audio_renderer = Keyword.get(opts, :audio_renderer, "native")
+
+    audio_renderer_module =
+      case audio_renderer do
+        "native" -> :native
+        "nx_block" -> BeamicomNx.NES.APUBlockRenderer
+        _ -> Mix.raise("audio-renderer must be native or nx_block")
+      end
+
+    if audio_renderer_module != :native and not Code.ensure_loaded?(audio_renderer_module),
+      do:
+        Mix.raise("the Nx audio renderer requires running this task from the beamicom_nx project")
+
+    Application.put_env(:beamicom, :apu_renderer, audio_renderer_module)
     media = File.read!(path)
     seconds = Keyword.get(opts, :seconds, 15)
     repeats = Keyword.get(opts, :repeats, 3)
@@ -74,6 +90,7 @@ defmodule Mix.Tasks.Nes.Bench do
         otp: List.to_string(:erlang.system_info(:otp_release)),
         schedulers: :erlang.system_info(:schedulers_online),
         renderer: renderer,
+        audio_renderer: String.to_atom(audio_renderer),
         rgb_consumers: rgb_consumers,
         runs: runs
       }
@@ -142,9 +159,22 @@ defmodule Mix.Tasks.Nes.Bench do
       audio_samples: samples,
       video_sha256: Base.encode16(:crypto.hash_final(video), case: :lower),
       audio_sha256: Base.encode16(:crypto.hash_final(audio), case: :lower),
-      state_sha256: hash(:erlang.term_to_binary(machine, [:deterministic]))
+      state_sha256: hash_state(machine)
     }
   end
+
+  defp hash_state(%{bus: %{apu_renderer: renderer, apu_renderer_state: state} = bus} = machine)
+       when renderer != :native do
+    state =
+      if function_exported?(renderer, :snapshot, 1),
+        do: apply(renderer, :snapshot, [state]),
+        else: state
+
+    machine = %{machine | bus: %{bus | apu_renderer_state: state}}
+    hash(:erlang.term_to_binary(machine, [:deterministic]))
+  end
+
+  defp hash_state(machine), do: hash(:erlang.term_to_binary(machine, [:deterministic]))
 
   defp hash(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 

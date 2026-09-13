@@ -17,6 +17,9 @@ defmodule Beamicom.NES.Framebuffer do
             pixels: <<>>,
             palette: <<>>,
             rgb: nil,
+            # Optional frame-wide renderer invocation resolved by NES.System so
+            # video and audio EXLA programs can run concurrently.
+            render: nil,
             # Presentation-only horizontal overscan mask. The PPU still renders
             # all 256 pixels; RGB consumers replace this many pixels at both
             # edges with black.

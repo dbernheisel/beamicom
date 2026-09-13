@@ -66,6 +66,9 @@ defmodule Beamicom.NES.APU do
             m5p2_seq: 0,
             sample_acc: 0.0,
             samples: [],
+            # Optional output adapters retain waveform/filter state separately.
+            # The native copy then advances only state visible to the CPU.
+            output_enabled: true,
             # RCA output filter chain state (see filter/2): prev in/out for the
             # DC-blocking high-pass, prev out for the low-pass.
             f_hp: 0.0,
@@ -91,6 +94,10 @@ defmodule Beamicom.NES.APU do
             # per-byte DMA CPU stalls and mid-sample bankswitch — add real DMA if a
             # game's timing/banking needs it.
             dmc: nil,
+            # When waveform output is deferred, retain only the DMC DAC level at
+            # each audio sample. DMA/status/IRQ timing still advances natively.
+            dmc_samples: [],
+            dmc_silent_samples: 0,
             # The DMC IRQ line is kept top-level (not in `dmc`) so `irq?/1` — polled
             # every CPU instruction — stays a single read.
             dmc_irq: false,
@@ -107,6 +114,9 @@ defmodule Beamicom.NES.APU do
       m5p2: %Pulse{}
     }
   end
+
+  @doc false
+  def set_output(apu, enabled) when is_boolean(enabled), do: %{apu | output_enabled: enabled}
 
   @doc "Select a Sunsoft 5B internal audio register ($C000-$DFFF)."
   def sunsoft5b_select(apu, value) do
@@ -163,6 +173,12 @@ defmodule Beamicom.NES.APU do
     apu = flush(apu)
     {sample_count, pcm} = encode_pcm(apu.samples, 0, [])
     {sample_count, pcm, %{apu | samples: []}}
+  end
+
+  @doc false
+  def take_dmc_samples(apu) do
+    levels = List.duplicate(0, apu.dmc_silent_samples) ++ Enum.reverse(apu.dmc_samples)
+    {levels, %{apu | dmc_samples: [], dmc_silent_samples: 0}}
   end
 
   # Samples are accumulated newest-first. Consing each encoded sample while
@@ -368,6 +384,26 @@ defmodule Beamicom.NES.APU do
 
   defp run(apu, 0), do: apu
 
+  defp run(%{output_enabled: false, dmc: %DMC{}, m5_active: true} = apu, n) do
+    dc = min(n, min(to_sample(apu), min(to_frame(apu), to_m5(apu))))
+    run(advance_control(apu, dc), n - dc)
+  end
+
+  defp run(%{output_enabled: false, dmc: %DMC{}} = apu, n) do
+    dc = min(n, min(to_sample(apu), to_frame(apu)))
+    run(advance_control(apu, dc), n - dc)
+  end
+
+  defp run(%{output_enabled: false, m5_active: true} = apu, n) do
+    dc = min(n, min(to_frame(apu), to_m5(apu)))
+    run(advance_control(apu, dc), n - dc)
+  end
+
+  defp run(%{output_enabled: false} = apu, n) do
+    dc = min(n, to_frame(apu))
+    run(advance_control(apu, dc), n - dc)
+  end
+
   defp run(%{m5_active: true} = apu, n) do
     dc = min(n, min(to_sample(apu), min(to_frame(apu), to_m5(apu))))
     run(advance(apu, dc), n - dc)
@@ -433,6 +469,46 @@ defmodule Beamicom.NES.APU do
     emit_sample(apu)
   end
 
+  # Audio adapters own oscillator phases, sample cadence, mixing, and filters.
+  # This copy retains the frame/MMC5 sequencers, length/envelope/sweep state,
+  # DMC state, and IRQs because the CPU can observe them during the frame.
+  defp advance_control(apu, dc) do
+    sample_total = apu.sample_acc + dc * @rate_ratio
+
+    {sample_acc, silent_samples} =
+      if apu.dmc do
+        {sample_total, apu.dmc_silent_samples}
+      else
+        emitted = trunc(sample_total)
+        {sample_total - emitted, apu.dmc_silent_samples + emitted}
+      end
+
+    apu =
+      %{
+        apu
+        | seq_cycle: apu.seq_cycle + dc,
+          sample_acc: sample_acc,
+          dmc_silent_samples: silent_samples,
+          apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
+      }
+      |> frame_action()
+      |> advance_mmc5_control(dc)
+
+    apu = if apu.dmc, do: advance_dmc(apu, dc), else: apu
+
+    apu =
+      if apu.sunsoft5b,
+        do: %{apu | sunsoft5b: Sunsoft5B.advance(apu.sunsoft5b, dc)},
+        else: apu
+
+    if apu.sample_acc >= 1.0 do
+      level = if apu.dmc, do: apu.dmc.output, else: 0
+      %{apu | sample_acc: apu.sample_acc - 1.0, dmc_samples: [level | apu.dmc_samples]}
+    else
+      apu
+    end
+  end
+
   # DMC output unit: idle (no buffered/queued bytes) → nothing changes.
   defp advance_dmc(%{dmc: %DMC{sample: <<>>, bits: 0}} = apu, _dc), do: apu
 
@@ -485,6 +561,9 @@ defmodule Beamicom.NES.APU do
     %{apu | m5p1_timer: m1t, m5p1_seq: m1s, m5p2_timer: m2t, m5p2_seq: m2s, m5seq: apu.m5seq + dc}
     |> mmc5_action()
   end
+
+  defp advance_mmc5_control(%{m5_active: false} = apu, _dc), do: apu
+  defp advance_mmc5_control(apu, dc), do: %{apu | m5seq: apu.m5seq + dc} |> mmc5_action()
 
   # Down-counter over `e` clocks: returns {remaining timer, sequence steps}. The
   # counter runs period..0 then reloads period, so a full cycle is period+1 clocks.

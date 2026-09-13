@@ -20,6 +20,17 @@ The benchmark task accepts the same choice when run from this project:
 mix nes.bench ../beamicom/roms/castlevania3.nes --seconds 15 --renderer nx
 ```
 
+The timestamped block APU is selected independently:
+
+```elixir
+Application.put_env(:beamicom, :apu_renderer, BeamicomNx.NES.APUBlockRenderer)
+```
+
+```console
+mix nes.bench ../beamicom/roms/castlevania3.nes --seconds 15 \
+  --renderer nx_atlas --audio-renderer nx_block --rgb-consumers 3
+```
+
 The native renderer remains the default and requires neither Nx nor EXLA.
 
 ## Current result
@@ -46,3 +57,18 @@ for those cartridges.
 PPU status timing and mapper-visible effects remain native even when visual work
 moves into the adapter. CHR RAM and latch-driven cartridges automatically use
 the byte-capture path.
+
+The block APU retains oscillator and filter state on EXLA. The native bus records
+timestamped register operations and continues to maintain frame/DMC IRQs, length
+status, and DMC DMA. For DMC playback it sends one DAC level per output sample so
+the compiled nonlinear triangle/noise/DMC mixer remains exact without placing a
+variable-length DMA buffer in the graph. Sunsoft 5B cartridges automatically stay
+on native audio.
+
+The PPU and APU programs execute concurrently at the frame output boundary. In
+three repeated 902-frame Castlevania III runs, the combined `nx_atlas` +
+`nx_block` path produced identical RGB, PCM, and canonical state hashes at a
+median **107.94 FPS** (106.74–110.40). That is 36.5% faster than the 79.09 FPS Nx
+atlas/native-audio path and 62.2% faster than the 66.54 FPS fully native
+three-consumer workload. The renderer also survives save-state snapshot and
+restore with its resident state reconstructed on EXLA.

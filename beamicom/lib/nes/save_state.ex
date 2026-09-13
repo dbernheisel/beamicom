@@ -9,6 +9,8 @@ defmodule Beamicom.NES.SaveState do
     chr = console.bus.ppu.chr
     rom_crc = :erlang.crc32(prg <> chr)
 
+    console = snapshot_audio_renderer(console)
+
     stripped =
       console
       |> put_in([Access.key!(:bus), Access.key!(:prg)], <<>>)
@@ -48,6 +50,7 @@ defmodule Beamicom.NES.SaveState do
         |> ensure_current_bus_fields()
         |> put_in([Access.key!(:bus), Access.key!(:prg)], prg)
         |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:chr)], chr)
+        |> restore_renderers()
 
       {:ok, console}
     rescue
@@ -86,5 +89,30 @@ defmodule Beamicom.NES.SaveState do
 
     bus = bus |> Map.drop(Map.keys(defaults)) |> then(&Map.merge(%Bus{}, &1))
     %{console | bus: %{bus | mapper_state: mapper_state}}
+  end
+
+  defp snapshot_audio_renderer(%Console{bus: %{apu_renderer: :native}} = console), do: console
+
+  defp snapshot_audio_renderer(%Console{bus: bus} = console) do
+    state =
+      if function_exported?(bus.apu_renderer, :snapshot, 1),
+        do: apply(bus.apu_renderer, :snapshot, [bus.apu_renderer_state]),
+        else: bus.apu_renderer_state
+
+    %{console | bus: %{bus | apu_renderer_state: state}}
+  end
+
+  defp restore_renderers(%Console{bus: bus} = console) do
+    ppu =
+      if bus.ppu.renderer == :native,
+        do: bus.ppu,
+        else: Beamicom.NES.PPU.set_renderer(bus.ppu, bus.ppu.renderer)
+
+    audio_state =
+      if bus.apu_renderer != :native and function_exported?(bus.apu_renderer, :restore, 1),
+        do: apply(bus.apu_renderer, :restore, [bus.apu_renderer_state]),
+        else: bus.apu_renderer_state
+
+    %{console | bus: %{bus | ppu: ppu, apu_renderer_state: audio_state}}
   end
 end

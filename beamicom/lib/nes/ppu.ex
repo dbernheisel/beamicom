@@ -1103,29 +1103,55 @@ defmodule Beamicom.NES.PPU do
 
     # The Nx path transfers one compact frame description and receives palette
     # addresses plus one shared RGB expansion. Native keeps the original output.
-    {pixels, rgb} =
-      if nx_renderer?(ppu),
-        do:
-          apply(ppu.renderer, :render, [
-            Enum.reverse(ppu.fb),
-            palette,
-            grayscale,
-            edge_mask,
-            ppu.renderer_state
-          ]),
-        else: {ppu.fb |> Enum.reverse() |> IO.iodata_to_binary(), nil}
+    lines = Enum.reverse(ppu.fb)
+
+    defer? =
+      nx_renderer?(ppu) and Application.get_env(:beamicom, :apu_renderer, :native) != :native
+
+    {pixels, rgb, render} =
+      cond do
+        defer? ->
+          {<<>>, nil, {ppu.renderer, lines, palette, grayscale, edge_mask, ppu.renderer_state}}
+
+        nx_renderer?(ppu) ->
+          {pixels, rgb} =
+            apply(ppu.renderer, :render, [
+              lines,
+              palette,
+              grayscale,
+              edge_mask,
+              ppu.renderer_state
+            ])
+
+          {pixels, rgb, nil}
+
+        true ->
+          {IO.iodata_to_binary(lines), nil, nil}
+      end
 
     frame = %Beamicom.NES.Framebuffer{
       number: ppu.frame,
       pixels: pixels,
       palette: palette,
       rgb: rgb,
+      render: render,
       edge_mask: edge_mask,
       grayscale: grayscale,
       emphasis: {(ppu.mask &&& 0x20) != 0, (ppu.mask &&& 0x40) != 0, (ppu.mask &&& 0x80) != 0}
     }
 
     %{ppu | frame_ready: frame, fb: []}
+  end
+
+  @doc false
+  def resolve_frame(%Beamicom.NES.Framebuffer{render: nil} = frame), do: frame
+
+  def resolve_frame(
+        %Beamicom.NES.Framebuffer{render: {renderer, lines, palette, grayscale, edge_mask, state}} =
+          frame
+      ) do
+    {pixels, rgb} = apply(renderer, :render, [lines, palette, grayscale, edge_mask, state])
+    %{frame | pixels: pixels, rgb: rgb, render: nil}
   end
 
   # --- CPU-facing register interface ($2000-$2007, mirrored every 8) ---

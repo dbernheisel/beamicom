@@ -75,12 +75,32 @@ defmodule Beamicom.NES.Bus do
     irq_enabled: false,
     irq_pending: false,
     apu: nil,
-    apu_pending: 0
+    apu_pending: 0,
+    apu_renderer: :native,
+    apu_renderer_state: nil,
+    apu_events: [],
+    apu_cycles: 0
   ]
 
   def default_mapper_state, do: @default_mapper_state
 
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
+    apu = Beamicom.NES.APU.new()
+    renderer = Application.get_env(:beamicom, :apu_renderer, :native)
+    # Sunsoft 5B synthesis is still native; mapper 69 must not enter a renderer
+    # that only implements the 2A03/MMC5 block contract.
+    renderer = if cart.mapper == 69, do: :native, else: renderer
+
+    {apu, renderer_state} =
+      if renderer == :native do
+        {apu, nil}
+      else
+        unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
+          do: raise("invalid NES APU renderer: #{inspect(renderer)}")
+
+        {Beamicom.NES.APU.set_output(apu, false), apply(renderer, :prepare, [apu])}
+      end
+
     bus = %__MODULE__{
       ram: <<0::size(0x800 * 8)>>,
       wram: %{},
@@ -92,7 +112,9 @@ defmodule Beamicom.NES.Bus do
         | submapper: cart.submapper || 0,
           prg_ram_size: (cart.prg_ram_size || 0) + (cart.prg_nvram_size || 0)
       },
-      apu: Beamicom.NES.APU.new()
+      apu: apu,
+      apu_renderer: renderer,
+      apu_renderer_state: renderer_state
     }
 
     Mapper.reset(bus)
@@ -129,11 +151,22 @@ defmodule Beamicom.NES.Bus do
 
     # Only FME-7 (69) has a CPU-cycle IRQ; skip the call entirely otherwise.
     bus = if bus.mapper == 69, do: Mapper.clock_cpu_irq(bus, cycles), else: bus
+
     pending = bus.apu_pending + cycles
 
-    if pending >= @apu_flush_threshold,
-      do: %{bus | apu: Beamicom.NES.APU.tick(bus.apu, pending), apu_pending: 0},
-      else: %{bus | apu_pending: pending}
+    if pending >= @apu_flush_threshold do
+      audio_cycles =
+        if bus.apu_renderer == :native, do: bus.apu_cycles, else: bus.apu_cycles + pending
+
+      %{
+        bus
+        | apu: Beamicom.NES.APU.tick(bus.apu, pending),
+          apu_pending: 0,
+          apu_cycles: audio_cycles
+      }
+    else
+      %{bus | apu_pending: pending}
+    end
   end
 
   @doc "Bring the APU current with all CPU cycles accumulated on the bus."
@@ -141,21 +174,48 @@ defmodule Beamicom.NES.Bus do
 
   def sync_apu(%__MODULE__{apu: apu, apu_pending: pending} = bus) do
     apu = apu |> Beamicom.NES.APU.tick(pending) |> Beamicom.NES.APU.flush()
-    %{bus | apu: apu, apu_pending: 0}
+
+    audio_cycles =
+      if bus.apu_renderer == :native, do: bus.apu_cycles, else: bus.apu_cycles + pending
+
+    %{bus | apu: apu, apu_pending: 0, apu_cycles: audio_cycles}
   end
 
   @doc "Drain current audio samples and return `{samples, updated_bus}`."
   def take_audio(%__MODULE__{} = bus) do
-    bus = sync_apu(bus)
-    {samples, apu} = Beamicom.NES.APU.take_samples(bus.apu)
-    {samples, %{bus | apu: apu}}
+    {_, pcm, bus} = take_audio_pcm(bus)
+    samples = for <<sample::signed-little-16 <- pcm>>, do: sample
+    {samples, bus}
   end
 
   @doc "Drain audio once as `{sample_count, signed_16_bit_little_endian_pcm, updated_bus}`."
   def take_audio_pcm(%__MODULE__{} = bus) do
     bus = sync_apu(bus)
-    {sample_count, pcm, apu} = Beamicom.NES.APU.take_pcm(bus.apu)
-    {sample_count, pcm, %{bus | apu: apu}}
+
+    if bus.apu_renderer == :native do
+      {sample_count, pcm, apu} = Beamicom.NES.APU.take_pcm(bus.apu)
+      {sample_count, pcm, %{bus | apu: apu}}
+    else
+      {dmc_samples, apu} = Beamicom.NES.APU.take_dmc_samples(bus.apu)
+
+      {sample_count, pcm, state} =
+        apply(bus.apu_renderer, :render, [
+          bus.apu_renderer_state,
+          Enum.reverse(bus.apu_events),
+          bus.apu_cycles,
+          dmc_samples
+        ])
+
+      bus = %{
+        bus
+        | apu: apu,
+          apu_renderer_state: state,
+          apu_events: [],
+          apu_cycles: 0
+      }
+
+      {sample_count, pcm, bus}
+    end
   end
 
   @doc """
@@ -260,7 +320,8 @@ defmodule Beamicom.NES.Bus do
   def read(%__MODULE__{} = bus, 0x4015) do
     bus = sync_apu(bus)
     {value, apu} = Beamicom.NES.APU.read_status(bus.apu)
-    {value, %{bus | apu: apu}}
+    bus = %{bus | apu: apu} |> record_apu_event(0x4015, -1)
+    {value, bus}
   end
 
   # MMC5 expansion reads ($5204 status, $5205/$5206 multiplier).
@@ -312,7 +373,7 @@ defmodule Beamicom.NES.Bus do
   # start, read the sample from PRG (the APU struct has no memory access) and
   # hand it over to begin playback.
   def write(%__MODULE__{} = bus, 0x4015, val) do
-    bus = sync_apu(bus)
+    bus = bus |> sync_apu() |> record_apu_event(0x4015, val)
     apu = Beamicom.NES.APU.write(bus.apu, 0x4015, val)
 
     apu =
@@ -328,13 +389,13 @@ defmodule Beamicom.NES.Bus do
 
   # APU channel + control registers ($4000-$4013, $4017 frame counter).
   def write(%__MODULE__{} = bus, addr, val) when addr in 0x4000..0x4013 or addr == 0x4017 do
-    bus = sync_apu(bus)
+    bus = bus |> sync_apu() |> record_apu_event(addr, val)
     %{bus | apu: Beamicom.NES.APU.write(bus.apu, addr, val)}
   end
 
   # MMC5 sound ($5000-$5015) goes to the APU; other $5xxx are mapper registers.
   def write(%__MODULE__{mapper: 5} = bus, addr, val) when addr in 0x5000..0x5015 do
-    bus = sync_apu(bus)
+    bus = bus |> sync_apu() |> record_apu_event(addr, val &&& 0xFF)
     %{bus | apu: Beamicom.NES.APU.mmc5_write(bus.apu, addr, val &&& 0xFF)}
   end
 
@@ -410,6 +471,18 @@ defmodule Beamicom.NES.Bus do
     do: Mapper.write(bus, addr, mapper_write_value(bus, addr, val &&& 0xFF))
 
   def write(%__MODULE__{} = bus, _addr, _val), do: bus
+
+  defp record_apu_event(%__MODULE__{apu_renderer: :native} = bus, _addr, _value), do: bus
+
+  defp record_apu_event(%__MODULE__{} = bus, addr, value) do
+    if function_exported?(bus.apu_renderer, :supports_event?, 2) and
+         apply(bus.apu_renderer, :supports_event?, [addr, value]) do
+      %{bus | apu_events: [{bus.apu_cycles, addr, value} | bus.apu_events]}
+    else
+      raise "APU renderer #{inspect(bus.apu_renderer)} does not support " <>
+              "#{Integer.to_string(addr, 16)}=#{inspect(value)}"
+    end
+  end
 
   defp ram_key(bus, offset),
     do: 0x6000 + rem(offset, max(bus.mapper_state.prg_ram_size, 0x2000))
