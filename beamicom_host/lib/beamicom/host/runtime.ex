@@ -3,9 +3,11 @@ defmodule Beamicom.Host.Runtime do
   Shared frame-paced runtime for `Beamicom.Host.System` implementations.
 
   The runtime advances one coarse system slice, publishes its typed outputs,
-  and schedules the next slice from a fixed epoch. Generation-tagged timers
-  make pause and resume race-free and ensure there is never more than one live
-  pacing chain.
+  and schedules the next slice from a fixed epoch. When a slice emits PCM, its
+  sample duration drives that timeline; this also handles systems that run for
+  longer than one video period while their display is disabled. Generation-
+  tagged timers make pause and resume race-free and ensure there is never more
+  than one live pacing chain.
   """
 
   use GenServer
@@ -13,6 +15,10 @@ defmodule Beamicom.Host.Runtime do
   alias Beamicom.Host.{AudioChunk, Input, Output, Registry, VideoFrame}
 
   @heap_words 65_536
+  # Preserve short-term fixed-epoch correction, but treat compilation and long
+  # scheduler stalls as discontinuities instead of publishing stale audio in a
+  # wall-clock catch-up burst.
+  @max_catchup_ns 50_000_000
   @spawn_options [
     spawn_opt: [
       {:min_heap_size, @heap_words},
@@ -21,7 +27,15 @@ defmodule Beamicom.Host.Runtime do
   ]
 
   @enforce_keys [:system, :machine, :output, :period_ns, :epoch, :pace, :speed]
-  defstruct @enforce_keys ++ [slice: 0, paused: false, generation: 0, timer: nil]
+  defstruct @enforce_keys ++
+              [
+                slice: 0,
+                elapsed_ns: 0,
+                last_period_ns: nil,
+                paused: false,
+                generation: 0,
+                timer: nil
+              ]
 
   @type t :: %__MODULE__{}
 
@@ -80,6 +94,7 @@ defmodule Beamicom.Host.Runtime do
           machine: machine,
           output: Keyword.fetch!(options, :output),
           period_ns: period_ns,
+          last_period_ns: period_ns,
           epoch: now(),
           pace: Keyword.get(options, :pace, true),
           speed: Keyword.get(options, :speed, 1.0)
@@ -113,6 +128,8 @@ defmodule Beamicom.Host.Runtime do
       | paused: false,
         epoch: now(),
         slice: 0,
+        elapsed_ns: 0,
+        last_period_ns: state.period_ns,
         generation: state.generation + 1,
         timer: nil
     }
@@ -147,7 +164,27 @@ defmodule Beamicom.Host.Runtime do
   defp run_slice(state) do
     {machine, outputs} = state.system.run_slice(state.machine)
     publish(outputs, state.output)
-    %{state | machine: machine}
+    duration_ns = output_duration(outputs, state.period_ns)
+
+    %{
+      state
+      | machine: machine,
+        elapsed_ns: state.elapsed_ns + duration_ns,
+        last_period_ns: duration_ns
+    }
+  end
+
+  defp output_duration(outputs, fallback) do
+    audio_ns =
+      Enum.reduce(outputs, 0, fn
+        %AudioChunk{frame_count: count, sample_rate: rate}, total when count > 0 and rate > 0 ->
+          total + round(count * 1_000_000_000 / rate)
+
+        _output, total ->
+          total
+      end)
+
+    if audio_ns > 0, do: audio_ns, else: fallback
   end
 
   defp publish([], _output), do: :ok
@@ -170,16 +207,36 @@ defmodule Beamicom.Host.Runtime do
   end
 
   defp schedule(state) do
-    deadline = state.epoch + round(state.slice * state.period_ns / state.speed)
+    current = now()
+    next_period = round(state.last_period_ns / state.speed)
+    deadline = state.epoch + round(state.elapsed_ns / state.speed)
+    max_catchup = max(@max_catchup_ns, round(state.period_ns * 2 / state.speed))
+    long_slice? = state.last_period_ns > state.period_ns * 2
 
-    timer =
-      Process.send_after(
-        self(),
-        {:tick, state.generation},
-        max(0, div(deadline - now(), 1_000_000))
-      )
+    if long_slice? or current - deadline > max_catchup do
+      # Leave the emitted audio duration on the wall clock, less one ordinary
+      # frame of work that the next system slice is expected to consume.
+      work_budget = round(state.period_ns / state.speed)
+      delay = max(0, next_period - work_budget)
+      timer = Process.send_after(self(), {:tick, state.generation}, div(delay, 1_000_000))
 
-    %{state | timer: timer}
+      %{
+        state
+        | epoch: current,
+          slice: 1,
+          elapsed_ns: state.last_period_ns,
+          timer: timer
+      }
+    else
+      timer =
+        Process.send_after(
+          self(),
+          {:tick, state.generation},
+          max(0, div(deadline - current, 1_000_000))
+        )
+
+      %{state | timer: timer}
+    end
   end
 
   defp cancel_timer(nil), do: :ok

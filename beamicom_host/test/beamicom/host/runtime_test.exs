@@ -34,14 +34,36 @@ defmodule Beamicom.Host.RuntimeTest do
         sample_rate: 8_000,
         channels: 1,
         sample_format: :s16le,
-        frame_count: 1,
-        data: <<number::signed-little-16>>
+        frame_count: 800,
+        data: :binary.copy(<<number::signed-little-16>>, 800)
       }
 
       {%{machine | number: number + 1}, [video, audio]}
     end
 
     def set_input(machine, %Input{} = input), do: %{machine | input: input}
+  end
+
+  defmodule SlowFirstSystem do
+    def capabilities, do: TestSystem.capabilities()
+
+    def run_slice(%{slow?: true} = machine) do
+      Process.sleep(350)
+      TestSystem.run_slice(%{machine | slow?: false})
+    end
+
+    def run_slice(machine), do: TestSystem.run_slice(machine)
+
+    def set_input(machine, input), do: TestSystem.set_input(machine, input)
+  end
+
+  defmodule LongAudioSystem do
+    def capabilities do
+      put_in(TestSystem.capabilities(), [:video, :frame_rate], 100.0)
+    end
+
+    def run_slice(machine), do: TestSystem.run_slice(machine)
+    def set_input(machine, input), do: TestSystem.set_input(machine, input)
   end
 
   test "loads, publishes typed output, accepts input, and uses the realtime heap profile" do
@@ -56,7 +78,7 @@ defmodule Beamicom.Host.RuntimeTest do
 
     assert_receive {:video_frame, :runtime_test, 3}, 200
     assert %VideoFrame{number: 3} = Output.latest_video(output)
-    assert_receive {:audio_chunk, %AudioChunk{frame_count: 1}}, 200
+    assert_receive {:audio_chunk, %AudioChunk{frame_count: 800}}, 200
 
     assert :ok = Runtime.set_input(runtime, Input.new(1, [:a]))
     assert %Input{port: 1, controls: controls} = Runtime.snapshot(runtime).input
@@ -97,5 +119,41 @@ defmodule Beamicom.Host.RuntimeTest do
     assert %VideoFrame{number: 2} = Output.latest_video(output)
     refute_receive {:video_frame, :runtime_test, _number}, 50
     assert_receive {:video_frame, :runtime_test, 3}, 100
+  end
+
+  test "rebases pacing after a long system or renderer stall" do
+    output = start_supervised!({Output, name: nil})
+    :ok = Output.subscribe_video(output)
+    started_at = System.monotonic_time(:nanosecond)
+
+    runtime =
+      start_supervised!(
+        {Runtime,
+         system: SlowFirstSystem,
+         machine: %{number: 0, input: nil, options: [], slow?: true},
+         output: output}
+      )
+
+    assert_receive {:video_frame, :runtime_test, 0}, 700
+    state = :sys.get_state(runtime)
+
+    assert state.epoch - started_at >= 50_000_000
+  end
+
+  test "paces variable system slices by their emitted audio duration" do
+    output = start_supervised!({Output, name: nil})
+    :ok = Output.subscribe_video(output)
+
+    runtime =
+      start_supervised!(
+        {Runtime,
+         system: LongAudioSystem, machine: %{number: 0, input: nil, options: []}, output: output}
+      )
+
+    assert_receive {:video_frame, :runtime_test, 0}, 200
+    assert %VideoFrame{number: 0} = Output.latest_video(output)
+    refute_receive {:video_frame, :runtime_test, 1}, 70
+    assert_receive {:video_frame, :runtime_test, 1}, 100
+    GenServer.stop(runtime)
   end
 end
