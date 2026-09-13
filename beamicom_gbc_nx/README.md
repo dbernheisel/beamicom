@@ -53,15 +53,17 @@ compatibility fixture gave these medians with identical video and audio hashes:
 
 | PPU | APU | FPS | Difference from native |
 | --- | --- | ---: | ---: |
-| native | block Elixir | 67.74 | — |
-| frame-wide Nx | block Nx | 54.41 | -19.7% |
+| native | block Elixir | 96.61 | — |
+| frame-wide Nx | block Nx | 75.23 | -22.1% |
 
 The dependency-free core uses its Elixir block mixer by default, while the
 optional package selects the Nx block mixer at compile time. Their matching
 hashes confirm the same output. On this single-instance CPU workload, full tile
 lookup and 40-sprite evaluation cost more in EXLA than the native scanline path;
 the frame-wide graph is intended to support larger kernels and future
-leading-axis batching.
+leading-axis batching. The shared bus avoids full timer/PPU dispatch when a
+timer-off CPU cycle remains within the current LCD mode, and uses direct cycle
+reads for ROM, WRAM, and HRAM; exact processing remains at every LCD boundary.
 
 The base frame payload is about 18 KB: 16 KB VRAM, 160-byte OAM, 128-byte CGB
 palette RAM, and 1,296 bytes of scanline controls. Each visible memory write adds

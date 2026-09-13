@@ -65,6 +65,25 @@ defmodule Beamicom.GB.BusTest do
     assert Bus.read(bus, 0xFF04) == 0
   end
 
+  test "timer-off cycle fast path matches batched LCD boundary processing" do
+    for speed <- [:normal, :double] do
+      bus = mapped_bus(model: :cgb) |> Bus.write(0xFF40, 0x91)
+
+      bus =
+        if speed == :double do
+          bus = Bus.write(bus, 0xFF4D, 1)
+          {:speed_switch, bus} = Bus.stop(bus)
+          bus
+        else
+          bus
+        end
+
+      chunked = Enum.reduce(1..20_000, bus, fn _, bus -> Bus.tick(bus, 4) end)
+      batched = Bus.tick(bus, 80_000)
+      assert chunked == batched
+    end
+  end
+
   test "each TAC clock selection increments TIMA on the selected falling edge" do
     for {select, period} <- [{0, 1024}, {1, 16}, {2, 64}, {3, 256}] do
       bus = Bus.new() |> Bus.write(0xFF07, 0x04 ||| select)

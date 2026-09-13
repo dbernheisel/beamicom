@@ -40,6 +40,8 @@ defmodule Beamicom.GB.Bus do
   @lines_per_frame 154
   @visible_lines 144
   @hblank_dot 252
+  @oam_dot 80
+  @vblank_start @dots_per_line * @visible_lines
   @frame_dots @dots_per_line * @lines_per_frame
   @zero_page :binary.copy(<<0>>, 0x100)
   @zero_wram List.duplicate(@zero_page, 128) |> List.to_tuple()
@@ -432,6 +434,25 @@ defmodule Beamicom.GB.Bus do
 
   @doc false
   @spec read_cycle(t(), 0..0xFFFF) :: {byte(), t()}
+  def read_cycle(
+        %__MODULE__{mode: :mapped, boot_enabled: false, cartridge: cartridge} = bus,
+        address
+      )
+      when address in 0x0000..0x7FFF,
+      do: {Cartridge.read(cartridge, address), tick(bus, 4)}
+
+  def read_cycle(%__MODULE__{mode: :mapped, wram: wram} = bus, address)
+      when address in 0xC000..0xCFFF,
+      do: {paged_byte(wram, address - 0xC000), tick(bus, 4)}
+
+  def read_cycle(%__MODULE__{mode: :mapped, wram: wram} = bus, address)
+      when address in 0xD000..0xDFFF,
+      do: {paged_byte(wram, selected_wram_bank(bus) * 0x1000 + address - 0xD000), tick(bus, 4)}
+
+  def read_cycle(%__MODULE__{mode: :mapped, hram: hram} = bus, address)
+      when address in 0xFF80..0xFFFE,
+      do: {:binary.at(hram, address - 0xFF80), tick(bus, 4)}
+
   def read_cycle(%__MODULE__{mode: :mapped} = bus, address)
       when address in 0xFF10..0xFF3F do
     bus = sync_apu(bus)
@@ -590,8 +611,59 @@ defmodule Beamicom.GB.Bus do
   def tick(%__MODULE__{ppu: nil} = bus, clocks) when clocks > 0,
     do: tick_timers(bus, clocks)
 
-  def tick(%__MODULE__{ppu: ppu, control: control, lcd_phase: phase} = bus, clocks)
-      when clocks > 0 do
+  # Most CPU memory cycles neither clock TIMA nor cross an LCD event. Compute
+  # the next compact clock once and reconstruct the bus only once on that path.
+  def tick(
+        %__MODULE__{
+          ppu:
+            %PPU{
+              clock: clock,
+              registers: {lcdc, _, _, _, _, _, _, _, _, _}
+            } = ppu,
+          control: control,
+          tac: tac,
+          timer_reload: 0,
+          hdma_request: nil,
+          divider: divider,
+          apu_pending: apu_pending,
+          lcd_phase: old_phase
+        } = bus,
+        clocks
+      )
+      when clocks > 0 and (tac &&& 0x04) == 0 do
+    total = old_phase + clocks
+    double_speed? = (control &&& @double_speed) != 0
+    dots = if double_speed?, do: div(total, 2), else: clocks
+    phase = if double_speed?, do: rem(total, 2), else: 0
+    dot = rem(clock, @dots_per_line)
+
+    before_boundary? =
+      (lcdc &&& 0x80) == 0 or
+        (clock < @vblank_start and dot < @oam_dot and dot + dots < @oam_dot) or
+        (clock < @vblank_start and dot >= @oam_dot and dot < @hblank_dot and
+           dot + dots < @hblank_dot) or
+        (clock < @vblank_start and dot >= @hblank_dot and dot + dots < @dots_per_line) or
+        (clock >= @vblank_start and dot + dots < @dots_per_line)
+
+    if before_boundary? do
+      ppu = if (lcdc &&& 0x80) == 0, do: ppu, else: %{ppu | clock: clock + dots}
+
+      %{
+        bus
+        | divider: divider + clocks &&& 0xFFFF,
+          apu_pending: apu_pending + dots,
+          lcd_phase: phase,
+          ppu: ppu
+      }
+    else
+      tick_devices(bus, clocks)
+    end
+  end
+
+  def tick(%__MODULE__{} = bus, clocks) when clocks > 0, do: tick_devices(bus, clocks)
+
+  defp tick_devices(%__MODULE__{ppu: ppu, control: control, lcd_phase: phase} = bus, clocks)
+       when clocks > 0 do
     {dots, phase} =
       if (control &&& @double_speed) == 0,
         do: {clocks, 0},
