@@ -1,11 +1,18 @@
 # Beamicom GBC Nx
 
-Optional EXLA frame and audio renderers for `beamicom_gbc`. The dependency-free core
-keeps LCD timing, VRAM/OAM access, tile addressing, window state, and sprite
-selection in Elixir. At VBlank this package composes sprite priority and
-per-scanline DMG/CGB palettes across all 144×160 pixels in one EXLA call. The
-block APU renderer converts a frame of channel levels, stereo routing, and
-master volume to interleaved PCM in a second EXLA call.
+Optional EXLA frame and audio renderers for `beamicom_gbc`, covering both DMG
+and CGB execution. The dependency-free core keeps LCD timing and memory access
+rules in Elixir. At each HBlank it records compact tile-plane rows and the first
+ten selected objects. At VBlank one EXLA operation performs bit-plane expansion,
+scroll and window selection, sprite composition, priority, and palette lookup
+for all 144×160 pixels.
+
+The default Nx audio renderer batches the already resolved channel levels. The
+package also contains `Beamicom.GB.Nx.APUSynthRenderer`, which accepts compact
+control epochs and keeps pulse timers, wave position, noise LFSR, and sample
+phase in EXLA across frames. It synthesizes every sample in an epoch as one
+vector operation and is useful for further batching work, although it is slower
+for one emulator on the current CPU client.
 
 Add the package to a client and opt in before loading a machine:
 
@@ -15,24 +22,45 @@ Add the package to a client and opt in before loading a machine:
 Beamicom.GB.Nx.enable()
 ```
 
+Select full event-block synthesis explicitly:
+
+```elixir
+Beamicom.GB.Nx.enable(apu_renderer: Beamicom.GB.Nx.APUSynthRenderer)
+```
+
 To opt in automatically before the client supervision tree starts:
 
 ```elixir
 config :beamicom_gbc_nx, auto_enable: true
 ```
 
-The core retains no Nx or EXLA dependency.
+The core retains no Nx or EXLA dependency. PPU and APU programs resolve
+concurrently at the host output boundary, and EXLA-backed audio state is copied
+through the renderer's snapshot/restore callbacks for portable save states.
 
 Compare implementations with the deterministic benchmark task:
 
 ```sh
 mix gb.bench /path/to/game.gbc --frames 120 --repeats 3 \
   --renderer nx --audio-renderer nx_block
+
+mix gb.bench /path/to/game.gbc --frames 120 --repeats 3 \
+  --renderer nx --audio-renderer nx_synth
 ```
 
-On the current EXLA CPU client, a single Link's Awakening DX instance remains
-CPU/Bus-bound. Over three 120-frame runs the native median is 47.53 FPS and the
-combined Nx median is 45.71 FPS, with identical video and PCM hashes. For that
-reason automatic activation is disabled by default. The frame-sized tensor
-boundary is available for larger kernels and future multi-instance batching
-without imposing Nx on the core or slowing existing clients.
+On the current EXLA CPU client, three 120-frame Link's Awakening DX runs gave
+these medians with identical video and audio hashes:
+
+| PPU | APU | FPS | Difference from native |
+| --- | --- | ---: | ---: |
+| native | native | 46.90 | — |
+| frame-wide Nx | block Nx | 45.59 | -2.8% |
+| frame-wide Nx | event-synthesis Nx | 44.55 | -5.0% |
+
+Concurrent resolution recovers much of the deeper kernels' call overhead, but
+the result still cannot accelerate this
+single-instance workload because CPU and bus execution dominate while native
+PPU/APU work is already a small fraction of the frame. Automatic activation
+therefore remains disabled. The raw-row and event-block boundaries are intended
+for larger kernels and future leading-axis batching without slowing clients
+that use the native core.

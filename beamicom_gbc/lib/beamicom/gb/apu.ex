@@ -108,6 +108,9 @@ defmodule Beamicom.GB.APU do
             pending_dots: 0,
             samples: [],
             sample_count: 0,
+            render_events: [],
+            render_dots: 0,
+            render_triggers: {0, 0, 0, 0},
             renderer: :native,
             renderer_state: nil
 
@@ -125,30 +128,46 @@ defmodule Beamicom.GB.APU do
         configured -> configured
       end
 
-    renderer_state = prepare_renderer(renderer, model)
-    %__MODULE__{model: model, renderer: renderer, renderer_state: renderer_state}
+    apu = %__MODULE__{model: model, renderer: renderer}
+    %{apu | renderer_state: prepare_renderer(renderer, apu)}
   end
 
   @doc "Selects inline native mixing or an optional block renderer."
   @spec set_renderer(t(), :native | :nx_block | module()) :: t()
   def set_renderer(apu, :native),
-    do: %{apu | renderer: :native, renderer_state: nil, samples: [], sample_count: 0}
+    do: %{
+      apu
+      | renderer: :native,
+        renderer_state: nil,
+        samples: [],
+        sample_count: 0,
+        render_events: [],
+        render_dots: 0
+    }
 
   def set_renderer(apu, :nx_block),
     do: set_renderer(apu, Beamicom.GB.Nx.APUBlockRenderer)
 
   def set_renderer(apu, renderer) when is_atom(renderer) do
-    state = prepare_renderer(renderer, apu.model)
-    %{apu | renderer: renderer, renderer_state: state, samples: [], sample_count: 0}
+    configured = %{
+      apu
+      | renderer: renderer,
+        samples: [],
+        sample_count: 0,
+        render_events: [],
+        render_dots: 0
+    }
+
+    %{configured | renderer_state: prepare_renderer(renderer, configured)}
   end
 
-  defp prepare_renderer(:native, _model), do: nil
+  defp prepare_renderer(:native, _apu), do: nil
 
-  defp prepare_renderer(renderer, model) do
+  defp prepare_renderer(renderer, apu) do
     unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
       do: raise("invalid Game Boy APU renderer: #{inspect(renderer)}")
 
-    apply(renderer, :prepare, [model])
+    apply(renderer, :prepare, [apu])
   end
 
   @doc "Creates the stable, documented portion of the post-boot audio state."
@@ -196,73 +215,91 @@ defmodule Beamicom.GB.APU do
 
   @doc "Writes an audio register and returns the updated pure state."
   @spec write(t(), 0xFF10..0xFF3F, byte()) :: t()
-  def write(%__MODULE__{} = apu, 0xFF26, value)
-      when value in 0..0xFF and (value &&& 0x80) == 0,
-      do: power_off(apu)
+  def write(%__MODULE__{} = apu, address, value)
+      when address in 0xFF10..0xFF3F and value in 0..0xFF do
+    updated = write_immediate(apu, address, value)
 
-  def write(%__MODULE__{master: true} = apu, 0xFF26, value) when value in 0..0xFF,
+    if event_renderer?(apu.renderer), do: record_trigger(updated, address, value), else: updated
+  end
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF26, value)
+       when value in 0..0xFF and (value &&& 0x80) == 0,
+       do: power_off(apu)
+
+  defp write_immediate(%__MODULE__{master: true} = apu, 0xFF26, value) when value in 0..0xFF,
     do: apu
 
-  def write(%__MODULE__{} = apu, 0xFF26, value) when value in 0..0xFF,
+  defp write_immediate(%__MODULE__{} = apu, 0xFF26, value) when value in 0..0xFF,
     do: %{apu | master: true}
 
-  def write(%__MODULE__{wave_ram: wave} = apu, address, value)
-      when address in 0xFF30..0xFF3F and value in 0..0xFF,
-      do: %{apu | wave_ram: put_byte(wave, address - 0xFF30, value)}
+  defp write_immediate(%__MODULE__{wave_ram: wave} = apu, address, value)
+       when address in 0xFF30..0xFF3F and value in 0..0xFF,
+       do: %{apu | wave_ram: put_byte(wave, address - 0xFF30, value)}
 
-  def write(%__MODULE__{master: false, model: :dmg} = apu, address, value)
-      when address in [0xFF11, 0xFF16, 0xFF1B, 0xFF20] and value in 0..0xFF,
-      do: write_powered_off_length(apu, address, value)
+  defp write_immediate(%__MODULE__{master: false, model: :dmg} = apu, address, value)
+       when address in [0xFF11, 0xFF16, 0xFF1B, 0xFF20] and value in 0..0xFF,
+       do: write_powered_off_length(apu, address, value)
 
-  def write(%__MODULE__{master: false} = apu, address, value)
-      when address in 0xFF10..0xFF2F and value in 0..0xFF,
-      do: apu
+  defp write_immediate(%__MODULE__{master: false} = apu, address, value)
+       when address in 0xFF10..0xFF2F and value in 0..0xFF,
+       do: apu
 
-  def write(%__MODULE__{} = apu, 0xFF10, value),
+  defp write_immediate(%__MODULE__{} = apu, 0xFF10, value),
     do:
       apu
       |> put_register(0, value &&& 0x7F)
       |> update_sweep(value)
 
-  def write(%__MODULE__{} = apu, 0xFF11, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF11, value) do
     ch = %{apu.ch1 | duty: value >>> 6, length: 64 - (value &&& 0x3F)}
     %{put_register(apu, 1, value) | ch1: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF12, value), do: write_pulse_envelope(apu, :ch1, 2, value)
-  def write(%__MODULE__{} = apu, 0xFF13, value), do: write_pulse_low(apu, :ch1, 3, value)
-  def write(%__MODULE__{} = apu, 0xFF14, value), do: write_pulse_high(apu, :ch1, 4, value)
-  def write(%__MODULE__{} = apu, 0xFF15, _value), do: apu
+  defp write_immediate(%__MODULE__{} = apu, 0xFF12, value),
+    do: write_pulse_envelope(apu, :ch1, 2, value)
 
-  def write(%__MODULE__{} = apu, 0xFF16, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF13, value),
+    do: write_pulse_low(apu, :ch1, 3, value)
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF14, value),
+    do: write_pulse_high(apu, :ch1, 4, value)
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF15, _value), do: apu
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF16, value) do
     ch = %{apu.ch2 | duty: value >>> 6, length: 64 - (value &&& 0x3F)}
     %{put_register(apu, 6, value) | ch2: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF17, value), do: write_pulse_envelope(apu, :ch2, 7, value)
-  def write(%__MODULE__{} = apu, 0xFF18, value), do: write_pulse_low(apu, :ch2, 8, value)
-  def write(%__MODULE__{} = apu, 0xFF19, value), do: write_pulse_high(apu, :ch2, 9, value)
+  defp write_immediate(%__MODULE__{} = apu, 0xFF17, value),
+    do: write_pulse_envelope(apu, :ch2, 7, value)
 
-  def write(%__MODULE__{} = apu, 0xFF1A, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF18, value),
+    do: write_pulse_low(apu, :ch2, 8, value)
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF19, value),
+    do: write_pulse_high(apu, :ch2, 9, value)
+
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1A, value) do
     dac = (value &&& 0x80) != 0
     ch = %{apu.ch3 | dac: dac, enabled: apu.ch3.enabled and dac}
     %{put_register(apu, 10, value &&& 0x80) | ch3: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF1B, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1B, value) do
     %{put_register(apu, 11, value) | ch3: %{apu.ch3 | length: 256 - value}}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF1C, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1C, value) do
     %{put_register(apu, 12, value &&& 0x60) | ch3: %{apu.ch3 | level: value >>> 5 &&& 3}}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF1D, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1D, value) do
     frequency = (apu.ch3.frequency &&& 0x700) ||| value
     %{put_register(apu, 13, value) | ch3: %{apu.ch3 | frequency: frequency}}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF1E, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1E, value) do
     frequency = (apu.ch3.frequency &&& 0xFF) ||| (value &&& 7) <<< 8
     ch = update_length_enable(%{apu.ch3 | frequency: frequency}, value, apu.sequencer_step)
 
@@ -274,15 +311,15 @@ defmodule Beamicom.GB.APU do
     %{put_register(apu, 14, value &&& 0x47) | ch3: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF1F, _value), do: apu
+  defp write_immediate(%__MODULE__{} = apu, 0xFF1F, _value), do: apu
 
-  def write(%__MODULE__{} = apu, 0xFF20, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF20, value) do
     %{put_register(apu, 16, value) | ch4: %{apu.ch4 | length: 64 - (value &&& 0x3F)}}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF21, value), do: write_noise_envelope(apu, value)
+  defp write_immediate(%__MODULE__{} = apu, 0xFF21, value), do: write_noise_envelope(apu, value)
 
-  def write(%__MODULE__{} = apu, 0xFF22, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF22, value) do
     ch = %{
       apu.ch4
       | shift: value >>> 4,
@@ -293,7 +330,7 @@ defmodule Beamicom.GB.APU do
     %{put_register(apu, 18, value) | ch4: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF23, value) do
+  defp write_immediate(%__MODULE__{} = apu, 0xFF23, value) do
     ch = update_length_enable(apu.ch4, value, apu.sequencer_step)
 
     ch =
@@ -304,9 +341,11 @@ defmodule Beamicom.GB.APU do
     %{put_register(apu, 19, value &&& 0x40) | ch4: ch}
   end
 
-  def write(%__MODULE__{} = apu, 0xFF24, value), do: put_register(apu, 20, value)
-  def write(%__MODULE__{} = apu, 0xFF25, value), do: put_register(apu, 21, value)
-  def write(%__MODULE__{} = apu, address, _value) when address in 0xFF27..0xFF2F, do: apu
+  defp write_immediate(%__MODULE__{} = apu, 0xFF24, value), do: put_register(apu, 20, value)
+  defp write_immediate(%__MODULE__{} = apu, 0xFF25, value), do: put_register(apu, 21, value)
+
+  defp write_immediate(%__MODULE__{} = apu, address, _value) when address in 0xFF27..0xFF2F,
+    do: apu
 
   @doc false
   @spec defer_tick(t(), non_neg_integer()) :: t()
@@ -330,26 +369,30 @@ defmodule Beamicom.GB.APU do
   defp tick_immediate(%__MODULE__{} = apu, 0), do: apu
 
   defp tick_immediate(%__MODULE__{master: false} = apu, dots) when dots > 0 do
-    total = apu.sample_phase + dots * @sample_rate
-    count = div(total, @clock_rate)
-    phase = total - count * @clock_rate
-    seq_total = apu.sequencer_phase + dots
-    seq_ticks = div(seq_total, @sequencer_period)
-    seq_phase = seq_total - seq_ticks * @sequencer_period
+    if event_renderer?(apu.renderer) do
+      advance_events(apu, dots)
+    else
+      total = apu.sample_phase + dots * @sample_rate
+      count = div(total, @clock_rate)
+      phase = total - count * @clock_rate
+      seq_total = apu.sequencer_phase + dots
+      seq_ticks = div(seq_total, @sequencer_period)
+      seq_phase = seq_total - seq_ticks * @sequencer_period
 
-    silence = append_silence(apu, count)
-
-    %{
-      apu
-      | sample_phase: phase,
-        samples: silence,
-        sample_count: apu.sample_count + count,
-        sequencer_phase: seq_phase,
-        sequencer_step: apu.sequencer_step + seq_ticks &&& 7
-    }
+      %{
+        apu
+        | sample_phase: phase,
+          samples: append_silence(apu, count),
+          sample_count: apu.sample_count + count,
+          sequencer_phase: seq_phase,
+          sequencer_step: apu.sequencer_step + seq_ticks &&& 7
+      }
+    end
   end
 
-  defp tick_immediate(%__MODULE__{} = apu, dots) when dots > 0, do: advance(apu, dots)
+  defp tick_immediate(%__MODULE__{} = apu, dots) when dots > 0 do
+    if event_renderer?(apu.renderer), do: advance_events(apu, dots), else: advance(apu, dots)
+  end
 
   @doc "Clocks one DIV-APU edge, used for the FF04 reset falling-edge quirk."
   @spec clock_frame_sequencer(t()) :: t()
@@ -373,14 +416,38 @@ defmodule Beamicom.GB.APU do
   def take_samples(%__MODULE__{} = apu) do
     %__MODULE__{samples: samples, sample_count: count} = apu = flush(apu)
 
-    {pcm, renderer_state} =
-      if apu.renderer == :native do
-        {samples |> :lists.reverse() |> IO.iodata_to_binary(), nil}
-      else
-        apply(apu.renderer, :render, [apu.renderer_state, :lists.reverse(samples), count])
+    {rendered_count, pcm, renderer_state} =
+      cond do
+        apu.renderer == :native ->
+          {count, samples |> :lists.reverse() |> IO.iodata_to_binary(), nil}
+
+        event_renderer?(apu.renderer) ->
+          apply(apu.renderer, :render_events, [
+            apu.renderer_state,
+            :lists.reverse(apu.render_events),
+            apu.render_dots,
+            count
+          ])
+
+        true ->
+          {pcm, state} =
+            apply(apu.renderer, :render, [apu.renderer_state, :lists.reverse(samples), count])
+
+          {count, pcm, state}
       end
 
-    {count, pcm, %{apu | samples: [], sample_count: 0, renderer_state: renderer_state}}
+    unless rendered_count == count,
+      do: raise("Game Boy APU renderer sample count mismatch: #{rendered_count} != #{count}")
+
+    {count, pcm,
+     %{
+       apu
+       | samples: [],
+         sample_count: 0,
+         render_events: [],
+         render_dots: 0,
+         renderer_state: renderer_state
+     }}
   end
 
   defp advance(apu, 0), do: apu
@@ -416,6 +483,32 @@ defmodule Beamicom.GB.APU do
       end
 
     advance(apu, dots - distance)
+  end
+
+  defp advance_events(apu, 0), do: apu
+
+  defp advance_events(apu, dots) do
+    distance = min(dots, @sequencer_period - apu.sequencer_phase)
+    apu = append_render_segment(apu, distance)
+    sample_total = apu.sample_phase + distance * @sample_rate
+    emitted = div(sample_total, @clock_rate)
+    sequence_phase = apu.sequencer_phase + distance
+
+    apu = %{
+      apu
+      | sample_phase: sample_total - emitted * @clock_rate,
+        sample_count: apu.sample_count + emitted,
+        sequencer_phase: sequence_phase
+    }
+
+    apu =
+      if sequence_phase == @sequencer_period do
+        apu |> Map.put(:sequencer_phase, 0) |> clock_frame_sequencer()
+      else
+        apu
+      end
+
+    advance_events(apu, dots - distance)
   end
 
   defp advance_channels(apu, dots) do
@@ -585,6 +678,85 @@ defmodule Beamicom.GB.APU do
     do: [:binary.copy(@silence, count) | apu.samples]
 
   defp append_silence(apu, count), do: [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples]
+
+  defp event_renderer?(:native), do: false
+
+  defp event_renderer?(renderer),
+    do: function_exported?(renderer, :event_driven?, 0) and apply(renderer, :event_driven?, [])
+
+  defp append_render_segment(apu, dots) do
+    %{
+      apu
+      | render_events: [render_segment(apu, dots) | apu.render_events],
+        render_dots: apu.render_dots + dots
+    }
+  end
+
+  defp render_segment(apu, dots) do
+    {t1, t2, t3, t4} = apu.render_triggers
+    nr50 = elem(apu.registers, 20)
+    nr51 = elem(apu.registers, 21)
+    p1 = apu.ch1
+    p2 = apu.ch2
+    wave = apu.ch3
+    noise = apu.ch4
+
+    [
+      dots,
+      bool(apu.master),
+      nr50,
+      nr51,
+      bool(p1.enabled),
+      bool(p1.dac),
+      p1.duty,
+      p1.frequency,
+      p1.volume,
+      t1,
+      bool(p2.enabled),
+      bool(p2.dac),
+      p2.duty,
+      p2.frequency,
+      p2.volume,
+      t2,
+      bool(wave.enabled),
+      bool(wave.dac),
+      wave.level,
+      wave.frequency,
+      t3
+      | :binary.bin_to_list(apu.wave_ram) ++
+          [
+            bool(noise.enabled),
+            bool(noise.dac),
+            noise.volume,
+            noise.shift,
+            bool(noise.width7),
+            noise.divisor,
+            t4
+          ]
+    ]
+  end
+
+  defp record_trigger(apu, address, value) when (value &&& 0x80) != 0 do
+    index =
+      case address do
+        0xFF14 -> 0
+        0xFF19 -> 1
+        0xFF1E -> 2
+        0xFF23 -> 3
+        _address -> nil
+      end
+
+    if index == nil do
+      apu
+    else
+      triggers = apu.render_triggers
+      %{apu | render_triggers: put_elem(triggers, index, elem(triggers, index) + 1)}
+    end
+  end
+
+  defp record_trigger(apu, _address, _value), do: apu
+  defp bool(true), do: 1
+  defp bool(false), do: 0
 
   defp routed_sum(outputs, routes) do
     if((routes &&& 1) != 0, do: elem(outputs, 0), else: 0) +

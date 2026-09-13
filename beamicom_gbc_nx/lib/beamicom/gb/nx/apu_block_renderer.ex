@@ -13,7 +13,7 @@ defmodule Beamicom.GB.Nx.APUBlockRenderer do
   @capacity 1024
 
   @impl true
-  def prepare(model) when model in [:dmg, :cgb], do: nil
+  def prepare(%Beamicom.GB.APU{}), do: nil
 
   @impl true
   def render(state, entries, count) do

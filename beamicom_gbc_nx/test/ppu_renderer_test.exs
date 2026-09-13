@@ -22,7 +22,7 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
       {_native, [native_video, native_audio]} = System.run_slice(native)
 
       Application.put_env(:beamicom_gbc, :ppu_renderer, Beamicom.GB.Nx.PPURenderer)
-      Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUBlockRenderer)
+      Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUSynthRenderer)
       {:ok, accelerated} = System.load(media, [])
       {_accelerated, [video, audio]} = System.run_slice(accelerated)
 
@@ -34,7 +34,7 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
 
   test "Nx-backed machines survive save and restore at a frame boundary" do
     Application.put_env(:beamicom_gbc, :ppu_renderer, Beamicom.GB.Nx.PPURenderer)
-    Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUBlockRenderer)
+    Application.put_env(:beamicom_gbc, :apu_renderer, Beamicom.GB.Nx.APUSynthRenderer)
     media = DiagnosticROM.build_cgb()
     {:ok, machine} = System.load(media, [])
     {machine, _outputs} = System.run_slice(machine)
@@ -52,6 +52,18 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
 
     assert accelerated == native
     refute native == :binary.copy(<<0>>, byte_size(native))
+  end
+
+  test "event-block APU synthesis is exact for routed audible channel output" do
+    native = audible_audio(:native)
+    accelerated = audible_audio(Beamicom.GB.Nx.APUSynthRenderer)
+
+    assert accelerated == native
+    refute native == :binary.copy(<<0>>, byte_size(native))
+  end
+
+  test "event-block synthesis stays exact across all channels and register epochs" do
+    assert complex_audio(Beamicom.GB.Nx.APUSynthRenderer) == complex_audio(:native)
   end
 
   test "application boundary enables and disables the optional renderer" do
@@ -81,5 +93,40 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
 
     {_count, pcm, _apu} = APU.take_samples(apu)
     pcm
+  end
+
+  defp complex_audio(renderer) do
+    Application.put_env(:beamicom_gbc, :apu_renderer, renderer)
+
+    apu =
+      Enum.reduce(0..15, APU.new(model: :cgb), fn index, apu ->
+        APU.write(apu, 0xFF30 + index, rem(index * 29, 256))
+      end)
+      |> APU.write(0xFF26, 0x80)
+      |> APU.write(0xFF10, 0x23)
+      |> APU.write(0xFF11, 0x80)
+      |> APU.write(0xFF12, 0xA2)
+      |> APU.write(0xFF13, 0x40)
+      |> APU.write(0xFF14, 0x87)
+      |> APU.write(0xFF16, 0x40)
+      |> APU.write(0xFF17, 0x73)
+      |> APU.write(0xFF18, 0xA0)
+      |> APU.write(0xFF19, 0x86)
+      |> APU.write(0xFF1A, 0x80)
+      |> APU.write(0xFF1C, 0x40)
+      |> APU.write(0xFF1D, 0x70)
+      |> APU.write(0xFF1E, 0x85)
+      |> APU.write(0xFF21, 0x92)
+      |> APU.write(0xFF22, 0x35)
+      |> APU.write(0xFF23, 0x80)
+      |> APU.write(0xFF24, 0x75)
+      |> APU.write(0xFF25, 0xFF)
+      |> APU.tick(31_337)
+      |> APU.write(0xFF18, 0xD2)
+      |> APU.write(0xFF19, 0x82)
+      |> APU.tick(83_111)
+
+    {count, pcm, _apu} = APU.take_samples(apu)
+    {count, pcm}
   end
 end

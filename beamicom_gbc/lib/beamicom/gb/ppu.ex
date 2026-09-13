@@ -17,6 +17,8 @@ defmodule Beamicom.GB.PPU do
 
   import Bitwise
 
+  alias Beamicom.GB.DeferredFrame
+
   @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
 
   @width 160
@@ -91,7 +93,8 @@ defmodule Beamicom.GB.PPU do
             renderer_state: nil
 
   @type mode :: 0 | 1 | 2 | 3
-  @type signal :: :vblank | :lcd_stat | {:frame, non_neg_integer(), binary()}
+  @type frame :: binary() | DeferredFrame.t()
+  @type signal :: :vblank | :lcd_stat | {:frame, non_neg_integer(), frame()}
 
   @type t :: %__MODULE__{
           vram: tuple(),
@@ -194,7 +197,7 @@ defmodule Beamicom.GB.PPU do
   end
 
   @doc "Most recently completed 160x144 framebuffer in pixel_format/1 format."
-  @spec frame(t()) :: binary()
+  @spec frame(t()) :: frame()
   def frame(%__MODULE__{frame: frame}), do: frame
 
   @doc "Returns :dmg_shade_index for DMG or :rgb24 for CGB frames."
@@ -465,8 +468,23 @@ defmodule Beamicom.GB.PPU do
   defp finish_frame(%__MODULE__{renderer: :native} = ppu),
     do: {ppu.lines |> :lists.reverse() |> IO.iodata_to_binary(), nil}
 
-  defp finish_frame(ppu),
-    do: apply(ppu.renderer, :render, [ppu.model, :lists.reverse(ppu.lines), ppu.renderer_state])
+  defp finish_frame(ppu) do
+    deferred = %DeferredFrame{
+      model: ppu.model,
+      renderer: ppu.renderer,
+      lines: :lists.reverse(ppu.lines),
+      state: ppu.renderer_state
+    }
+
+    {deferred, ppu.renderer_state}
+  end
+
+  @doc false
+  def resolve_frame(%DeferredFrame{} = frame) do
+    apply(frame.renderer, :render, [frame.model, frame.lines, frame.state])
+  end
+
+  def resolve_frame(frame) when is_binary(frame), do: {frame, nil}
 
   defp render_line(%__MODULE__{renderer: :native} = ppu), do: render_native_line(ppu)
   defp render_line(%__MODULE__{} = ppu), do: capture_renderer_line(ppu)
@@ -539,18 +557,20 @@ defmodule Beamicom.GB.PPU do
            ppu
        ) do
     line_number = ly(ppu)
-    {colors, ppu} = background_line(ppu, line_number, lcdc)
+    {background, window, window_visible, ppu} = raw_tile_layers(ppu, line_number, lcdc, false)
+    sprites = raw_sprite_rows(ppu, line_number, lcdc, false)
 
-    objects =
-      if (lcdc &&& 0x02) == 0 do
-        @blank_line
-      else
-        height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
-        sprites = select_sprites(ppu.oam, line_number, height, 0, 0, [])
-        dmg_sprite_overlay(Enum.reverse(sprites), ppu.vram, line_number, height, @blank_line)
-      end
+    # bg/window each contain 21 {low, high, attrs} rows. Sprite rows contain
+    # ten {x + 8, low, high, attrs, valid} entries. Keeping this scanline-time
+    # snapshot compact preserves mid-frame VRAM/register effects while leaving
+    # bit-plane expansion and all 160-pixel composition to the frame renderer.
+    line =
+      background <>
+        window <>
+        sprites <>
+        <<lcdc &&& 0x03, elem(ppu.registers, 3) &&& 7, window_visible, elem(ppu.registers, 9),
+          bgp, obp0, obp1>>
 
-    line = colors <> objects <> <<bgp, obp0, obp1>>
     %{ppu | lines: [line | ppu.lines]}
   end
 
@@ -558,21 +578,96 @@ defmodule Beamicom.GB.PPU do
          %__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
        ) do
     line_number = ly(ppu)
-    {colors, ppu} = cgb_background_line(ppu, line_number, lcdc)
-
-    objects =
-      if (lcdc &&& 0x02) == 0 do
-        @blank_line
-      else
-        height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
-        sprites = select_cgb_sprites(ppu.oam, line_number, height, 0, 0, [])
-        cgb_sprite_overlay(sprites, ppu.vram, line_number, height, @blank_line)
-      end
+    {background, window, window_visible, ppu} = raw_tile_layers(ppu, line_number, lcdc, true)
+    sprites = raw_sprite_rows(ppu, line_number, lcdc, true)
 
     {bg, obj} = ppu.color_cache
     palettes = IO.iodata_to_binary([Tuple.to_list(bg), Tuple.to_list(obj)])
-    line = colors <> objects <> <<lcdc &&& 1>> <> palettes
+
+    line =
+      background <>
+        window <>
+        sprites <>
+        <<lcdc &&& 0x03, elem(ppu.registers, 3) &&& 7, window_visible, elem(ppu.registers, 9)>> <>
+        palettes
+
     %{ppu | lines: [line | ppu.lines]}
+  end
+
+  defp raw_tile_layers(ppu, line, lcdc, cgb?) do
+    {_, _, scy, scx, _, _, _, _, wy, wx} = ppu.registers
+    bg_map = if (lcdc &&& 0x08) == 0, do: 0x1800, else: 0x1C00
+    bg_y = line + scy &&& 0xFF
+
+    background =
+      if cgb? or (lcdc &&& 0x01) != 0,
+        do: raw_tile_rows(ppu.vram, bg_map, bg_y, scx >>> 3, lcdc, cgb?),
+        else: :binary.copy(<<0>>, 21 * 3)
+
+    window_visible =
+      if (lcdc &&& 0x20) != 0 and line >= wy and wx - 7 < @width, do: 1, else: 0
+
+    if window_visible == 1 do
+      window_map = if (lcdc &&& 0x40) == 0, do: 0x1800, else: 0x1C00
+      window = raw_tile_rows(ppu.vram, window_map, ppu.window_line, 0, lcdc, cgb?)
+      {background, window, 1, %{ppu | window_line: ppu.window_line + 1}}
+    else
+      {background, :binary.copy(<<0>>, 21 * 3), 0, ppu}
+    end
+  end
+
+  defp raw_tile_rows(vram, map, y, first_tile, lcdc, cgb?) do
+    tile_y = y >>> 3 &&& 0x1F
+    row = y &&& 7
+
+    for column <- 0..20, into: <<>> do
+      tile_x = first_tile + column &&& 0x1F
+      map_offset = map + tile_y * 32 + tile_x
+      tile = vram_byte(vram, map_offset)
+      attrs = if cgb?, do: vram_byte(vram, 0x2000 + map_offset), else: 0
+      source_row = if cgb? and (attrs &&& 0x40) != 0, do: 7 - row, else: row
+
+      tile_offset =
+        if (lcdc &&& 0x10) == 0,
+          do: elem(@signed_tile_offsets, tile),
+          else: tile * 16
+
+      tile_offset = if cgb? and (attrs &&& 0x08) != 0, do: tile_offset + 0x2000, else: tile_offset
+      low = vram_byte(vram, tile_offset + source_row * 2)
+      high = vram_byte(vram, tile_offset + source_row * 2 + 1)
+      <<low, high, attrs>>
+    end
+  end
+
+  defp raw_sprite_rows(ppu, line, lcdc, cgb?) do
+    if (lcdc &&& 0x02) == 0 do
+      :binary.copy(<<0>>, 10 * 5)
+    else
+      height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
+
+      sprites =
+        if cgb?,
+          do: select_cgb_sprites(ppu.oam, line, height, 0, 0, []),
+          else: select_sprites(ppu.oam, line, height, 0, 0, [])
+
+      rows = Enum.map(sprites, &raw_sprite_row(&1, ppu.vram, line, height, cgb?))
+      IO.iodata_to_binary([rows, :binary.copy(<<0>>, (10 - length(rows)) * 5)])
+    end
+  end
+
+  defp raw_sprite_row(sprite, vram, line, height, cgb?) do
+    {left, top, tile, attrs} =
+      case sprite do
+        {left, top, tile, attrs, _index} -> {left, top, tile, attrs}
+        {left, top, tile, attrs} -> {left, top, tile, attrs}
+      end
+
+    source_y = line - top
+    source_y = if (attrs &&& 0x40) == 0, do: source_y, else: height - 1 - source_y
+    tile = if height == 8, do: tile, else: (tile &&& 0xFE) + (source_y >>> 3)
+    bank_offset = if cgb? and (attrs &&& 0x08) != 0, do: 0x2000, else: 0
+    offset = bank_offset + tile * 16 + (source_y &&& 7) * 2
+    <<left + 8, vram_byte(vram, offset), vram_byte(vram, offset + 1), attrs, 1>>
   end
 
   # Each CGB background byte packs color in bits 0..1, palette in bits 2..4,
@@ -863,68 +958,6 @@ defmodule Beamicom.GB.PPU do
     (vram_byte(vram, offset) >>> bit &&& 1) |||
       (vram_byte(vram, offset + 1) >>> bit &&& 1) <<< 1
   end
-
-  # DMG objects are processed from lowest to highest priority here, so every
-  # opaque pixel may replace the prior value. The final overlay therefore
-  # matches sprite_pixel/5's first-visible-object rule without scanning ten
-  # objects for each of the 160 output pixels.
-  defp dmg_sprite_overlay([], _vram, _line, _height, overlay), do: overlay
-
-  defp dmg_sprite_overlay(
-         [{left, _top, _tile, _attrs, _index} | sprites],
-         vram,
-         line,
-         height,
-         overlay
-       )
-       when left >= @width or left <= -8,
-       do: dmg_sprite_overlay(sprites, vram, line, height, overlay)
-
-  defp dmg_sprite_overlay(
-         [{left, top, tile, attrs, _index} | sprites],
-         vram,
-         line,
-         height,
-         overlay
-       ) do
-    source_y = line - top
-    source_y = if (attrs &&& 0x40) == 0, do: source_y, else: height - 1 - source_y
-    tile = if height == 8, do: tile, else: (tile &&& 0xFE) + (source_y >>> 3)
-    offset = tile * 16 + (source_y &&& 0x07) * 2
-    low = vram_byte(vram, offset)
-    high = vram_byte(vram, offset + 1)
-    colors = combine_planes(elem(@bit_rows, low), elem(@bit_rows, high))
-    colors = if (attrs &&& 0x20) == 0, do: colors, else: reverse_row(colors)
-    visible_left = max(left, 0)
-    source_x = visible_left - left
-    count = min(8 - source_x, @width - visible_left)
-    colors = binary_part(colors, source_x, count)
-    existing = binary_part(overlay, visible_left, count)
-    metadata = 0x80 ||| (attrs &&& 0x10) <<< 1 ||| (attrs &&& 0x80) >>> 1
-    merged = merge_dmg_sprite_row(existing, colors, metadata, [])
-    overlay = replace_binary(overlay, visible_left, merged)
-    dmg_sprite_overlay(sprites, vram, line, height, overlay)
-  end
-
-  defp merge_dmg_sprite_row(<<>>, <<>>, _metadata, acc),
-    do: acc |> :lists.reverse() |> :erlang.list_to_binary()
-
-  defp merge_dmg_sprite_row(
-         <<_existing, rest::binary>>,
-         <<color, colors::binary>>,
-         metadata,
-         acc
-       )
-       when color != 0,
-       do: merge_dmg_sprite_row(rest, colors, metadata, [metadata ||| color | acc])
-
-  defp merge_dmg_sprite_row(
-         <<existing, rest::binary>>,
-         <<0, colors::binary>>,
-         metadata,
-         acc
-       ),
-       do: merge_dmg_sprite_row(rest, colors, metadata, [existing | acc])
 
   defp compose_cgb_sprites(colors, sprites, vram, line, height, lcdc, bg, obj) do
     objects = cgb_sprite_overlay(sprites, vram, line, height, @blank_line)

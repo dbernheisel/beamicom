@@ -9,7 +9,7 @@ defmodule Beamicom.GB.System do
 
   @behaviour Beamicom.Host.System
 
-  alias Beamicom.GB.{Bus, Machine}
+  alias Beamicom.GB.{Bus, DeferredFrame, Machine, PPU}
   alias Beamicom.Host.{AudioChunk, Input, InputCapabilities, VideoFrame}
 
   @buttons ~w(up down left right a b start select)a
@@ -42,8 +42,7 @@ defmodule Beamicom.GB.System do
   def run_slice(%Machine{} = machine) do
     case Machine.run_until_frame(machine) do
       {:ok, machine, number, frame} ->
-        {sample_count, pcm, bus} = Bus.take_audio_pcm(machine.bus)
-        machine = %{machine | bus: bus}
+        {frame, sample_count, pcm, machine} = resolve_outputs(frame, machine)
 
         video = %VideoFrame{
           system: :gbc,
@@ -77,6 +76,19 @@ defmodule Beamicom.GB.System do
     do: Machine.set_buttons(machine, MapSet.to_list(controls))
 
   def set_input(%Machine{} = machine, %Input{}), do: machine
+
+  defp resolve_outputs(%DeferredFrame{} = deferred, machine) do
+    audio = Task.async(fn -> Bus.take_audio_pcm(machine.bus) end)
+    {frame, renderer_state} = PPU.resolve_frame(deferred)
+    {sample_count, pcm, bus} = Task.await(audio, :infinity)
+    ppu = %{bus.ppu | frame: frame, renderer_state: renderer_state}
+    {frame, sample_count, pcm, %{machine | bus: %{bus | ppu: ppu}}}
+  end
+
+  defp resolve_outputs(frame, machine) do
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(machine.bus)
+    {frame, sample_count, pcm, %{machine | bus: bus}}
+  end
 
   defp pixel_format(:dmg), do: {:native, :dmg_shade_index}
   defp pixel_format(:cgb), do: :rgb24

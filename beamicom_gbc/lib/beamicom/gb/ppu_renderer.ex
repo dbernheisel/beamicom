@@ -2,10 +2,10 @@ defmodule Beamicom.GB.PPURenderer do
   @moduledoc """
   Boundary for deferred Game Boy frame composition.
 
-  The live PPU retains LCD timing, VRAM/OAM access rules, tile addressing,
-  window state, and sprite selection. A renderer receives the 144 captured
-  scanlines and performs the regular pixel-priority and palette work in one
-  frame-sized operation.
+  The live PPU retains LCD timing and VRAM/OAM access rules. A renderer receives
+  144 compact, scanline-timed tile-plane and selected-object rows and performs
+  bit-plane expansion, scrolling/window selection, sprite composition,
+  priority, and palette work in one frame-sized operation.
   """
 
   @callback prepare(:dmg | :cgb) :: term()

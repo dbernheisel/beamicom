@@ -29,7 +29,9 @@ defmodule Beamicom.GB.SaveState do
   @spec split(Machine.t()) :: {binary(), binary()}
   def split(%Machine{bus: %{cartridge: %{rom: rom}}} = machine) when is_binary(rom) do
     identity = rom_identity(rom)
-    machine = put_in(machine.bus.apu, APU.flush(machine.bus.apu))
+    {_count, _pcm, apu} = machine.bus.apu |> APU.flush() |> APU.take_samples()
+    apu = snapshot_audio_renderer(apu)
+    machine = put_in(machine.bus.apu, apu)
 
     stripped =
       machine
@@ -138,7 +140,7 @@ defmodule Beamicom.GB.SaveState do
     machine = put_in(machine.bus.cartridge, Map.put(cartridge, :rom, rom))
 
     case validate_machine(machine, rom) do
-      :ok -> {:ok, machine}
+      :ok -> {:ok, restore_audio_renderer(machine)}
       {:error, :corrupt} = error -> error
     end
   end
@@ -214,12 +216,12 @@ defmodule Beamicom.GB.SaveState do
   defp validate_bus(_bus, _model, _rom), do: {:error, :corrupt}
 
   defp validate_ppu(%PPU{} = ppu, model) do
-    line_size = if model == :cgb, do: 160 * 3, else: 160
+    line_sizes = if model == :cgb, do: [160 * 3, 372, 513], else: [160, 183, 323]
 
     valid =
       exact_struct?(ppu, PPU) and ppu.model == model and valid_pages?(ppu.vram, 64) and
         sized_binary?(ppu.oam, 160) and ppu.frame == blank_frame(model) and
-        valid_binary_list?(ppu.lines, 144, line_size) and byte_tuple?(ppu.registers, 10) and
+        valid_binary_list_sizes?(ppu.lines, 144, line_sizes) and byte_tuple?(ppu.registers, 10) and
         integer_between?(ppu.clock, 0, @frame_dots) and non_negative_integer?(ppu.frame_number) and
         integer_between?(ppu.window_line, 0, 144) and is_boolean(ppu.stat_line) and
         ppu.vram_bank in [0, 1] and pair_of_binaries?(ppu.color_ram, 64) and
@@ -238,7 +240,8 @@ defmodule Beamicom.GB.SaveState do
         valid_noise?(apu.ch4) and integer_between?(apu.sequencer_phase, 0, 8_191) and
         integer_between?(apu.sequencer_step, 0, 7) and
         integer_between?(apu.sample_phase, 0, @apu_clock_rate - 1) and apu.pending_dots == 0 and
-        apu.samples == [] and apu.sample_count == 0
+        apu.samples == [] and apu.sample_count == 0 and apu.render_events == [] and
+        apu.render_dots == 0 and valid_render_triggers?(apu.render_triggers)
 
     if valid, do: :ok, else: {:error, :corrupt}
   end
@@ -445,14 +448,42 @@ defmodule Beamicom.GB.SaveState do
 
   defp color_cache?(_cache), do: false
 
-  defp valid_binary_list?(values, max_length, size) when is_list(values) do
+  defp valid_binary_list_sizes?(values, max_length, sizes) when is_list(values) do
     case bounded_list_length(values, max_length, 0) do
-      {:ok, _length} -> Enum.all?(values, &sized_binary?(&1, size))
+      {:ok, _length} -> Enum.all?(values, &(is_binary(&1) and byte_size(&1) in sizes))
       :error -> false
     end
   end
 
-  defp valid_binary_list?(_values, _max_length, _size), do: false
+  defp valid_binary_list_sizes?(_values, _max_length, _sizes), do: false
+
+  defp valid_render_triggers?({a, b, c, d}),
+    do: Enum.all?([a, b, c, d], &non_negative_integer?/1)
+
+  defp valid_render_triggers?(_value), do: false
+
+  defp snapshot_audio_renderer(%APU{renderer: :native} = apu), do: apu
+
+  defp snapshot_audio_renderer(%APU{} = apu) do
+    state =
+      if function_exported?(apu.renderer, :snapshot, 1),
+        do: apply(apu.renderer, :snapshot, [apu.renderer_state]),
+        else: apu.renderer_state
+
+    %{apu | renderer_state: state}
+  end
+
+  defp restore_audio_renderer(%Machine{bus: %{apu: %APU{renderer: :native}}} = machine),
+    do: machine
+
+  defp restore_audio_renderer(%Machine{bus: %{apu: apu} = bus} = machine) do
+    state =
+      if function_exported?(apu.renderer, :restore, 1),
+        do: apply(apu.renderer, :restore, [apu.renderer_state]),
+        else: apu.renderer_state
+
+    %{machine | bus: %{bus | apu: %{apu | renderer_state: state}}}
+  end
 
   defp bounded_list_length([], _max, length), do: {:ok, length}
 

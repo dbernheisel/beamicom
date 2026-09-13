@@ -1,0 +1,20 @@
+{
+  "scope": "Link's Awakening DX cold boot, no input, 120 frames, 3 repeats, EXLA CPU",
+  "rom_sha256": "c95dd3d9cb798e86c28e3269554e458d434bf3277b96cadf5bc81cfacfb5ee60",
+  "video_sha256": "4c370e85fecc4df01e5d61f41bea9c672c38294dc769cb88117beab38438dbb3",
+  "audio_sha256": "bcaa63f0bd850563d5e2bf8cd519e23420881622b513afb2684510437ef44f45",
+  "native": {
+    "fps": [46.89615822763786, 47.1655842165089, 46.34040191802924],
+    "median_fps": 46.89615822763786
+  },
+  "nx_raw_rows_block_audio": {
+    "fps": [44.962394577235465, 45.615252828240706, 45.592913037597434],
+    "median_fps": 45.592913037597434,
+    "difference_percent": -2.778999073280965
+  },
+  "nx_raw_rows_event_synthesis": {
+    "fps": [44.35860233437145, 44.55803442628003, 44.54650543801465],
+    "median_fps": 44.54650543801465,
+    "difference_percent": -5.010665994145352
+  }
+}

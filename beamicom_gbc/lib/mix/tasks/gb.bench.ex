@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Gb.Bench do
   @shortdoc "Measure deterministic uncapped Game Boy audio/video emulation"
   @moduledoc """
-  mix gb.bench ROM [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|nx_block]
+  mix gb.bench ROM [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|nx_block|nx_synth]
 
   Runs from either the dependency-free core or an optional renderer project.
   One complete untimed run warms loaded code and compiled renderer programs.
@@ -11,6 +11,7 @@ defmodule Mix.Tasks.Gb.Bench do
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
   @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
+  @compile {:no_warn_undefined, Beamicom.GB.Nx.APUSynthRenderer}
 
   @impl true
   def run(args) do
@@ -79,7 +80,11 @@ defmodule Mix.Tasks.Gb.Bench do
     ensure_renderer!(Beamicom.GB.Nx.APUBlockRenderer)
   end
 
-  defp audio_renderer(_), do: Mix.raise("audio-renderer must be native or nx_block")
+  defp audio_renderer("nx_synth") do
+    ensure_renderer!(Beamicom.GB.Nx.APUSynthRenderer)
+  end
+
+  defp audio_renderer(_), do: Mix.raise("audio-renderer must be native, nx_block, or nx_synth")
 
   defp ensure_renderer!(module) do
     if Code.ensure_loaded?(module),
@@ -90,6 +95,7 @@ defmodule Mix.Tasks.Gb.Bench do
   defp renderer_name(:native), do: :native
   defp renderer_name(Beamicom.GB.Nx.PPURenderer), do: :nx
   defp renderer_name(Beamicom.GB.Nx.APUBlockRenderer), do: :nx_block
+  defp renderer_name(Beamicom.GB.Nx.APUSynthRenderer), do: :nx_synth
 
   defp hash(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
 end

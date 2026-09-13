@@ -60,7 +60,7 @@ defmodule Beamicom.GB.Machine do
 
   @doc "Runs until the next completed LCD frame."
   @spec run_until_frame(t(), pos_integer()) ::
-          {:ok, t(), non_neg_integer(), binary()} | {:error, :frame_timeout, t()}
+          {:ok, t(), non_neg_integer(), Beamicom.GB.PPU.frame()} | {:error, :frame_timeout, t()}
   def run_until_frame(%__MODULE__{} = machine, limit \\ @max_instructions_per_frame)
       when is_integer(limit) and limit > 0 do
     target = machine.bus.ppu.frame_number
