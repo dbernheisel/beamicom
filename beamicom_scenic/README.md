@@ -94,8 +94,9 @@ Beamicom.Scenic.stop()
 
 The viewport uses the core's native dimensions before integer scaling: 256×240
 for NES and 160×144 for Game Boy. CGB RGB24 is displayed directly; original Game
-Boy shade indices use the core's green display palette. NES audio is 44.1 kHz
-mono and Game Boy audio is 44.1 kHz stereo.
+Boy shade indices use the core's green display palette. Resizing the window
+scales and centers the display while preserving its aspect ratio. NES audio is
+44.1 kHz mono and Game Boy audio is 44.1 kHz stereo.
 
 ### Controls (player 1)
 

@@ -12,7 +12,8 @@ config :beamicom_scenic, :viewport,
   drivers: [
     [
       module: Scenic.Driver.Local,
-      window: [title: "beamicom", resizeable: false],
+      position: [scaled: true, centered: true],
+      window: [title: "beamicom", resizeable: true],
       on_close: :stop_system
     ]
   ]
