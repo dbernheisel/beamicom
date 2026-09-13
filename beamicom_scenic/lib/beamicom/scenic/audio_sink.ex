@@ -4,7 +4,8 @@ defmodule Beamicom.Scenic.AudioSink do
   compatibility output or a core-owned `Beamicom.Host.Output`, validates typed
   PCM chunks, and writes raw signed-16-bit little-endian audio to an external
   player. This supports NES mono and Game Boy stereo without changing either
-  emulator core.
+  emulator core. Initial PCM is prebuffered so renderer compilation and ordinary
+  frame-time jitter cannot starve the external player.
 
   On macOS the existing low-latency CoreAudio path is retained through ffmpeg;
   other platforms use ffplay. If the selected executable is unavailable, the
@@ -30,17 +31,19 @@ defmodule Beamicom.Scenic.AudioSink do
     output = Keyword.get(opts, :output, NESOutput)
     audio = Keyword.get(opts, :audio, @default_audio)
     command = Keyword.get(opts, :command, default_command(Keyword.get(opts, :speed, 1.0), audio))
+    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, 100)
+    prebuffer_frames = max(1, div(audio.sample_rate * prebuffer_ms + 999, 1_000))
 
     case command do
       [exe | args] when is_binary(exe) ->
-        start_player(exe, args, output, audio)
+        start_player(exe, args, output, audio, prebuffer_frames)
 
       _invalid ->
         {:stop, {:invalid_audio_command, command}}
     end
   end
 
-  defp start_player(executable, args, output, audio) do
+  defp start_player(executable, args, output, audio, prebuffer_frames) do
     case System.find_executable(executable) do
       nil ->
         Logger.warning("#{inspect(__MODULE__)}: #{executable} not found; audio disabled")
@@ -49,7 +52,16 @@ defmodule Beamicom.Scenic.AudioSink do
       path ->
         port = Port.open({:spawn_executable, path}, [:binary, :exit_status, args: args])
         :ok = subscribe(output)
-        {:ok, %{port: port, audio: audio}}
+
+        {:ok,
+         %{
+           port: port,
+           audio: audio,
+           ready?: false,
+           pending: [],
+           pending_frames: 0,
+           prebuffer_frames: prebuffer_frames
+         }}
     end
   end
 
@@ -86,21 +98,28 @@ defmodule Beamicom.Scenic.AudioSink do
   defp atempo_factors(speed, factors), do: Enum.reverse([speed | factors])
 
   @impl true
-  def handle_info({:audio_chunk, %AudioChunk{} = chunk}, state) do
-    if compatible?(chunk, state.audio) and Port.command(state.port, chunk.data) do
-      {:noreply, state}
-    else
-      {:stop, :invalid_audio_chunk, state}
-    end
+  def handle_info({:audio_chunk, %AudioChunk{} = chunk}, %{ready?: false} = state) do
+    buffer_audio(
+      state,
+      chunk.data,
+      chunk.frame_count,
+      compatible?(chunk, state.audio),
+      :invalid_audio_chunk
+    )
   end
+
+  def handle_info({:audio_chunk, %AudioChunk{} = chunk}, state) do
+    write_audio(state, chunk.data, compatible?(chunk, state.audio), :invalid_audio_chunk)
+  end
+
+  def handle_info({:audio, sample_count, pcm}, %{ready?: false} = state),
+    do: buffer_audio(state, pcm, sample_count, true, :audio_player_closed)
 
   def handle_info({:audio, _sample_count, pcm}, state) do
-    if Port.command(state.port, pcm),
-      do: {:noreply, state},
-      else: {:stop, :audio_player_closed, state}
+    write_audio(state, pcm, true, :audio_player_closed)
   end
 
-  def handle_info({:frame, _}, state), do: {:noreply, state}
+  def handle_info({:frame, _number}, state), do: {:noreply, state}
 
   # The player exited (e.g. pipe closed or no audio device); shut down cleanly.
   def handle_info({port, {:exit_status, _}}, %{port: port} = state), do: {:stop, :normal, state}
@@ -115,6 +134,34 @@ defmodule Beamicom.Scenic.AudioSink do
 
   defp subscribe(NESOutput), do: NESOutput.subscribe_audio_chunks()
   defp subscribe(output), do: Output.subscribe_audio(output)
+
+  defp buffer_audio(state, pcm, frame_count, valid?, error) do
+    state = %{
+      state
+      | pending: [pcm | state.pending],
+        pending_frames: state.pending_frames + frame_count
+    }
+
+    cond do
+      not valid? ->
+        {:stop, error, state}
+
+      state.pending_frames < state.prebuffer_frames ->
+        {:noreply, state}
+
+      Port.command(state.port, Enum.reverse(state.pending)) ->
+        {:noreply, %{state | ready?: true, pending: [], pending_frames: 0}}
+
+      true ->
+        {:stop, :audio_player_closed, state}
+    end
+  end
+
+  defp write_audio(state, pcm, valid?, error) do
+    if valid? and Port.command(state.port, pcm),
+      do: {:noreply, state},
+      else: {:stop, error, state}
+  end
 
   defp compatible?(chunk, audio) do
     chunk.sample_rate == audio.sample_rate and chunk.channels == audio.channels and

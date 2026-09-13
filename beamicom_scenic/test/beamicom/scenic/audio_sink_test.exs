@@ -17,6 +17,30 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert Process.alive?(pid)
   end
 
+  test "holds initial PCM until the prebuffer duration is full" do
+    pid =
+      start_supervised!(
+        {AudioSink,
+         command: ["cat"],
+         name: :gated_audio_sink,
+         audio: %{sample_rate: 1_000, channels: 1, sample_format: :s16le},
+         prebuffer_ms: 2}
+      )
+
+    first = <<100::signed-little-16>>
+    second = <<-100::signed-little-16>>
+
+    send(pid, {:audio, 1, first})
+    assert %{ready?: false, pending: [^first], pending_frames: 1} = :sys.get_state(pid)
+
+    send(pid, {:frame, 0})
+    assert %{ready?: false, pending: [^first]} = :sys.get_state(pid)
+
+    send(pid, {:audio, 1, second})
+    assert %{ready?: true, pending: []} = :sys.get_state(pid)
+    assert Process.alive?(pid)
+  end
+
   test "accepts typed stereo chunks from the Game Boy host output" do
     output = start_supervised!({Output, name: nil})
 

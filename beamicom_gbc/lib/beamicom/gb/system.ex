@@ -78,9 +78,8 @@ defmodule Beamicom.GB.System do
   def set_input(%Machine{} = machine, %Input{}), do: machine
 
   defp resolve_outputs(%DeferredFrame{} = deferred, machine) do
-    audio = Task.async(fn -> Bus.take_audio_pcm(machine.bus) end)
     {frame, renderer_state} = PPU.resolve_frame(deferred)
-    {sample_count, pcm, bus} = Task.await(audio, :infinity)
+    {sample_count, pcm, bus} = Bus.take_audio_pcm(machine.bus)
     ppu = %{bus.ppu | frame: frame, renderer_state: renderer_state}
     {frame, sample_count, pcm, %{machine | bus: %{bus | ppu: ppu}}}
   end
