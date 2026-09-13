@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Nes.Bench do
   @shortdoc "Measure a deterministic, uncapped NES workload (audio and video enabled)"
   @moduledoc """
-  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx] [--rgb-consumers 0] [--output result.json] [--profile]
+  mix nes.bench ROM [--seconds 15] [--repeats 3] [--renderer native|nx|nx_atlas] [--rgb-consumers 0] [--output result.json] [--profile]
 
   Each run cold-boots with no buttons pressed. One untimed run warms code before
   measurements. Hashing is outside the per-frame timer, but included in wall time.
@@ -11,6 +11,7 @@ defmodule Mix.Tasks.Nes.Bench do
   use Mix.Task
   @compile {:no_warn_undefined, :tprof}
   @compile {:no_warn_undefined, BeamicomNx.NES.PPURenderer}
+  @compile {:no_warn_undefined, BeamicomNx.NES.PPUAtlasRenderer}
 
   @impl true
   def run(args) do
@@ -29,12 +30,20 @@ defmodule Mix.Tasks.Nes.Bench do
 
     Mix.Task.run("app.start")
     renderer = opts |> Keyword.get(:renderer, "native") |> String.to_existing_atom()
-    if renderer not in [:native, :nx], do: Mix.raise("renderer must be native or nx")
 
-    if renderer == :nx and not Code.ensure_loaded?(BeamicomNx.NES.PPURenderer),
+    if renderer not in [:native, :nx, :nx_atlas],
+      do: Mix.raise("renderer must be native, nx, or nx_atlas")
+
+    if renderer in [:nx, :nx_atlas] and not Code.ensure_loaded?(BeamicomNx.NES.PPURenderer),
       do: Mix.raise("the nx renderer requires running this task from the beamicom_nx project")
 
-    renderer_module = if renderer == :nx, do: BeamicomNx.NES.PPURenderer, else: :native
+    renderer_module =
+      case renderer do
+        :native -> :native
+        :nx -> BeamicomNx.NES.PPURenderer
+        :nx_atlas -> BeamicomNx.NES.PPUAtlasRenderer
+      end
+
     Application.put_env(:beamicom, :ppu_renderer, renderer_module)
     media = File.read!(path)
     seconds = Keyword.get(opts, :seconds, 15)

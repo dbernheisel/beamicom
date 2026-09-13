@@ -12,12 +12,19 @@
       "reductions": 1861807560
     },
     "nx_shared_rgb": {
-      "fps": 79.17209511921588,
-      "core_ms": 11392.903,
-      "mean_frame_ms": 12.630712860310421,
-      "reductions": 935141206
+      "fps": 77.8335556163037,
+      "core_ms": 11588.832,
+      "mean_frame_ms": 12.847929046563193,
+      "reductions": 940123577
     },
-    "fps_improvement_percent": 18.9938551732876
+    "nx_atlas": {
+      "fps": 75.31108194221436,
+      "core_ms": 11976.989,
+      "mean_frame_ms": 13.278258314855876,
+      "reductions": 923485912
+    },
+    "byte_fps_improvement_percent": 16.97909226973133,
+    "atlas_fps_improvement_percent": 13.18789723113456
   },
   "rgb_sha256": "cd999a178bb43b718bac39dfcffaec81ac97de7870c0546076bd6d2d2f1659a1",
   "audio_sha256": "0aaab7e4ee5edbab8579849e9433602144130e5bec1d348660fa07e7730d3a2b",

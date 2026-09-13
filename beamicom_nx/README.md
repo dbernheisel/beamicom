@@ -29,11 +29,17 @@ and the initial palette-address-only Nx adapter at 79.14 FPS. The narrow kernel
 does not improve single-instance CPU throughput by itself.
 
 When the benchmark includes the three RGB consumers used by Scenic, V4L2, and
-streaming, native runs at 66.54 FPS and the shared Nx RGB result runs at 79.17
+streaming, native runs at 66.54 FPS and the shared Nx RGB result runs at 77.83
 FPS. Deferring palette expansion and doing it once in the frame kernel therefore
-improves this three-sink workload by 19.0%.
+improves this three-sink workload by 17.0%.
 
-The next useful experiment is to keep a CHR tile atlas resident in the adapter so
-frame rendering gathers decoded pixels instead of shifting pattern bytes. PPU
-status timing and mapper-visible effects remain native even if more visual work
-moves into the adapter.
+The optional `nx_atlas` renderer expands immutable CHR ROM into a resident tile
+atlas at cartridge load. It reaches 79.32 FPS during Castlevania III's first five
+seconds versus 76.54 FPS for byte decoding, but over the full fifteen seconds it
+runs at 75.31 FPS versus 77.83 FPS. The access pattern changes with the scene, so
+the byte renderer remains the default while the atlas path is available for GPU
+and batched-instance measurements.
+
+PPU status timing and mapper-visible effects remain native even when visual work
+moves into the adapter. CHR RAM and latch-driven cartridges automatically use
+the byte-capture path.

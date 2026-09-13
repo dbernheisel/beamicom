@@ -22,6 +22,7 @@ defmodule Beamicom.NES.PPU do
   import Bitwise
 
   @compile {:no_warn_undefined, BeamicomNx.NES.PPURenderer}
+  @compile {:no_warn_undefined, BeamicomNx.NES.PPUAtlasRenderer}
 
   # Bit-reversed byte lookup (input is always 0..255), computed at compile time:
   # turns the 8-iteration reduce in horizontal sprite flips into one `elem/2`.
@@ -111,6 +112,7 @@ defmodule Beamicom.NES.PPU do
             # 240x256 EXLA operation. Fetches and observable PPU state changes
             # always remain in this module at their original scanline cadence.
             renderer: :native,
+            renderer_state: nil,
             fb: [],
             # Tile-row cache: the 33 fetched {nametable, attribute} pairs plus the
             # {v & $0FFF, nt_source} key they were fetched for. The 8 scanlines of a
@@ -128,16 +130,34 @@ defmodule Beamicom.NES.PPU do
     renderer =
       case Application.get_env(:beamicom, :ppu_renderer, :native) do
         :nx -> BeamicomNx.NES.PPURenderer
+        :nx_atlas -> BeamicomNx.NES.PPUAtlasRenderer
         renderer -> renderer
       end
 
-    %__MODULE__{chr: chr, mirroring: mirroring, renderer: renderer}
+    renderer_state = prepare_renderer(renderer, chr)
+
+    %__MODULE__{
+      chr: chr,
+      mirroring: mirroring,
+      renderer: renderer,
+      renderer_state: renderer_state
+    }
   end
 
-  @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, or a renderer module)."
-  def set_renderer(ppu, :native), do: %{ppu | renderer: :native}
-  def set_renderer(ppu, :nx), do: %{ppu | renderer: BeamicomNx.NES.PPURenderer}
-  def set_renderer(ppu, renderer) when is_atom(renderer), do: %{ppu | renderer: renderer}
+  @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, `:nx_atlas`, or a module)."
+  def set_renderer(ppu, :native), do: %{ppu | renderer: :native, renderer_state: nil}
+  def set_renderer(ppu, :nx), do: set_renderer(ppu, BeamicomNx.NES.PPURenderer)
+  def set_renderer(ppu, :nx_atlas), do: set_renderer(ppu, BeamicomNx.NES.PPUAtlasRenderer)
+
+  def set_renderer(ppu, renderer) when is_atom(renderer),
+    do: %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.chr)}
+
+  defp prepare_renderer(:native, _chr), do: nil
+
+  defp prepare_renderer(renderer, chr) do
+    if Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare_chr, 1),
+      do: apply(renderer, :prepare_chr, [chr])
+  end
 
   @doc "Enable or disable a runtime-selectable PPU enhancement."
   def set_enhancement(ppu, :hide_horizontal_overscan, enabled) when is_boolean(enabled),
@@ -251,17 +271,24 @@ defmodule Beamicom.NES.PPU do
   defp render_scanline(ppu) do
     if (ppu.mask &&& 0x18) == 0 do
       # Rendering off: the line is the backdrop and the scroll registers freeze.
-      line = if nx_renderer?(ppu), do: nx_blank_line(), else: <<0::size(256 * 8)>>
+      line = if nx_renderer?(ppu), do: nx_blank_line(ppu), else: <<0::size(256 * 8)>>
       %{ppu | fb: [line | ppu.fb]}
     else
       line_v = ppu.v
-      {tiles, blank?, ppu} = fetch_line_tiles(ppu, line_v)
+      atlas? = atlas_bg?(ppu)
+
+      {tiles, blank?, ppu} =
+        if atlas?, do: fetch_line_refs(ppu, line_v), else: fetch_line_tiles(ppu, line_v)
+
       ppu = eval_sprites(ppu)
 
       {line, ppu} =
-        if nx_renderer?(ppu),
-          do: capture_nx_line(ppu, tiles, ppu.x, blank?),
-          else: compose_line(ppu, tiles, ppu.x, blank?)
+        cond do
+          atlas? -> capture_nx_atlas_line(ppu, tiles, ppu.x)
+          ppu.renderer_state != nil -> capture_nx_hybrid_line(ppu, tiles, ppu.x, blank?)
+          nx_renderer?(ppu) -> capture_nx_line(ppu, tiles, ppu.x, blank?)
+          true -> compose_line(ppu, tiles, ppu.x, blank?)
+        end
 
       ppu = %{ppu | fb: [line | ppu.fb], v: line_v}
       copy_hori(inc_vert(ppu))
@@ -270,9 +297,22 @@ defmodule Beamicom.NES.PPU do
 
   defp nx_renderer?(ppu), do: ppu.renderer != :native and not ppu.unlimited_sprites
 
-  defp nx_blank_line do
+  defp atlas_bg?(%{renderer_state: nil}), do: false
+
+  defp atlas_bg?(ppu) do
+    nx_renderer?(ppu) and ppu.chr_latch == nil and byte_size(ppu.chr) > 0 and
+      ppu |> bg_banks() |> Tuple.to_list() |> Enum.all?(&(&1 >= 0))
+  end
+
+  defp nx_blank_line(%{renderer_state: nil}) do
     {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, 0, 0, <<0::size(8 * 8)>>,
      <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+  end
+
+  defp nx_blank_line(_ppu) do
+    {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 32)>>, 0, 0, 0,
+     <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>,
+     <<0::size(8 * 8)>>}
   end
 
   # Keep the mapper-sensitive work on the BEAM and retain only the compact inputs
@@ -295,6 +335,40 @@ defmodule Beamicom.NES.PPU do
 
     mask = if bg_on, do: ppu.mask, else: ppu.mask &&& bxor(0xFF, 0x08)
     {{lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+  end
+
+  defp capture_nx_atlas_line(ppu, tiles, fine_x) do
+    {refs, attr} = tile_refs(tiles, 0, [], [])
+    {sx, slo, shi, sattr, svalid} = sprite_planes(ppu.line_sprites)
+    bg_on = bg_on?(ppu)
+    buf = if sprites_on?(ppu), do: sprite_buffer(ppu.line_sprites), else: %{}
+
+    ppu =
+      if not bg_on or map_size(buf) == 0,
+        do: ppu,
+        else: sprite0_hit_refs(ppu, buf, tiles, fine_x)
+
+    zeros = <<0::size(33 * 8)>>
+    mask = if bg_on, do: ppu.mask, else: ppu.mask &&& bxor(0xFF, 0x08)
+    {{zeros, zeros, attr, refs, 1, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+  end
+
+  defp capture_nx_hybrid_line(ppu, tiles, fine_x, blank?) do
+    {{lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu} =
+      capture_nx_line(ppu, tiles, fine_x, blank?)
+
+    refs = <<0::size(33 * 32)>>
+    {{lo, hi, attr, refs, 0, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+  end
+
+  defp tile_refs(_tiles, 33, refs, attrs),
+    do:
+      {refs |> Enum.reverse() |> IO.iodata_to_binary(),
+       attrs |> Enum.reverse() |> IO.iodata_to_binary()}
+
+  defp tile_refs(tiles, i, refs, attrs) do
+    {ref, attr} = elem(tiles, i)
+    tile_refs(tiles, i + 1, [<<ref::native-unsigned-32>> | refs], [attr | attrs])
   end
 
   defp tile_planes(_tiles, 33, lo, hi, attr),
@@ -379,6 +453,75 @@ defmodule Beamicom.NES.PPU do
 
       {tiles, blank?, ppu}
     end
+  end
+
+  # Atlas mode resolves each background row to an index in the immutable CHR
+  # atlas without reading or decoding its two pattern bytes on the BEAM.
+  defp fetch_line_refs(ppu, line_v) do
+    key = {line_v &&& 0x0FFF, ppu.nt_source}
+    ppu = %{ppu | v: line_v}
+
+    if ppu.tile_nt_at != nil and ppu.tile_key == key and not ppu.split_en and
+         ppu.exram_mode != 1 do
+      fine_y = ppu.v >>> 12 &&& 0x07
+      table = (ppu.ctrl &&& 0x10) <<< 8
+      refs = bg_cached_refs(0, ppu.tile_nt_at, fine_y, table, bg_banks(ppu), [])
+      {refs |> Enum.reverse() |> List.to_tuple(), false, ppu}
+    else
+      {refs, ntat, ppu} = fetch_full_refs(0, ppu, [], [])
+      tiles = refs |> Enum.reverse() |> List.to_tuple()
+
+      ppu =
+        if not ppu.split_en and ppu.exram_mode != 1,
+          do: %{ppu | tile_key: key, tile_nt_at: ntat |> Enum.reverse() |> List.to_tuple()},
+          else: %{ppu | tile_key: nil}
+
+      {tiles, false, ppu}
+    end
+  end
+
+  defp bg_cached_refs(33, _ntat, _fine_y, _table, _banks, acc), do: acc
+
+  defp bg_cached_refs(i, ntat, fine_y, table, banks, acc) do
+    {nt, attr} = elem(ntat, i)
+    addr = table ||| nt <<< 4 ||| fine_y
+    bank = elem(banks, addr >>> 10)
+    flat = bank + (addr &&& 0x03FF)
+    ref = div(flat, 16) * 8 + rem(flat, 16)
+    bg_cached_refs(i + 1, ntat, fine_y, table, banks, [{ref, attr} | acc])
+  end
+
+  defp fetch_full_refs(33, ppu, acc, ntat), do: {acc, ntat, ppu}
+
+  defp fetch_full_refs(i, ppu, acc, ntat) do
+    ppu = ppu |> fetch_nt() |> fetch_at()
+    ref = bg_atlas_ref(ppu)
+
+    fetch_full_refs(i + 1, inc_hori(ppu), [{ref, ppu.at_latch} | acc], [
+      {ppu.nt_latch, ppu.at_latch} | ntat
+    ])
+  end
+
+  defp bg_atlas_ref(ppu) do
+    fine_y = ppu.v >>> 12 &&& 0x07
+
+    flat =
+      cond do
+        split_active?(ppu) ->
+          {_, fy} = split_yc(ppu)
+          ppu.split_chr * 0x1000 + ppu.nt_latch * 16 + fy
+
+        ppu.exram_mode == 1 ->
+          bank = (ppu.ext_latch &&& 0x3F) ||| ppu.ext_chr_hi <<< 6
+          bank * 0x1000 + ppu.nt_latch * 16 + fine_y
+
+        true ->
+          addr = (ppu.ctrl &&& 0x10) <<< 8 ||| ppu.nt_latch <<< 4 ||| fine_y
+          elem(bg_banks(ppu), addr >>> 10) + (addr &&& 0x03FF)
+      end
+
+    flat = rem(flat, byte_size(ppu.chr))
+    div(flat, 16) * 8 + rem(flat, 16)
   end
 
   # Full fetch: nametable + attribute + pattern per tile, walking coarse X. Also
@@ -583,6 +726,35 @@ defmodule Beamicom.NES.PPU do
       end)
 
     if hit?, do: %{ppu | status: ppu.status ||| 0x40}, else: ppu
+  end
+
+  defp sprite0_hit_refs(ppu, buf, refs, fine_x) do
+    hit? =
+      Enum.any?(buf, fn
+        {c, {_addr, _front?, true}} ->
+          c != 255 and not clipped?(ppu, c) and bg_ref_at(ppu, refs, fine_x, c) != 0
+
+        _ ->
+          false
+      end)
+
+    if hit?, do: %{ppu | status: ppu.status ||| 0x40}, else: ppu
+  end
+
+  defp bg_ref_at(ppu, refs, fine_x, c) do
+    if c < 8 and (ppu.mask &&& 0x02) == 0 do
+      0
+    else
+      source = fine_x + c
+      {ref, attr} = elem(refs, source >>> 3)
+      tile = div(ref, 8)
+      row = rem(ref, 8)
+      lo = :binary.at(ppu.chr, tile * 16 + row)
+      hi = :binary.at(ppu.chr, tile * 16 + row + 8)
+      bit = 7 - (source &&& 7)
+      pattern = sel(hi, bit) <<< 1 ||| sel(lo, bit)
+      if pattern == 0, do: 0, else: attr <<< 2 ||| pattern
+    end
   end
 
   # Rasterise the (≤8) line sprites into a column => {addr, front?, sprite-0?} map.
@@ -868,7 +1040,14 @@ defmodule Beamicom.NES.PPU do
     # addresses plus one shared RGB expansion. Native keeps the original output.
     {pixels, rgb} =
       if nx_renderer?(ppu),
-        do: apply(ppu.renderer, :render, [Enum.reverse(ppu.fb), palette, grayscale, edge_mask]),
+        do:
+          apply(ppu.renderer, :render, [
+            Enum.reverse(ppu.fb),
+            palette,
+            grayscale,
+            edge_mask,
+            ppu.renderer_state
+          ]),
         else: {ppu.fb |> Enum.reverse() |> IO.iodata_to_binary(), nil}
 
     frame = %Beamicom.NES.Framebuffer{

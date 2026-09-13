@@ -15,31 +15,101 @@ defmodule BeamicomNx.NES.PPURenderer do
   @sprites 8
   @compiled_key {__MODULE__, :compiled}
 
-  def render(lines, palette, grayscale, edge_mask) when length(lines) == @height do
-    {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack(lines)
+  def prepare_chr(_chr), do: nil
 
-    args = [
-      tensor(lo, {@height, @tiles}),
-      tensor(hi, {@height, @tiles}),
-      tensor(attr, {@height, @tiles}),
-      tensor(fine_x, {@height, 1}),
-      tensor(mask, {@height, 1}),
-      tensor(sx, {@height, @sprites}),
-      tensor(slo, {@height, @sprites}),
-      tensor(shi, {@height, @sprites}),
-      tensor(sattr, {@height, @sprites}),
-      tensor(svalid, {@height, @sprites}),
+  def prepare_chr_atlas(<<>>), do: nil
+
+  def prepare_chr_atlas(chr) do
+    key = {__MODULE__, :chr_atlas, :crypto.hash(:sha256, chr)}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        atlas =
+          chr |> decode_chr() |> Nx.from_binary(:u8) |> Nx.reshape({div(byte_size(chr), 2), 8})
+
+        atlas = Nx.backend_copy(atlas, {EXLA.Backend, client: :host})
+        :persistent_term.put(key, atlas)
+
+      _atlas ->
+        :ok
+    end
+
+    key
+  end
+
+  def render(lines, palette, grayscale, edge_mask, renderer_state)
+      when length(lines) == @height do
+    common = [
       tensor(palette, {32}),
       tensor(Beamicom.NES.Palette.master_binary(), {64, 3}),
       Nx.tensor(if(grayscale, do: 0x30, else: 0x3F), type: :u8),
       Nx.tensor(edge_mask, type: :u8)
     ]
 
-    {pixels, rgb} = compiled(args) |> apply(args)
+    {kind, args} =
+      cond do
+        renderer_state == nil ->
+          {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_bytes(lines)
+
+          {:bytes,
+           [
+             tensor(lo, {@height, @tiles}),
+             tensor(hi, {@height, @tiles}),
+             tensor(attr, {@height, @tiles}),
+             tensor(fine_x, {@height, 1}),
+             tensor(mask, {@height, 1}),
+             tensor(sx, {@height, @sprites}),
+             tensor(slo, {@height, @sprites}),
+             tensor(shi, {@height, @sprites}),
+             tensor(sattr, {@height, @sprites}),
+             tensor(svalid, {@height, @sprites})
+             | common
+           ]}
+
+        atlas_only?(lines) ->
+          {attr, refs, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_atlas(lines)
+
+          {:atlas,
+           [
+             tensor(attr, {@height, @tiles}),
+             tensor(refs, {@height, @tiles}, :u32),
+             tensor(fine_x, {@height, 1}),
+             tensor(mask, {@height, 1}),
+             tensor(sx, {@height, @sprites}),
+             tensor(slo, {@height, @sprites}),
+             tensor(shi, {@height, @sprites}),
+             tensor(sattr, {@height, @sprites}),
+             tensor(svalid, {@height, @sprites})
+             | common
+           ] ++ [atlas(renderer_state)]}
+
+        true ->
+          {lo, hi, attr, refs, bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid} =
+            pack_hybrid(lines)
+
+          {:hybrid,
+           [
+             tensor(lo, {@height, @tiles}),
+             tensor(hi, {@height, @tiles}),
+             tensor(attr, {@height, @tiles}),
+             tensor(refs, {@height, @tiles}, :u32),
+             tensor(bg_mode, {@height, 1}),
+             tensor(fine_x, {@height, 1}),
+             tensor(mask, {@height, 1}),
+             tensor(sx, {@height, @sprites}),
+             tensor(slo, {@height, @sprites}),
+             tensor(shi, {@height, @sprites}),
+             tensor(sattr, {@height, @sprites}),
+             tensor(svalid, {@height, @sprites})
+             | common
+           ] ++ [atlas(renderer_state)]}
+      end
+
+    {pixels, rgb} = compiled(kind, args) |> apply(args)
     {Nx.to_binary(pixels), Nx.to_binary(rgb)}
   end
 
-  defn compose(
+  defn compose_bytes(
          lo,
          hi,
          attr,
@@ -65,6 +135,128 @@ defmodule BeamicomNx.NES.PPURenderer do
     bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
     pattern = bor(band(shr(bg_lo, bit), 1), band(shr(bg_hi, bit), 1) * 2)
 
+    compose_pixels(
+      pattern,
+      bg_attr,
+      x,
+      mask,
+      sx,
+      slo,
+      shi,
+      sattr,
+      svalid,
+      palette,
+      master,
+      color_mask,
+      edge_mask
+    )
+  end
+
+  defn compose_atlas(
+         attr,
+         refs,
+         fine_x,
+         mask,
+         sx,
+         slo,
+         shi,
+         sattr,
+         svalid,
+         palette,
+         master,
+         color_mask,
+         edge_mask,
+         atlas
+       ) do
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    source_x = x + Nx.as_type(fine_x, :s32)
+    tile = Nx.quotient(source_x, 8)
+    bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_ref = Nx.take_along_axis(refs, tile, axis: 1) |> Nx.as_type(:s32)
+    column = band(source_x, 7)
+    pattern = Nx.gather(atlas, Nx.stack([bg_ref, column], axis: 2))
+
+    compose_pixels(
+      pattern,
+      bg_attr,
+      x,
+      mask,
+      sx,
+      slo,
+      shi,
+      sattr,
+      svalid,
+      palette,
+      master,
+      color_mask,
+      edge_mask
+    )
+  end
+
+  defn compose_hybrid(
+         lo,
+         hi,
+         attr,
+         refs,
+         bg_mode,
+         fine_x,
+         mask,
+         sx,
+         slo,
+         shi,
+         sattr,
+         svalid,
+         palette,
+         master,
+         color_mask,
+         edge_mask,
+         atlas
+       ) do
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    source_x = x + Nx.as_type(fine_x, :s32)
+    tile = Nx.quotient(source_x, 8)
+    bit = 7 - band(source_x, 7)
+    bg_lo = Nx.take_along_axis(lo, tile, axis: 1) |> Nx.as_type(:s32)
+    bg_hi = Nx.take_along_axis(hi, tile, axis: 1) |> Nx.as_type(:s32)
+    byte_pattern = bor(band(shr(bg_lo, bit), 1), band(shr(bg_hi, bit), 1) * 2)
+    bg_ref = Nx.take_along_axis(refs, tile, axis: 1) |> Nx.as_type(:s32)
+    atlas_pattern = Nx.gather(atlas, Nx.stack([bg_ref, band(source_x, 7)], axis: 2))
+    use_atlas = Nx.broadcast(bg_mode != 0, {@height, @width})
+    pattern = Nx.select(use_atlas, atlas_pattern, byte_pattern)
+    bg_attr = Nx.take_along_axis(attr, tile, axis: 1) |> Nx.as_type(:s32)
+
+    compose_pixels(
+      pattern,
+      bg_attr,
+      x,
+      mask,
+      sx,
+      slo,
+      shi,
+      sattr,
+      svalid,
+      palette,
+      master,
+      color_mask,
+      edge_mask
+    )
+  end
+
+  defnp compose_pixels(
+          pattern,
+          bg_attr,
+          x,
+          mask,
+          sx,
+          slo,
+          shi,
+          sattr,
+          svalid,
+          palette,
+          master,
+          color_mask,
+          edge_mask
+        ) do
     bg =
       Nx.select(
         pattern == 0 or band(mask, 8) == 0 or (x < 8 and band(mask, 2) == 0),
@@ -129,7 +321,7 @@ defmodule BeamicomNx.NES.PPURenderer do
     Nx.indexed_put(pixels, indices, Nx.reshape(values, {@height * 8}))
   end
 
-  defp pack(lines) do
+  defp pack_bytes(lines) do
     Enum.reduce(lines, {[], [], [], [], [], [], [], [], [], []}, fn
       {lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid},
       {los, his, attrs, fine_xs, masks, sxs, slos, shis, sattrs, svalids} ->
@@ -151,17 +343,92 @@ defmodule BeamicomNx.NES.PPURenderer do
     |> List.to_tuple()
   end
 
-  defp tensor(binary, shape), do: binary |> Nx.from_binary(:u8) |> Nx.reshape(shape)
+  defp pack_atlas(lines) do
+    Enum.reduce(lines, {[], [], [], [], [], [], [], [], []}, fn
+      {_lo, _hi, attr, refs, _bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid},
+      {attrs, all_refs, fine_xs, masks, sxs, slos, shis, sattrs, svalids} ->
+        {
+          [attr | attrs],
+          [refs | all_refs],
+          [<<fine_x>> | fine_xs],
+          [<<mask>> | masks],
+          [sx | sxs],
+          [slo | slos],
+          [shi | shis],
+          [sattr | sattrs],
+          [svalid | svalids]
+        }
+    end)
+    |> Tuple.to_list()
+    |> Enum.map(fn values -> values |> Enum.reverse() |> IO.iodata_to_binary() end)
+    |> List.to_tuple()
+  end
 
-  defp compiled(args) do
-    case :persistent_term.get(@compiled_key, nil) do
+  defp pack_hybrid(lines) do
+    Enum.reduce(lines, {[], [], [], [], [], [], [], [], [], [], [], []}, fn
+      {lo, hi, attr, refs, bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid},
+      {los, his, attrs, all_refs, bg_modes, fine_xs, masks, sxs, slos, shis, sattrs, svalids} ->
+        {
+          [lo | los],
+          [hi | his],
+          [attr | attrs],
+          [refs | all_refs],
+          [<<bg_mode>> | bg_modes],
+          [<<fine_x>> | fine_xs],
+          [<<mask>> | masks],
+          [sx | sxs],
+          [slo | slos],
+          [shi | shis],
+          [sattr | sattrs],
+          [svalid | svalids]
+        }
+    end)
+    |> Tuple.to_list()
+    |> Enum.map(fn values -> values |> Enum.reverse() |> IO.iodata_to_binary() end)
+    |> List.to_tuple()
+  end
+
+  defp tensor(binary, shape), do: tensor(binary, shape, :u8)
+  defp tensor(binary, shape, type), do: binary |> Nx.from_binary(type) |> Nx.reshape(shape)
+
+  defp compiled(kind, args) do
+    key = {@compiled_key, kind, Nx.shape(List.last(args))}
+
+    case :persistent_term.get(key, nil) do
       nil ->
-        fun = EXLA.compile(&compose/14, Enum.map(args, &Nx.to_template/1), client: :host)
-        :persistent_term.put(@compiled_key, fun)
+        fun =
+          case kind do
+            :bytes ->
+              EXLA.compile(&compose_bytes/14, Enum.map(args, &Nx.to_template/1), client: :host)
+
+            :atlas ->
+              EXLA.compile(&compose_atlas/14, Enum.map(args, &Nx.to_template/1), client: :host)
+
+            :hybrid ->
+              EXLA.compile(&compose_hybrid/17, Enum.map(args, &Nx.to_template/1), client: :host)
+          end
+
+        :persistent_term.put(key, fun)
         fun
 
       fun ->
         fun
+    end
+  end
+
+  defp atlas(key), do: :persistent_term.get(key)
+
+  defp atlas_only?(lines), do: Enum.all?(lines, &(elem(&1, 4) == 1))
+
+  defp decode_chr(chr) do
+    for <<tile::binary-size(16) <- chr>>, row <- 0..7, into: <<>> do
+      lo = :binary.at(tile, row)
+      hi = :binary.at(tile, row + 8)
+
+      for bit <- 7..0//-1, into: <<>> do
+        <<Bitwise.band(Bitwise.bsr(hi, bit), 1) * 2 +
+            Bitwise.band(Bitwise.bsr(lo, bit), 1)>>
+      end
     end
   end
 

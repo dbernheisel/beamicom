@@ -19,13 +19,16 @@ defmodule BeamicomNx.NES.PPURendererTest do
 
     palette = Map.new(0..31, &{&1, rem(&1 * 7, 64)})
 
-    %{
+    ppu = %{
       PPU.new(chr(), :horizontal)
       | mask: Keyword.get(opts, :mask, 0x1E),
         vram: vram,
         oam: oam,
-        palette: palette
+        palette: palette,
+        chr_latch: Keyword.get(opts, :chr_latch)
     }
+
+    ppu
     |> PPU.set_renderer(renderer)
     |> PPU.set_enhancement(:hide_horizontal_overscan, Keyword.get(opts, :overscan, false))
     |> PPU.run(89_342 * 3)
@@ -48,5 +51,25 @@ defmodule BeamicomNx.NES.PPURendererTest do
 
     assert nx.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
     assert binary_part(nx.frame_ready.rgb, 0, 8 * 3) == <<0::size(8 * 3 * 8)>>
+  end
+
+  test "resident CHR atlas rendering is pixel-exact with native composition" do
+    native = scene(:native)
+    atlas = scene(:nx_atlas)
+
+    refute is_nil(atlas.renderer_state)
+    assert atlas.frame_ready.pixels == native.frame_ready.pixels
+    assert atlas.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
+    assert atlas.status == native.status
+  end
+
+  test "atlas renderer falls back to byte capture for CHR-latch cartridges" do
+    latch = %{l0: :fd, l1: :fd, fd0: 0, fe0: 0, fd1: 0x1000, fe1: 0x1000}
+    native = scene(:native, chr_latch: latch)
+    fallback = scene(:nx_atlas, chr_latch: latch)
+
+    refute is_nil(fallback.renderer_state)
+    assert fallback.frame_ready.pixels == native.frame_ready.pixels
+    assert fallback.frame_ready.rgb == Palette.to_rgb(native.frame_ready)
   end
 end
