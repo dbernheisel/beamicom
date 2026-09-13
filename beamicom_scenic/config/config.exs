@@ -25,6 +25,10 @@ config :beamicom_scenic, :viewport,
   drivers: [
     [
       module: Scenic.Driver.Local,
+      # The driver's default is 29 ms, which caps streamed bitmap updates at
+      # roughly 34 FPS. The output hub and driver busy flag already coalesce
+      # frames, so request each new NES frame without an extra timer throttle.
+      limit_ms: 0,
       position: [scaled: true, centered: true],
       window: [title: "beamicom", resizeable: true],
       on_close: :stop_system

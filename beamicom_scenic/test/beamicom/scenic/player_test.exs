@@ -80,8 +80,22 @@ defmodule Beamicom.Scenic.PlayerTest do
     state = Player |> Process.whereis() |> :sys.get_state()
     assert Process.whereis(Beamicom.Scenic.EIServer) == state.input_server
     assert Process.whereis(Beamicom.Scenic.EIClient) == state.input_client
+    assert :sys.get_state(state.runtime).audio_slices == 1
     assert :ok = Beamicom.Scenic.stop()
     assert eventually(fn -> is_nil(Process.whereis(Player)) end)
+
+    assert :ok =
+             Beamicom.NES.Scenic.play(path,
+               audio: false,
+               speed: 0.01,
+               video_filter: :svideo
+             )
+
+    assert %{
+             scale: 1,
+             video_filter: :svideo,
+             video: %{width: 602, height: 240, scaled_width: 602, scaled_height: 480}
+           } = Beamicom.Scenic.status()
   end
 
   test "an initialization failure rolls back anonymous output and runtime children", %{path: path} do
@@ -125,6 +139,25 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert Process.alive?(state.runtime)
     assert Process.alive?(state.scenic)
     assert %{system: :gbc, video: %{width: 160, height: 144}} = Beamicom.Scenic.status()
+  end
+
+  test "accepts the Game Boy Pixel Transparency presentation filter", %{path: path} do
+    assert :ok =
+             Beamicom.Scenic.play(path,
+               audio: false,
+               speed: 0.01,
+               video_filter: :pixel_transparency,
+               video_filter_options: [base_alpha: 0.3],
+               scale: 2
+             )
+
+    assert %{
+             system: :gbc,
+             video_filter: :pixel_transparency,
+             video: %{scaled_width: 320, scaled_height: 288}
+           } = Beamicom.Scenic.status()
+
+    assert :sys.get_state(Player).video_filter == {:pixel_transparency, [base_alpha: 0.3]}
   end
 
   defp child_pids(state) do

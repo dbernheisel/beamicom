@@ -29,15 +29,57 @@ defmodule Beamicom.Scenic.Video do
     raise ArgumentError, "unsupported video pixel format: #{inspect(format)}"
   end
 
-  @spec upscale(binary(), pos_integer(), pos_integer()) :: binary()
-  def upscale(rgb, _width, 1), do: rgb
+  @spec resize(
+          binary(),
+          {pos_integer(), pos_integer()},
+          {pos_integer(), pos_integer()},
+          atom() | nil
+        ) :: binary()
+  def resize(
+        rgb,
+        {width, height},
+        {output_width, output_height},
+        {:pixel_transparency, options}
+      )
+      when byte_size(rgb) == width * height * 3 and is_list(options),
+      do:
+        Beamicom.GB.Nx.PixelTransparency.filter(
+          rgb,
+          {width, height},
+          {output_width, output_height},
+          options
+        )
 
-  def upscale(rgb, width, scale) when scale > 1 do
-    scaled_row_bytes = width * 3 * scale
-    rows = for <<pixel::binary-size(3) <- rgb>>, into: <<>>, do: :binary.copy(pixel, scale)
+  def resize(rgb, source_size, output_size, :pixel_transparency),
+    do: resize(rgb, source_size, output_size, {:pixel_transparency, []})
+
+  def resize(rgb, {width, height}, {output_width, output_height}, _filter)
+      when byte_size(rgb) == width * height * 3 and rem(output_width, width) == 0 and
+             rem(output_height, height) == 0 do
+    upscale(rgb, width, {div(output_width, width), div(output_height, height)})
+  end
+
+  @spec upscale(binary(), pos_integer(), pos_integer() | {pos_integer(), pos_integer()}) ::
+          binary()
+  def upscale(rgb, width, scale) when is_integer(scale), do: upscale(rgb, width, {scale, scale})
+  def upscale(rgb, _width, {1, 1}), do: rgb
+
+  def upscale(rgb, width, {1, scale_y}) when scale_y > 1 do
+    row_bytes = width * 3
+
+    for <<row::binary-size(^row_bytes) <- rgb>>,
+      into: <<>>,
+      do: :binary.copy(row, scale_y)
+  end
+
+  def upscale(rgb, width, {scale_x, scale_y}) when scale_x >= 1 and scale_y >= 1 do
+    scaled_row_bytes = width * 3 * scale_x
+
+    rows =
+      for <<pixel::binary-size(3) <- rgb>>, into: <<>>, do: :binary.copy(pixel, scale_x)
 
     for <<row::binary-size(^scaled_row_bytes) <- rows>>,
       into: <<>>,
-      do: :binary.copy(row, scale)
+      do: :binary.copy(row, scale_y)
   end
 end

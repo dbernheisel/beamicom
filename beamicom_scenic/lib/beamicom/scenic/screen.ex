@@ -1,8 +1,8 @@
 defmodule Beamicom.Scenic.Screen do
   @moduledoc """
   Scenic scene for local verification. It consumes the active core's typed
-  video frames, converts its native pixel format to RGB24, scales it with
-  nearest-neighbor sampling, and swaps a streamed bitmap.
+  video frames, converts its native pixel format to RGB24, applies the selected
+  presentation scaler, and swaps a streamed bitmap.
 
   Local keyboard is player 1. Debug keys pause/resume and single-step either
   core. NES additionally supports raw palette-address grayscale and share PNGs.
@@ -55,8 +55,14 @@ defmodule Beamicom.Scenic.Screen do
     runtime_kind = Keyword.fetch!(params, :runtime_kind)
     runtime = Keyword.fetch!(params, :runtime)
     output = Keyword.fetch!(params, :output)
-    video = capabilities(system).video
-    {w, h} = {video.width * scale, video.height * scale}
+    video_filter = Keyword.get(params, :video_filter)
+    video = Keyword.get_lazy(params, :video, fn -> capabilities(system).video end)
+    {pixel_x, pixel_y} = Map.get(video, :pixel_scale, {1, 1})
+
+    {w, h} =
+      Keyword.get_lazy(params, :output_size, fn ->
+        {round(video.width * scale * pixel_x), round(video.height * scale * pixel_y)}
+      end)
 
     Stream.start_link(nil)
     Stream.put(@stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
@@ -71,10 +77,12 @@ defmodule Beamicom.Scenic.Screen do
       scene
       |> assign(
         scale: scale,
+        output_size: {w, h},
         system: system,
         runtime_kind: runtime_kind,
         runtime: runtime,
         output: output,
+        video_filter: video_filter,
         pressed: MapSet.new(),
         gray: false,
         paused: false,
@@ -173,8 +181,16 @@ defmodule Beamicom.Scenic.Screen do
     case latest_video(assigns.runtime_kind, assigns.output) do
       %VideoFrame{} = frame ->
         rgb = Video.rgb_payload(frame, grayscale: assigns.gray)
-        {w, h} = {frame.width * assigns.scale, frame.height * assigns.scale}
-        pixels = Video.upscale(rgb, frame.width, assigns.scale)
+        {w, h} = assigns.output_size
+
+        pixels =
+          Video.resize(
+            rgb,
+            {frame.width, frame.height},
+            {w, h},
+            assigns.video_filter
+          )
+
         Stream.put(@stream, {Bitmap, {w, h, :rgb}, pixels})
         {:noreply, scene}
 

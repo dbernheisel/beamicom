@@ -6,7 +6,8 @@ defmodule Beamicom.Scenic do
   PNGs are also accepted. The emulator cores remain independent of Scenic.
 
       Beamicom.Scenic.play("roms/game.nes")
-      Beamicom.Scenic.play("roms/game.gbc", scale: 4)
+      Beamicom.Scenic.play("roms/game.nes", video_filter: :composite, scale: 1)
+      Beamicom.Scenic.play("roms/game.gbc", video_filter: :pixel_transparency, scale: 4)
   """
 
   alias Beamicom.Scenic.Player
@@ -14,12 +15,24 @@ defmodule Beamicom.Scenic do
   @doc """
   Load supported media and start the single local Scenic player.
 
-  Options include integer `:scale` (default 3), positive `:speed` (default
-  1.0), `:audio` (default true), `:audio_command` for overriding the external
-  player, and core-specific `:load_options`.
+  Options include `:scale` (default 3, or 1 for an NES NTSC filter), positive
+  `:speed` (default 1.0), `:audio` (default true), `:audio_command` for overriding
+  the external player, and core-specific `:load_options`. Scale is normally an
+  integer; the Game Boy Pixel Transparency filter also accepts fractional values
+  greater than one.
 
-  `:audio_slices` applies only to NES. Game Boy emits one audio chunk at each
-  frame boundary. `:pace` defaults to true for both systems.
+  NES accepts a runtime `:video_filter` of `:native`, `:composite`, `:svideo`,
+  `:rgb`, or `:monochrome`. Pass Blargg filter setup overrides with
+  `:video_filter_options`.
+
+  Game Boy and Game Boy Color accept `:pixel_transparency`; `:native` selects
+  the default nearest-neighbor presentation scaler. Shader overrides use
+  `:video_filter_options`.
+
+  `:audio_slices` applies only to NES and defaults to one whole frame; higher
+  values reduce audio queue granularity but add scheduling overhead. Game Boy
+  emits one audio chunk at each frame boundary. `:pace` defaults to true for
+  both systems.
   """
   def play(path, options \\ []) when is_binary(path) and is_list(options) do
     case Player.start(path: path, options: options) do

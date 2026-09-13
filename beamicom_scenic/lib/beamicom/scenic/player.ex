@@ -4,7 +4,7 @@ defmodule Beamicom.Scenic.Player do
   use GenServer
 
   alias Beamicom.Host.{Input, Output}
-  alias Beamicom.NES.ShareImage
+  alias Beamicom.NES.{PPU, ShareImage}
   alias Beamicom.NES.Output, as: NESOutput
   alias Beamicom.Scenic.{Core, Runtime}
 
@@ -17,25 +17,28 @@ defmodule Beamicom.Scenic.Player do
     Process.flag(:trap_exit, true)
     path = Keyword.fetch!(options, :path)
     player_options = Keyword.fetch!(options, :options)
-    scale = Keyword.get(player_options, :scale, 3)
     speed = Keyword.get(player_options, :speed, 1.0)
 
-    with :ok <- validate_options(scale, speed),
-         {:ok, media} <- File.read(path),
+    with {:ok, media} <- File.read(path),
          {:ok, core} <- Core.resolve(path, media),
-         {:ok, machine} <-
-           load(core, path, media, Keyword.get(player_options, :load_options, [])),
+         {:ok, load_options, video_filter} <- load_options(core, player_options),
+         scale = Keyword.get(player_options, :scale, default_scale(core, video_filter)),
+         :ok <- validate_options(scale, speed),
+         :ok <- validate_scale(scale, core, video_filter),
+         core = configure_core(core, load_options),
+         {:ok, machine} <- load(core, path, media, load_options),
          {:ok, output, owned_output} <- start_output(core),
          {:ok, audio} <- start_audio(core, output, speed, player_options),
          {:ok, runtime} <- start_runtime(core, machine, output, speed, player_options),
          {:ok, input_server, input_client} <- start_input(core, runtime),
-         {:ok, scenic} <- start_scenic(core, runtime, output, scale) do
+         {:ok, scenic} <- start_scenic(core, runtime, output, scale, video_filter) do
       {:ok,
        %{
          path: Path.expand(path),
          core: core,
          scale: scale,
          speed: speed,
+         video_filter: video_filter,
          output: output,
          owned_output: owned_output,
          audio: audio,
@@ -52,6 +55,7 @@ defmodule Beamicom.Scenic.Player do
   @impl true
   def handle_call(:status, _from, state) do
     video = state.core.capabilities.video
+    {scaled_width, scaled_height} = scaled_dimensions(video, state.scale)
 
     {:reply,
      %{
@@ -59,11 +63,12 @@ defmodule Beamicom.Scenic.Player do
        system: state.core.id,
        scale: state.scale,
        speed: state.speed,
+       video_filter: filter_name(state.video_filter),
        video: %{
          width: video.width,
          height: video.height,
-         scaled_width: video.width * state.scale,
-         scaled_height: video.height * state.scale
+         scaled_width: scaled_width,
+         scaled_height: scaled_height
        }
      }, state}
   end
@@ -118,17 +123,32 @@ defmodule Beamicom.Scenic.Player do
 
   defp validate_options(scale, speed) do
     cond do
-      not is_integer(scale) or scale < 1 -> {:error, {:invalid_option, :scale}}
+      not is_number(scale) or scale < 1 -> {:error, {:invalid_option, :scale}}
       not is_number(speed) or speed <= 0 -> {:error, {:invalid_option, :speed}}
       true -> :ok
     end
   end
 
+  defp validate_scale(scale, %Core{id: :gbc}, {:pixel_transparency, _options})
+       when is_number(scale) and scale >= 1,
+       do: :ok
+
+  defp validate_scale(scale, %Core{}, _video_filter) when is_integer(scale) and scale >= 1,
+    do: :ok
+
+  defp validate_scale(_scale, %Core{}, _video_filter), do: {:error, {:invalid_option, :scale}}
+
+  defp default_scale(%Core{id: :nes}, filter)
+       when filter in [:composite, :svideo, :rgb, :monochrome],
+       do: 1
+
+  defp default_scale(%Core{}, _filter), do: 3
+
   defp load(%Core{id: :nes} = core, path, media, load_options) do
     case media do
       <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png ->
         case ShareImage.load_image(png, [Path.dirname(path)]) do
-          {:ok, console} -> {:ok, console}
+          {:ok, console} -> {:ok, configure_saved_console(console, load_options)}
           {:error, reason} -> {:error, {:save_load_failed, reason}}
         end
 
@@ -138,6 +158,97 @@ defmodule Beamicom.Scenic.Player do
   end
 
   defp load(%Core{} = core, _path, media, load_options), do: Core.load(core, media, load_options)
+
+  defp load_options(%Core{id: :nes}, options) do
+    base = Keyword.get(options, :load_options, [])
+    filter_options = Keyword.get(options, :video_filter_options, [])
+
+    with :ok <- validate_keyword(base, :load_options),
+         :ok <- validate_keyword(filter_options, :video_filter_options),
+         {:ok, filter} <- nes_video_filter(options) do
+      case filter do
+        nil ->
+          {:ok, base, nil}
+
+        :native ->
+          {:ok, Keyword.put(base, :ppu_renderer, :native), :native}
+
+        preset ->
+          {:ok, Keyword.merge(base, Beamicom.NES.Nx.video_options(preset, filter_options)),
+           preset}
+      end
+    end
+  end
+
+  defp load_options(%Core{id: :gbc}, options) do
+    load_options = Keyword.get(options, :load_options, [])
+    filter_options = Keyword.get(options, :video_filter_options, [])
+
+    with :ok <- validate_keyword(load_options, :load_options),
+         :ok <- validate_keyword(filter_options, :video_filter_options),
+         {:ok, filter} <- gbc_video_filter(options) do
+      filter = if filter == :pixel_transparency, do: {filter, filter_options}, else: filter
+      {:ok, load_options, filter}
+    end
+  end
+
+  defp validate_keyword(value, option) do
+    if Keyword.keyword?(value), do: :ok, else: {:error, {:invalid_option, option}}
+  end
+
+  defp nes_video_filter(options) do
+    filter =
+      case Keyword.fetch(options, :video_filter) do
+        {:ok, filter} -> filter
+        :error -> nes_filter_from_env(System.get_env("BEAMICOM_NES_VIDEO_FILTER"))
+      end
+
+    if filter in [nil, :native, :composite, :svideo, :rgb, :monochrome],
+      do: {:ok, filter},
+      else: {:error, {:invalid_option, :video_filter}}
+  end
+
+  defp gbc_video_filter(options) do
+    filter =
+      case Keyword.fetch(options, :video_filter) do
+        {:ok, filter} -> filter
+        :error -> gbc_filter_from_env(System.get_env("BEAMICOM_GBC_VIDEO_FILTER"))
+      end
+
+    if filter in [nil, :native, :pixel_transparency],
+      do: {:ok, filter},
+      else: {:error, {:invalid_option, :video_filter}}
+  end
+
+  defp nes_filter_from_env(nil), do: nil
+  defp nes_filter_from_env(""), do: nil
+  defp nes_filter_from_env("native"), do: :native
+  defp nes_filter_from_env("composite"), do: :composite
+  defp nes_filter_from_env("svideo"), do: :svideo
+  defp nes_filter_from_env("rgb"), do: :rgb
+  defp nes_filter_from_env("monochrome"), do: :monochrome
+  defp nes_filter_from_env(value), do: value
+
+  defp gbc_filter_from_env(nil), do: nil
+  defp gbc_filter_from_env(""), do: nil
+  defp gbc_filter_from_env("native"), do: :native
+  defp gbc_filter_from_env("pixel_transparency"), do: :pixel_transparency
+  defp gbc_filter_from_env(value), do: value
+
+  defp filter_name({name, _options}), do: name
+  defp filter_name(name), do: name
+
+  defp configure_core(%Core{id: :nes, system: system} = core, load_options),
+    do: %{core | capabilities: system.capabilities(load_options)}
+
+  defp configure_core(%Core{} = core, _load_options), do: core
+
+  defp configure_saved_console(console, load_options) do
+    case Keyword.fetch(load_options, :ppu_renderer) do
+      {:ok, renderer} -> put_in(console.bus.ppu, PPU.set_renderer(console.bus.ppu, renderer))
+      :error -> console
+    end
+  end
 
   defp start_output(%Core{id: :nes}) do
     case Process.whereis(NESOutput) do
@@ -178,7 +289,7 @@ defmodule Beamicom.Scenic.Player do
       console: machine,
       speed: speed,
       pace: Keyword.get(options, :pace, true),
-      audio_slices: Keyword.get(options, :audio_slices, 2),
+      audio_slices: Keyword.get(options, :audio_slices, 1),
       name: Keyword.get(options, :runtime_name, Beamicom.NES.Runtime)
     )
   end
@@ -224,8 +335,9 @@ defmodule Beamicom.Scenic.Player do
   defp dispatch_input(%Core{runtime: :host}, runtime, port, buttons),
     do: Runtime.set_input(runtime, Input.new(port, buttons))
 
-  defp start_scenic(core, runtime, output, scale) do
+  defp start_scenic(core, runtime, output, scale, video_filter) do
     video = core.capabilities.video
+    {width, height} = scaled_dimensions(video, scale)
     controls_height = Beamicom.Scenic.Screen.controls_height(core.id)
 
     scene_options = [
@@ -233,14 +345,22 @@ defmodule Beamicom.Scenic.Player do
       system: core.id,
       runtime_kind: core.runtime,
       runtime: runtime,
-      output: output
+      output: output,
+      video: video,
+      output_size: {width, height},
+      video_filter: video_filter
     ]
 
     config =
       Application.get_env(:beamicom_scenic, :viewport)
-      |> Keyword.put(:size, {video.width * scale, video.height * scale + controls_height})
+      |> Keyword.put(:size, {width, height + controls_height})
       |> Keyword.put(:default_scene, {Beamicom.Scenic.Screen, scene_options})
 
     Scenic.start_link([config])
+  end
+
+  defp scaled_dimensions(video, scale) do
+    {pixel_x, pixel_y} = Map.get(video, :pixel_scale, {1, 1})
+    {round(video.width * pixel_x * scale), round(video.height * pixel_y * scale)}
   end
 end

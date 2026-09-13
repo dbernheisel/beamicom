@@ -30,6 +30,25 @@ defmodule Beamicom.Scenic.CoreTest do
     assert gbc.capabilities.audio.channels == 2
   end
 
+  test "reports the runtime NTSC filter's presentation geometry" do
+    capabilities = Beamicom.NES.Nx.video_capabilities(:composite)
+
+    assert capabilities.video.width == 602
+    assert capabilities.video.height == 240
+    assert capabilities.video.pixel_scale == {1, 2}
+  end
+
+  test "local display does not impose Scenic's default 29 ms stream throttle" do
+    viewport = Application.fetch_env!(:beamicom_scenic, :viewport)
+
+    local_driver =
+      viewport
+      |> Keyword.fetch!(:drivers)
+      |> Enum.find(&(Keyword.get(&1, :module) == Scenic.Driver.Local))
+
+    assert local_driver[:limit_ms] == 0
+  end
+
   test "routes and loads an iNES ROM by magic with a nonstandard extension" do
     media = minimal_nes_rom()
 
