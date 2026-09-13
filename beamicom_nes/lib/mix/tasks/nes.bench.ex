@@ -43,7 +43,7 @@ defmodule Mix.Tasks.Nes.Bench do
       do: Mix.raise("renderer must be native or nx")
 
     if renderer == :nx and not Code.ensure_loaded?(Beamicom.NES.Nx.PPURenderer),
-      do: Mix.raise("the nx renderer requires running this task from the beamicom_nes_nx project")
+      do: Mix.raise("the Nx renderer requires Nx/EXLA and BEAMICOM_NX=1 at compile time")
 
     renderer_module =
       case renderer do
@@ -76,10 +76,7 @@ defmodule Mix.Tasks.Nes.Bench do
 
         preset ->
           if not Code.ensure_loaded?(Beamicom.NES.Nx.BlarggNTSC.Renderer),
-            do:
-              Mix.raise(
-                "video filters require running this task from the beamicom_nes_nx project"
-              )
+            do: Mix.raise("video filters require Nx/EXLA and BEAMICOM_NX=1 at compile time")
 
           [
             ppu_renderer: {Beamicom.NES.Nx.BlarggNTSC.Renderer, [preset: preset]}
@@ -98,10 +95,7 @@ defmodule Mix.Tasks.Nes.Bench do
       end
 
     if audio_renderer_module != :native and not Code.ensure_loaded?(audio_renderer_module),
-      do:
-        Mix.raise(
-          "the Nx audio renderer requires running this task from the beamicom_nes_nx project"
-        )
+      do: Mix.raise("the Nx audio renderer requires Nx/EXLA and BEAMICOM_NX=1 at compile time")
 
     if audio_renderer_module != configured_apu,
       do:

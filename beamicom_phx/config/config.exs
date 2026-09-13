@@ -10,8 +10,8 @@ import Config
 config :beamicom_phx,
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
-# This application includes the optional Nx renderer packages, so specialize
-# both dependency-free cores for their EXLA frame and audio boundaries.
+# This application includes Nx and EXLA directly, so specialize both cores for
+# their EXLA frame and audio boundaries.
 config :beamicom_nes,
   ppu_renderer: Beamicom.NES.Nx.PPURenderer,
   apu_renderer: Beamicom.NES.Nx.APUBlockRenderer

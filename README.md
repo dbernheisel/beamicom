@@ -17,10 +17,8 @@ that can run NES, Game Boy, and Game Boy Color ROMs.
 | --- | --- | --- |
 | [`beamicom_host`](./beamicom_host/) | Shared system, input, video/audio envelope, and coalesced-output contracts | [Host documentation](./beamicom_host/README.md) |
 | [`beamicom_ei`](./beamicom_ei/) | Shared pure-Elixir EI Unix-socket controller server and client | [EI documentation](./beamicom_ei/README.md) |
-| [`beamicom_nes`](./beamicom_nes/) | Headless NES core: CPU, PPU, APU, mappers, input, and audio/video output | [Core documentation](./beamicom_nes/README.md) · [Mapper compatibility](./beamicom_nes/MAPPERS.md) |
-| [`beamicom_nes_nx`](./beamicom_nes_nx/) | Optional EXLA renderers for batched NES video and audio work | [Nx renderer documentation](./beamicom_nes_nx/README.md) |
-| [`beamicom_gbc`](./beamicom_gbc/) | Headless DMG/CGB core with an SM83 CPU, mapped devices, cartridge controllers, video, and audio | [Game Boy core documentation](./beamicom_gbc/README.md) |
-| [`beamicom_gbc_nx`](./beamicom_gbc_nx/) | Optional EXLA frame and audio renderers for the DMG/CGB core | [Nx renderer documentation](./beamicom_gbc_nx/README.md) |
+| [`beamicom_nes`](./beamicom_nes/) | Headless NES core with native renderers and optional Nx/EXLA video and audio renderers | [Core documentation](./beamicom_nes/README.md) · [Mapper compatibility](./beamicom_nes/MAPPERS.md) |
+| [`beamicom_gbc`](./beamicom_gbc/) | Headless DMG/CGB core with native renderers and optional Nx/EXLA frame and audio renderers | [Game Boy core documentation](./beamicom_gbc/README.md) |
 | [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
 | [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
 | [`beamicom_stream`](./beamicom_stream/) | Local AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
@@ -32,10 +30,8 @@ These are sibling path dependencies, so keep the directories together when
 working with an individual project.
 
 ```text
-beamicom_nes ─────> beamicom_host, beamicom_ei
-beamicom_nes_nx ──> beamicom_nes
-beamicom_gbc ─────> beamicom_host, beamicom_ei
-beamicom_gbc_nx ──> beamicom_gbc
+beamicom_nes ─────> beamicom_host, beamicom_ei; optionally Nx and EXLA
+beamicom_gbc ─────> beamicom_host, beamicom_ei; optionally Nx and EXLA
 beamicom_stream ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
 beamicom_scenic ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
 beamicom_v4l2 ────> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei

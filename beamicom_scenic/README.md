@@ -74,7 +74,7 @@ cd /home/dbern/beamicom/beamicom_scenic
 export BEAMICOM_SCENIC_NX=1
 
 mise exec -- mix deps.get
-mise exec -- mix deps.compile beamicom_nes beamicom_nes_nx beamicom_gbc beamicom_gbc_nx --force
+mise exec -- mix deps.compile beamicom_nes beamicom_gbc --force
 mise exec -- mix compile --force
 mise exec -- iex -S mix
 ```
@@ -115,12 +115,12 @@ cannot start and then starve the audio player. Later machines in the same BEAM
 instance reuse the compiled programs. Game Boy slices are paced from their
 actual PCM duration, including longer intervals while a ROM disables the LCD.
 
-To return to the dependency-free renderer defaults, unset the flag and rebuild
-the same dependencies:
+To return to the native renderer defaults, unset the flag and rebuild the same
+dependencies:
 
 ```sh
 unset BEAMICOM_SCENIC_NX
-mise exec -- mix deps.compile beamicom_nes beamicom_nes_nx beamicom_gbc beamicom_gbc_nx --force
+mise exec -- mix deps.compile beamicom_nes beamicom_gbc --force
 mise exec -- mix compile --force
 ```
 

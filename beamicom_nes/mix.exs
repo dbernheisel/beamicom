@@ -20,12 +20,14 @@ defmodule BeamicomNES.MixProject do
   end
 
   # Run "mix help deps" to learn about dependencies.
-  # The core emulator has no third-party dependencies. Its system-neutral host
-  # contract and EI input protocol are sibling projects.
+  # Nx and EXLA are optional: native-only consumers do not fetch them. A host
+  # that selects an Nx renderer includes both dependencies directly.
   defp deps do
     [
       {:beamicom_host, path: "../beamicom_host"},
-      {:beamicom_ei, path: "../beamicom_ei"}
+      {:beamicom_ei, path: "../beamicom_ei"},
+      {:nx, "~> 1.0", optional: true},
+      {:exla, "~> 1.0", optional: true}
     ]
   end
 end

@@ -1,7 +1,7 @@
 # Beamicom NES
 
-A cycle-aware NES emulator written in pure Elixir, with **zero external
-dependencies**. The core runs the console and publishes audio/video; how those
+A cycle-aware NES emulator written in pure Elixir. Its native path has no
+external runtime dependencies. The core runs the console and publishes audio/video; how those
 frames get drawn or played is left to sink projects, so the emulator itself is
 headless.
 
@@ -10,8 +10,7 @@ headless.
 Beamicom is organized as several projects in one repository:
 
 ```
-beamicom_nes/      # this project — the core emulator (headless)
-beamicom_nes_nx/   # optional Nx/EXLA video and audio renderers
+beamicom_nes/      # this project — native and optional Nx renderers
 beamicom_host/     # shared system, output, and input contracts
 beamicom_scenic/   # desktop client: a Scenic/OpenGL window + ffplay audio
 beamicom_stream/   # headless local AV1/Opus RTP client + terminal controls
@@ -20,6 +19,7 @@ beamicom_v4l2/     # Linux framebuffer and virtual-camera client
 ```
 
 - [Repository overview](../README.md)
+- [Optional Nx renderer design and benchmarks](NX.md)
 - [Desktop client](../beamicom_scenic/README.md)
 - [Local stream client](../beamicom_stream/README.md)
 - [Web client](../beamicom_phx/README.md)
@@ -39,11 +39,38 @@ APU waveform rendering has a backend-neutral frame-block boundary. The default
 dependency-free Elixir renderer replays timestamped 2A03 and MMC5 operations at
 the frame boundary. DMC and Sunsoft 5B remain clocked in the live control state;
 their sample-boundary levels are included in the block so mapper timing remains
-exact. An optional package can replace this renderer at compile time.
+exact. Optional Nx modules in this package can replace this renderer at compile time.
 
-Both renderers implement `Beamicom.NES.APURenderer`; the core has no Nx or EXLA
-dependency. CPU-visible length status, DMC DMA, APU IRQs, and mapper expansion
+Both renderers implement `Beamicom.NES.APURenderer`; Nx and EXLA are optional
+dependencies. CPU-visible length status, DMC DMA, APU IRQs, and mapper expansion
 audio remain in the live native control state for every backend.
+
+### Optional Nx renderers
+
+Applications that want EXLA acceleration include Nx and EXLA directly, then
+select the renderer modules in compile-time configuration:
+
+```elixir
+# mix.exs
+{:beamicom_nes, path: "../beamicom_nes"},
+{:nx, "~> 1.0"},
+{:exla, "~> 1.0"}
+
+# config/config.exs
+config :beamicom_nes,
+  ppu_renderer: Beamicom.NES.Nx.PPURenderer,
+  apu_renderer: Beamicom.NES.Nx.APUBlockRenderer
+```
+
+The settings are consumed when `beamicom_nes` compiles, so backend selection
+adds no lookup to the frame hot path. Applications that omit Nx and EXLA compile
+only the native implementation. The Nx PPU performs frame-wide tile and sprite
+composition; the block APU batches timestamped 2A03 and MMC5 operations while
+the native control state preserves DMC DMA, IRQ, and mapper timing.
+
+For a per-console Blargg NTSC presentation filter, use
+`Beamicom.NES.Nx.video_options/2`. Presets include `:composite`, `:svideo`,
+`:rgb`, and `:monochrome`.
 
 `Beamicom.NES.Runtime` is the emulation loop (a `GenServer`): it paces frames
 from a fixed monotonic epoch so timing error doesn't accumulate, and publishes

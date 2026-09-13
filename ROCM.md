@@ -1,6 +1,6 @@
 # ROCm with the optional NES/GBC Nx renderers
 
-Updated 2026-09-13. Both `beamicom_nes_nx` and `beamicom_gbc_nx` pin **Nx 1.0.0 / EXLA 1.0.0 / XLA 0.10.0**. The native `beamicom_nes` and `beamicom_gbc` applications remain independent of Nx/EXLA. CPU execution, bus/device timing and mapper effects remain native; optional Nx packages accelerate rendering/audio blocks.
+Updated 2026-09-13. The NES and GBC cores expose optional renderers for **Nx 1.0.0 / EXLA 1.0.0 / XLA 0.10.0**. Native consumers remain independent of Nx/EXLA because both dependencies are optional. CPU execution, bus/device timing and mapper effects remain native; the Nx modules accelerate rendering/audio blocks.
 
 **Current status:** the installed XLA artifact is CPU-only. All existing NES/GBC renderer compilation and resident-copy sites explicitly select `client: :host`. Setting EXLA's default client to ROCm will therefore **not** move these renderers to the GPU. There is no application-wide ROCm switch yet.
 
@@ -28,7 +28,7 @@ Build in a separate checkout, preserving CPU dependency/build caches. The exampl
 cd /home/dbern/beamicom
 ROCM_CHECKOUT=$(mktemp -d /tmp/beamicom-rocm.XXXXXX)
 git clone --local . "$ROCM_CHECKOUT/repo"
-cd "$ROCM_CHECKOUT/repo/beamicom_nes_nx"
+cd "$ROCM_CHECKOUT/repo/beamicom_scenic"
 
 export ROCM_PATH=/opt/rocm-7.2.4
 export LD_LIBRARY_PATH="$ROCM_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -78,7 +78,7 @@ This is the [EXLA client configuration model](https://exla.hexdocs.pm/EXLA.html#
 
 To enable it for the actual NES/GBC renderers, implementation work remains: introduce a client selection shared by `EXLA.compile` and every `Nx.backend_copy`, include the client in compiled-function/atlas cache keys, and reconstruct resident audio state on that same client. Audit NES `ppu_renderer.ex`/`apu_block_renderer.ex`, GBC `ppu_renderer.ex`/`apu_block_renderer.ex`/`apu_synth_renderer.ex`, and new postprocessing kernels. Mixing GPU compilation with host-resident state introduces transfers or errors.
 
-Keep host selection as the default and validate a requested GPU before loading a machine. If GPU startup fails, explicitly choose host before creating resident state; do not silently reset active emulation mid-frame. A separate CPU-only XLA build remains necessary on systems unable to load ROCm-linked libraries. For **no XLA support**, use the native packages without the optional Nx dependencies. Renderer selection is generally compile-time configuration and requires recompilation when changing the selected modules; an EXLA default-client change cannot substitute for that.
+Keep host selection as the default and validate a requested GPU before loading a machine. If GPU startup fails, explicitly choose host before creating resident state; do not silently reset active emulation mid-frame. A separate CPU-only XLA build remains necessary on systems unable to load ROCm-linked libraries. For **no XLA support**, consume the core packages without adding Nx or EXLA. Renderer selection is generally compile-time configuration and requires recompilation when changing the selected modules; an EXLA default-client change cannot substitute for that.
 
 ## Alternative: external AMD PJRT plugin
 

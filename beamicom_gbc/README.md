@@ -1,9 +1,37 @@
 # Beamicom GBC
 
-A dependency-free, headless Game Boy and Game Boy Color emulator core written
-in Elixir. This project is intentionally separate from the NES core: hardware
+A headless Game Boy and Game Boy Color emulator core written in Elixir. Its
+native path is dependency-free. This project is intentionally separate from the NES core: hardware
 timing and machine state remain system-specific, while `beamicom_host` provides
 shared coarse-grained video, input, and lifecycle boundaries.
+
+## Optional Nx renderers
+
+The package also contains frame-wide PPU and block APU renderers backed by Nx
+and EXLA. A consuming application opts in by including those optional
+dependencies directly and selecting the modules before the core compiles:
+
+```elixir
+# mix.exs
+{:beamicom_gbc, path: "../beamicom_gbc"},
+{:nx, "~> 1.0"},
+{:exla, "~> 1.0"}
+
+# config/config.exs
+config :beamicom_gbc,
+  ppu_renderer: Beamicom.GB.Nx.PPURenderer,
+  apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+```
+
+Native-only consumers omit Nx and EXLA, and the optional modules are not
+compiled. Renderer selection is fixed at compile time. The PPU graph receives
+frame-start VRAM, OAM, palette RAM, scanline controls, and timestamped visible
+writes, then performs tile lookup and sprite evaluation for the 160×144 frame.
+`Beamicom.GB.Nx.APUSynthRenderer` remains available for full event-block audio
+synthesis; the default Nx APU renderer batches resolved channel levels.
+
+See [the Nx renderer design and benchmarks](NX.md) for payload details and
+measured single-instance results.
 
 The first milestone provides:
 

@@ -99,7 +99,7 @@ defmodule Mix.Tasks.Gb.Bench do
   defp ensure_renderer!(module) do
     if Code.ensure_loaded?(module),
       do: module,
-      else: Mix.raise("Nx renderers require running this task from beamicom_gbc_nx")
+      else: Mix.raise("Nx renderers require Nx/EXLA and BEAMICOM_NX=1 at compile time")
   end
 
   defp ensure_compiled!(_device, renderer, renderer), do: :ok

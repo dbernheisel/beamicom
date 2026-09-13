@@ -20,9 +20,9 @@ defmodule BeamicomScenic.MixProject do
   defp deps do
     [
       {:beamicom_nes, path: "../beamicom_nes"},
-      {:beamicom_nes_nx, path: "../beamicom_nes_nx"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
-      {:beamicom_gbc_nx, path: "../beamicom_gbc_nx"},
+      {:nx, "~> 1.0"},
+      {:exla, "~> 1.0"},
       {:beamicom_host, path: "../beamicom_host"},
       {:beamicom_ei, path: "../beamicom_ei"},
       {:scenic, "~> 0.11"},

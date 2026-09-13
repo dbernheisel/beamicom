@@ -9,7 +9,9 @@ defmodule BeamicomGBC.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: [
         {:beamicom_host, path: "../beamicom_host"},
-        {:beamicom_ei, path: "../beamicom_ei"}
+        {:beamicom_ei, path: "../beamicom_ei"},
+        {:nx, "~> 1.0", optional: true},
+        {:exla, "~> 1.0", optional: true}
       ]
     ]
   end

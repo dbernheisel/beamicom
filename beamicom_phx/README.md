@@ -33,21 +33,18 @@ The app runs in one of two modes set by the `BEAMICOM_MODE` env var (default: `s
 The local core and host path dependencies are already included in the repository:
 
 ```
-beamicom/         # core dependency
-beamicom_nes_nx/  # optional EXLA NES renderers
-beamicom_gbc/     # Game Boy core dependency
-beamicom_gbc_nx/  # optional EXLA Game Boy renderers
+beamicom_nes/     # NES core with optional EXLA renderers
+beamicom_gbc/     # Game Boy core with optional EXLA renderers
 beamicom_host/    # neutral host contracts
 beamicom_stream/  # shared Membrane A/V and RTP components
 beamicom_phx/     # this project
 ```
 
-This application declares both Nx renderer packages as optional direct
-dependencies and selects their PPU/APU modules in compile-time configuration.
-Consequently, including the Nx packages in this application is sufficient to
-use them for newly loaded NES and Game Boy machines; there is no runtime backend
-lookup in either core's hot path. A native-only application can depend on the
-core packages without including these optional renderer packages.
+This application includes Nx and EXLA directly and selects the cores' PPU/APU
+modules in compile-time configuration. Newly loaded NES and Game Boy machines
+therefore use EXLA without a runtime backend lookup in either hot path. A
+native-only application can depend on the core packages without including Nx or
+EXLA.
 
 From the repository root:
 
