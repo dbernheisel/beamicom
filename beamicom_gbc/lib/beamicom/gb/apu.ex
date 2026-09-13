@@ -22,6 +22,7 @@ defmodule Beamicom.GB.APU do
               :apu_renderer,
               Beamicom.GB.APUBlockRenderer
             )
+  @dynamic_renderers Application.compile_env(:beamicom_gbc, :allow_runtime_renderers, false)
 
   @clock_rate 4_194_304
   @sample_rate 44_100
@@ -164,9 +165,9 @@ defmodule Beamicom.GB.APU do
   @spec write(t(), 0xFF10..0xFF3F, byte()) :: t()
   def write(%__MODULE__{} = apu, address, value)
       when address in 0xFF10..0xFF3F and value in 0..0xFF do
-    updated = write_immediate(apu, address, value)
-
-    if event_renderer?(apu.renderer), do: record_trigger(updated, address, value), else: updated
+    apu
+    |> write_immediate(address, value)
+    |> record_renderer_write(address, value)
   end
 
   defp write_immediate(%__MODULE__{} = apu, 0xFF26, value)
@@ -316,29 +317,11 @@ defmodule Beamicom.GB.APU do
   defp tick_immediate(%__MODULE__{} = apu, 0), do: apu
 
   defp tick_immediate(%__MODULE__{master: false} = apu, dots) when dots > 0 do
-    if event_renderer?(apu.renderer) do
-      advance_events(apu, dots)
-    else
-      total = apu.sample_phase + dots * @sample_rate
-      count = div(total, @clock_rate)
-      phase = total - count * @clock_rate
-      seq_total = apu.sequencer_phase + dots
-      seq_ticks = div(seq_total, @sequencer_period)
-      seq_phase = seq_total - seq_ticks * @sequencer_period
-
-      %{
-        apu
-        | sample_phase: phase,
-          samples: append_silence(apu, count),
-          sample_count: apu.sample_count + count,
-          sequencer_phase: seq_phase,
-          sequencer_step: apu.sequencer_step + seq_ticks &&& 7
-      }
-    end
+    advance_renderer_silence(apu, dots)
   end
 
   defp tick_immediate(%__MODULE__{} = apu, dots) when dots > 0 do
-    if event_renderer?(apu.renderer), do: advance_events(apu, dots), else: advance(apu, dots)
+    advance_renderer(apu, dots)
   end
 
   @doc "Clocks one DIV-APU edge, used for the FF04 reset falling-edge quirk."
@@ -368,7 +351,7 @@ defmodule Beamicom.GB.APU do
         apu.renderer == :native ->
           {count, samples |> :lists.reverse() |> IO.iodata_to_binary(), nil}
 
-        event_renderer?(apu.renderer) ->
+        event_output?(apu) ->
           apply(apu.renderer, :render_events, [
             apu.renderer_state,
             :lists.reverse(apu.render_events),
@@ -410,7 +393,7 @@ defmodule Beamicom.GB.APU do
 
     apu =
       if sample_phase >= @clock_rate do
-        sample = if apu.renderer == :native, do: mix_sample(apu), else: sample_levels(apu)
+        sample = renderer_sample(apu)
 
         %{
           apu
@@ -432,30 +415,32 @@ defmodule Beamicom.GB.APU do
     advance(apu, dots - distance)
   end
 
-  defp advance_events(apu, 0), do: apu
+  if @dynamic_renderers or @renderer == Beamicom.GB.Nx.APUSynthRenderer do
+    defp advance_events(apu, 0), do: apu
 
-  defp advance_events(apu, dots) do
-    distance = min(dots, @sequencer_period - apu.sequencer_phase)
-    apu = append_render_segment(apu, distance)
-    sample_total = apu.sample_phase + distance * @sample_rate
-    emitted = div(sample_total, @clock_rate)
-    sequence_phase = apu.sequencer_phase + distance
+    defp advance_events(apu, dots) do
+      distance = min(dots, @sequencer_period - apu.sequencer_phase)
+      apu = append_render_segment(apu, distance)
+      sample_total = apu.sample_phase + distance * @sample_rate
+      emitted = div(sample_total, @clock_rate)
+      sequence_phase = apu.sequencer_phase + distance
 
-    apu = %{
-      apu
-      | sample_phase: sample_total - emitted * @clock_rate,
-        sample_count: apu.sample_count + emitted,
-        sequencer_phase: sequence_phase
-    }
-
-    apu =
-      if sequence_phase == @sequencer_period do
-        apu |> Map.put(:sequencer_phase, 0) |> clock_frame_sequencer()
-      else
+      apu = %{
         apu
-      end
+        | sample_phase: sample_total - emitted * @clock_rate,
+          sample_count: apu.sample_count + emitted,
+          sequencer_phase: sequence_phase
+      }
 
-    advance_events(apu, dots - distance)
+      apu =
+        if sequence_phase == @sequencer_period do
+          apu |> Map.put(:sequencer_phase, 0) |> clock_frame_sequencer()
+        else
+          apu
+        end
+
+      advance_events(apu, dots - distance)
+    end
   end
 
   defp advance_channels(apu, dots) do
@@ -600,16 +585,18 @@ defmodule Beamicom.GB.APU do
   defp channel_status(%{enabled: true}, bit), do: bit
   defp channel_status(_channel, _bit), do: 0
 
-  defp mix_sample(apu) do
-    outputs =
-      {pulse_output(apu.ch1), pulse_output(apu.ch2), wave_output(apu.ch3, apu.wave_ram),
-       noise_output(apu.ch4)}
+  if @dynamic_renderers or @renderer == :native do
+    defp mix_sample(apu) do
+      outputs =
+        {pulse_output(apu.ch1), pulse_output(apu.ch2), wave_output(apu.ch3, apu.wave_ram),
+         noise_output(apu.ch4)}
 
-    nr50 = elem(apu.registers, 20)
-    nr51 = elem(apu.registers, 21)
-    right = routed_sum(outputs, nr51 &&& 0x0F) * ((nr50 &&& 7) + 1) * 64
-    left = routed_sum(outputs, nr51 >>> 4) * ((nr50 >>> 4 &&& 7) + 1) * 64
-    <<clamp16(left)::little-signed-16, clamp16(right)::little-signed-16>>
+      nr50 = elem(apu.registers, 20)
+      nr51 = elem(apu.registers, 21)
+      right = routed_sum(outputs, nr51 &&& 0x0F) * ((nr50 &&& 7) + 1) * 64
+      left = routed_sum(outputs, nr51 >>> 4) * ((nr50 >>> 4 &&& 7) + 1) * 64
+      <<clamp16(left)::little-signed-16, clamp16(right)::little-signed-16>>
+    end
   end
 
   defp sample_levels(apu) do
@@ -626,90 +613,151 @@ defmodule Beamicom.GB.APU do
 
   defp append_silence(apu, count), do: [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples]
 
-  defp event_renderer?(:native), do: false
+  if @dynamic_renderers do
+    defp event_renderer?(:native), do: false
 
-  defp event_renderer?(renderer),
-    do: function_exported?(renderer, :event_driven?, 0) and apply(renderer, :event_driven?, [])
+    defp event_renderer?(renderer),
+      do: function_exported?(renderer, :event_driven?, 0) and apply(renderer, :event_driven?, [])
 
-  defp append_render_segment(apu, dots) do
-    %{
-      apu
-      | render_events: [render_segment(apu, dots) | apu.render_events],
-        render_dots: apu.render_dots + dots
-    }
-  end
+    defp event_output?(apu), do: event_renderer?(apu.renderer)
 
-  defp render_segment(apu, dots) do
-    {t1, t2, t3, t4} = apu.render_triggers
-    nr50 = elem(apu.registers, 20)
-    nr51 = elem(apu.registers, 21)
-    p1 = apu.ch1
-    p2 = apu.ch2
-    wave = apu.ch3
-    noise = apu.ch4
+    defp record_renderer_write(apu, address, value) do
+      if event_renderer?(apu.renderer), do: record_trigger(apu, address, value), else: apu
+    end
 
-    [
-      dots,
-      bool(apu.master),
-      nr50,
-      nr51,
-      bool(p1.enabled),
-      bool(p1.dac),
-      p1.duty,
-      p1.frequency,
-      p1.volume,
-      t1,
-      bool(p2.enabled),
-      bool(p2.dac),
-      p2.duty,
-      p2.frequency,
-      p2.volume,
-      t2,
-      bool(wave.enabled),
-      bool(wave.dac),
-      wave.level,
-      wave.frequency,
-      t3
-      | :binary.bin_to_list(apu.wave_ram) ++
-          [
-            bool(noise.enabled),
-            bool(noise.dac),
-            noise.volume,
-            noise.shift,
-            bool(noise.width7),
-            noise.divisor,
-            t4
-          ]
-    ]
-  end
+    defp advance_renderer_silence(apu, dots) do
+      if event_renderer?(apu.renderer),
+        do: advance_events(apu, dots),
+        else: advance_silence(apu, dots)
+    end
 
-  defp record_trigger(apu, address, value) when (value &&& 0x80) != 0 do
-    index =
-      case address do
-        0xFF14 -> 0
-        0xFF19 -> 1
-        0xFF1E -> 2
-        0xFF23 -> 3
-        _address -> nil
-      end
+    defp advance_renderer(apu, dots) do
+      if event_renderer?(apu.renderer), do: advance_events(apu, dots), else: advance(apu, dots)
+    end
 
-    if index == nil do
-      apu
+    defp renderer_sample(%__MODULE__{renderer: :native} = apu), do: mix_sample(apu)
+    defp renderer_sample(apu), do: sample_levels(apu)
+  else
+    defp event_output?(_apu), do: @renderer == Beamicom.GB.Nx.APUSynthRenderer
+
+    if @renderer == Beamicom.GB.Nx.APUSynthRenderer do
+      defp record_renderer_write(apu, address, value), do: record_trigger(apu, address, value)
+      defp advance_renderer_silence(apu, dots), do: advance_events(apu, dots)
+      defp advance_renderer(apu, dots), do: advance_events(apu, dots)
     else
-      triggers = apu.render_triggers
-      %{apu | render_triggers: put_elem(triggers, index, elem(triggers, index) + 1)}
+      defp record_renderer_write(apu, _address, _value), do: apu
+      defp advance_renderer_silence(apu, dots), do: advance_silence(apu, dots)
+      defp advance_renderer(apu, dots), do: advance(apu, dots)
+    end
+
+    if @renderer == :native do
+      defp renderer_sample(apu), do: mix_sample(apu)
+    else
+      defp renderer_sample(apu), do: sample_levels(apu)
     end
   end
 
-  defp record_trigger(apu, _address, _value), do: apu
-  defp bool(true), do: 1
-  defp bool(false), do: 0
+  defp advance_silence(apu, dots) do
+    total = apu.sample_phase + dots * @sample_rate
+    count = div(total, @clock_rate)
+    phase = total - count * @clock_rate
+    seq_total = apu.sequencer_phase + dots
+    seq_ticks = div(seq_total, @sequencer_period)
+    seq_phase = seq_total - seq_ticks * @sequencer_period
 
-  defp routed_sum(outputs, routes) do
-    if((routes &&& 1) != 0, do: elem(outputs, 0), else: 0) +
-      if((routes &&& 2) != 0, do: elem(outputs, 1), else: 0) +
-      if((routes &&& 4) != 0, do: elem(outputs, 2), else: 0) +
-      if((routes &&& 8) != 0, do: elem(outputs, 3), else: 0)
+    %{
+      apu
+      | sample_phase: phase,
+        samples: append_silence(apu, count),
+        sample_count: apu.sample_count + count,
+        sequencer_phase: seq_phase,
+        sequencer_step: apu.sequencer_step + seq_ticks &&& 7
+    }
+  end
+
+  if @dynamic_renderers or @renderer == Beamicom.GB.Nx.APUSynthRenderer do
+    defp append_render_segment(apu, dots) do
+      %{
+        apu
+        | render_events: [render_segment(apu, dots) | apu.render_events],
+          render_dots: apu.render_dots + dots
+      }
+    end
+
+    defp render_segment(apu, dots) do
+      {t1, t2, t3, t4} = apu.render_triggers
+      nr50 = elem(apu.registers, 20)
+      nr51 = elem(apu.registers, 21)
+      p1 = apu.ch1
+      p2 = apu.ch2
+      wave = apu.ch3
+      noise = apu.ch4
+
+      [
+        dots,
+        bool(apu.master),
+        nr50,
+        nr51,
+        bool(p1.enabled),
+        bool(p1.dac),
+        p1.duty,
+        p1.frequency,
+        p1.volume,
+        t1,
+        bool(p2.enabled),
+        bool(p2.dac),
+        p2.duty,
+        p2.frequency,
+        p2.volume,
+        t2,
+        bool(wave.enabled),
+        bool(wave.dac),
+        wave.level,
+        wave.frequency,
+        t3
+        | :binary.bin_to_list(apu.wave_ram) ++
+            [
+              bool(noise.enabled),
+              bool(noise.dac),
+              noise.volume,
+              noise.shift,
+              bool(noise.width7),
+              noise.divisor,
+              t4
+            ]
+      ]
+    end
+
+    defp record_trigger(apu, address, value) when (value &&& 0x80) != 0 do
+      index =
+        case address do
+          0xFF14 -> 0
+          0xFF19 -> 1
+          0xFF1E -> 2
+          0xFF23 -> 3
+          _address -> nil
+        end
+
+      if index == nil do
+        apu
+      else
+        triggers = apu.render_triggers
+        %{apu | render_triggers: put_elem(triggers, index, elem(triggers, index) + 1)}
+      end
+    end
+
+    defp record_trigger(apu, _address, _value), do: apu
+    defp bool(true), do: 1
+    defp bool(false), do: 0
+  end
+
+  if @dynamic_renderers or @renderer == :native do
+    defp routed_sum(outputs, routes) do
+      if((routes &&& 1) != 0, do: elem(outputs, 0), else: 0) +
+        if((routes &&& 2) != 0, do: elem(outputs, 1), else: 0) +
+        if((routes &&& 4) != 0, do: elem(outputs, 2), else: 0) +
+        if((routes &&& 8) != 0, do: elem(outputs, 3), else: 0)
+    end
   end
 
   defp pulse_output(%Pulse{enabled: false}), do: 0
@@ -733,9 +781,11 @@ defmodule Beamicom.GB.APU do
   defp noise_output(%Noise{dac: false}), do: 0
   defp noise_output(ch), do: elem(@dac_levels, (bxor(ch.lfsr, 1) &&& 1) * ch.volume)
 
-  defp clamp16(sample) when sample < -32_768, do: -32_768
-  defp clamp16(sample) when sample > 32_767, do: 32_767
-  defp clamp16(sample), do: sample
+  if @dynamic_renderers or @renderer == :native do
+    defp clamp16(sample) when sample < -32_768, do: -32_768
+    defp clamp16(sample) when sample > 32_767, do: 32_767
+    defp clamp16(sample), do: sample
+  end
 
   defp write_pulse_envelope(apu, channel, index, value) do
     ch = Map.fetch!(apu, channel)

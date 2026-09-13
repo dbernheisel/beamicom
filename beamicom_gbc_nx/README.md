@@ -62,3 +62,10 @@ mixer at compile time. Their matching hashes confirm the same output; on this
 single-instance workload the Elixir path remains slightly faster. The raw-row
 and event-block boundaries remain available for larger kernels and future
 leading-axis batching.
+
+CGB capture keeps hardware BGR555 palettes and deduplicates them per frame.
+Link's Awakening used one palette snapshot across all 144 scanlines: the PPU
+input fell from 53,568 to 26,192 bytes per frame, and the isolated EXLA PPU
+boundary fell from roughly 116 ms to 79 ms over 120 frames. Runtime renderer
+detection is compiled out of normal APU builds; it is enabled only by the Nx
+cross-backend test configuration.

@@ -18,7 +18,9 @@ defmodule Beamicom.GB.Nx.PPURenderer do
   @sprites_offset @layers_size
   @control_offset @sprites_offset + @sprites * 5
   @dmg_row_size @control_offset + 7
-  @cgb_row_size @control_offset + 4 + 64 * 3
+  @cgb_pixel_row_size @control_offset + 4
+  @cgb_palette_size 64 * 2
+  @palette_capacities [1, 2, 4, 8, 16, 32, 64, 128, 144]
 
   @impl true
   def prepare(model) when model in [:dmg, :cgb], do: nil
@@ -31,7 +33,21 @@ defmodule Beamicom.GB.Nx.PPURenderer do
   end
 
   def render(:cgb, lines, state) when length(lines) == @height do
-    args = [tensor(IO.iodata_to_binary(lines), {@height, @cgb_row_size})]
+    {pixel_rows, palettes, palette_indexes, palette_count} = pack_cgb(lines)
+    capacity = Enum.find(@palette_capacities, &(&1 >= palette_count))
+
+    palettes =
+      IO.iodata_to_binary([
+        palettes,
+        :binary.copy(<<0>>, (capacity - palette_count) * @cgb_palette_size)
+      ])
+
+    args = [
+      tensor(pixel_rows, {@height, @cgb_pixel_row_size}),
+      tensor(palettes, {capacity, 64, 2}),
+      tensor(palette_indexes, {@height})
+    ]
+
     frame = compiled(:cgb, args) |> apply(args)
     {Nx.to_binary(frame), state}
   end
@@ -53,14 +69,22 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     Nx.select(occupied and not behind_background, object, bg) |> Nx.as_type(:u8)
   end
 
-  defn compose_cgb(rows) do
-    {background, window, sprites, control} = unpack(rows, @cgb_row_size)
+  defn compose_cgb(rows, palette_bytes, palette_indexes) do
+    {background, window, sprites, control} = unpack(rows, @cgb_pixel_row_size)
     {bg_color, bg_attrs} = layers(background, window, control)
     {object_color, object_attrs, occupied} = objects(sprites)
 
+    low = palette_bytes[[.., .., 0]] |> Nx.as_type(:s32)
+    high = palette_bytes[[.., .., 1]] |> Nx.as_type(:s32)
+    packed = low + high * 256
+    red = expand5(band(packed, 0x1F))
+    green = expand5(band(shr(packed, 5), 0x1F))
+    blue = expand5(band(shr(packed, 10), 0x1F))
+
     palettes =
-      rows[[.., (@control_offset + 4)..(@cgb_row_size - 1)]]
-      |> Nx.reshape({@height, 64, 3})
+      Nx.stack([red, green, blue], axis: 2)
+      |> Nx.as_type(:u8)
+      |> Nx.take(Nx.as_type(palette_indexes, :s32))
 
     bg_index = band(bg_attrs, 7) * 4 + bg_color
     object_index = 32 + band(object_attrs, 7) * 4 + object_color
@@ -167,15 +191,38 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     Nx.take_along_axis(palettes, indexes, axis: 1)
   end
 
+  defnp(expand5(component), do: component * 8 + shr(component, 2))
+
   defnp(column(tensor, index), do: tensor[[.., index]] |> Nx.reshape({@height, 1}))
-  defp tensor(binary, shape), do: binary |> Nx.from_binary(:u8) |> Nx.reshape(shape)
+
+  defp tensor(data, shape),
+    do: data |> IO.iodata_to_binary() |> Nx.from_binary(:u8) |> Nx.reshape(shape)
+
+  defp pack_cgb(lines) do
+    {rows, palettes, _lookup, indexes, count} =
+      Enum.reduce(lines, {[], [], %{}, [], 0}, fn line, {rows, palettes, lookup, indexes, count} ->
+        <<row::binary-size(@cgb_pixel_row_size), palette::binary-size(@cgb_palette_size)>> =
+          line
+
+        case lookup do
+          %{^palette => index} ->
+            {[row | rows], palettes, lookup, [index | indexes], count}
+
+          _ ->
+            {[row | rows], [palette | palettes], Map.put(lookup, palette, count), [count | indexes],
+             count + 1}
+        end
+      end)
+
+    {:lists.reverse(rows), :lists.reverse(palettes), :lists.reverse(indexes), count}
+  end
 
   defp compiled(kind, args) do
-    key = {__MODULE__, kind, :raw_rows_compiled}
+    key = {__MODULE__, kind, Enum.map(args, &Nx.shape/1), :raw_rows_compiled}
 
     case :persistent_term.get(key, nil) do
       nil ->
-        function = if kind == :dmg, do: &compose_dmg/1, else: &compose_cgb/1
+        function = if kind == :dmg, do: &compose_dmg/1, else: &compose_cgb/3
         compiled = EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)
         :persistent_term.put(key, compiled)
         compiled

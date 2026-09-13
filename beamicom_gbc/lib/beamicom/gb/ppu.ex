@@ -577,8 +577,11 @@ defmodule Beamicom.GB.PPU do
     {background, window, window_visible, ppu} = raw_tile_layers(ppu, line_number, lcdc, true)
     sprites = raw_sprite_rows(ppu, line_number, lcdc, true)
 
-    {bg, obj} = ppu.color_cache
-    palettes = IO.iodata_to_binary([Tuple.to_list(bg), Tuple.to_list(obj)])
+    # Preserve the scanline's hardware palette RAM. The frame renderer expands
+    # BGR555 to RGB once in its fused tensor program instead of copying the
+    # 192-byte host-side RGB cache into every captured row.
+    {bg, obj} = ppu.color_ram
+    palettes = bg <> obj
 
     line =
       background <>
