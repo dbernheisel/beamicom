@@ -21,6 +21,8 @@ defmodule Beamicom.NES.PPU do
 
   import Bitwise
 
+  @compile {:no_warn_undefined, BeamicomNx.NES.PPURenderer}
+
   # Bit-reversed byte lookup (input is always 0..255), computed at compile time:
   # turns the 8-iteration reduce in horizontal sprite flips into one `elem/2`.
   @rev 0..255
@@ -105,6 +107,10 @@ defmodule Beamicom.NES.PPU do
             # Frame-synced rendered-scanline number captured at the per-scanline
             # IRQ tick, for the MMC5 scanline IRQ (reset to 0 at the pre-render line).
             irq_scanline: 0,
+            # Pixel composition can remain on the BEAM or be batched into one
+            # 240x256 EXLA operation. Fetches and observable PPU state changes
+            # always remain in this module at their original scanline cadence.
+            renderer: :native,
             fb: [],
             # Tile-row cache: the 33 fetched {nametable, attribute} pairs plus the
             # {v & $0FFF, nt_source} key they were fetched for. The 8 scanlines of a
@@ -118,7 +124,20 @@ defmodule Beamicom.NES.PPU do
             frame_ready: nil
 
   @doc "Build a PPU over the cartridge's CHR data and nametable mirroring."
-  def new(chr, mirroring), do: %__MODULE__{chr: chr, mirroring: mirroring}
+  def new(chr, mirroring) do
+    renderer =
+      case Application.get_env(:beamicom, :ppu_renderer, :native) do
+        :nx -> BeamicomNx.NES.PPURenderer
+        renderer -> renderer
+      end
+
+    %__MODULE__{chr: chr, mirroring: mirroring, renderer: renderer}
+  end
+
+  @doc "Select the framebuffer pixel compositor (`:native`, `:nx`, or a renderer module)."
+  def set_renderer(ppu, :native), do: %{ppu | renderer: :native}
+  def set_renderer(ppu, :nx), do: %{ppu | renderer: BeamicomNx.NES.PPURenderer}
+  def set_renderer(ppu, renderer) when is_atom(renderer), do: %{ppu | renderer: renderer}
 
   @doc "Enable or disable a runtime-selectable PPU enhancement."
   def set_enhancement(ppu, :hide_horizontal_overscan, enabled) when is_boolean(enabled),
@@ -232,15 +251,78 @@ defmodule Beamicom.NES.PPU do
   defp render_scanline(ppu) do
     if (ppu.mask &&& 0x18) == 0 do
       # Rendering off: the line is the backdrop and the scroll registers freeze.
-      %{ppu | fb: [<<0::size(256 * 8)>> | ppu.fb]}
+      line = if nx_renderer?(ppu), do: nx_blank_line(), else: <<0::size(256 * 8)>>
+      %{ppu | fb: [line | ppu.fb]}
     else
       line_v = ppu.v
       {tiles, blank?, ppu} = fetch_line_tiles(ppu, line_v)
       ppu = eval_sprites(ppu)
-      {line, ppu} = compose_line(ppu, tiles, ppu.x, blank?)
+
+      {line, ppu} =
+        if nx_renderer?(ppu),
+          do: capture_nx_line(ppu, tiles, ppu.x, blank?),
+          else: compose_line(ppu, tiles, ppu.x, blank?)
+
       ppu = %{ppu | fb: [line | ppu.fb], v: line_v}
       copy_hori(inc_vert(ppu))
     end
+  end
+
+  defp nx_renderer?(ppu), do: ppu.renderer != :native and not ppu.unlimited_sprites
+
+  defp nx_blank_line do
+    {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, 0, 0, <<0::size(8 * 8)>>,
+     <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+  end
+
+  # Keep the mapper-sensitive work on the BEAM and retain only the compact inputs
+  # needed by the frame-wide pixel compositor: 33 background tiles and up to the
+  # hardware-visible eight sprites. This is 141 bytes per line instead of a live
+  # copy of ROM, VRAM, OAM, or the rest of the machine.
+  defp capture_nx_line(ppu, tiles, fine_x, blank?) do
+    {lo, hi, attr} = tile_planes(tiles, 0, [], [], [])
+    {sx, slo, shi, sattr, svalid} = sprite_planes(ppu.line_sprites)
+    bg_on = bg_on?(ppu) and not blank?
+
+    # Sprite-zero hit is observable before frame completion, so calculate that
+    # small (at most 64-column) side effect now rather than deferring it to Nx.
+    buf = if sprites_on?(ppu), do: sprite_buffer(ppu.line_sprites), else: %{}
+
+    ppu =
+      if not bg_on or map_size(buf) == 0,
+        do: ppu,
+        else: sprite0_hit(ppu, buf, tiles, fine_x, true)
+
+    mask = if bg_on, do: ppu.mask, else: ppu.mask &&& bxor(0xFF, 0x08)
+    {{lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+  end
+
+  defp tile_planes(_tiles, 33, lo, hi, attr),
+    do:
+      {IO.iodata_to_binary(Enum.reverse(lo)), IO.iodata_to_binary(Enum.reverse(hi)),
+       IO.iodata_to_binary(Enum.reverse(attr))}
+
+  defp tile_planes(tiles, i, los, his, attrs) do
+    {lo, hi, attr} = elem(tiles, i)
+    tile_planes(tiles, i + 1, [lo | los], [hi | his], [attr | attrs])
+  end
+
+  defp sprite_planes(sprites) do
+    padded = Enum.take(sprites, 8) ++ List.duplicate(nil, max(8 - length(sprites), 0))
+
+    Enum.reduce(padded, {[], [], [], [], []}, fn
+      nil, {xs, los, his, attrs, valid} ->
+        {[0 | xs], [0 | los], [0 | his], [0 | attrs], [0 | valid]}
+
+      sp, {xs, los, his, attrs, valid} ->
+        {[sp.x | xs], [sp.lo | los], [sp.hi | his], [sp.attr | attrs], [1 | valid]}
+    end)
+    |> then(fn planes ->
+      planes
+      |> Tuple.to_list()
+      |> Enum.map(&(&1 |> Enum.reverse() |> :erlang.list_to_binary()))
+      |> List.to_tuple()
+    end)
   end
 
   # Fetch the 33 background tiles that cover the 256 visible pixels plus the fine-x
@@ -778,8 +860,13 @@ defmodule Beamicom.NES.PPU do
   end
 
   defp finish_frame(ppu) do
-    # fb accumulates one 256-byte binary per visible scanline, newest first.
-    pixels = ppu.fb |> Enum.reverse() |> IO.iodata_to_binary()
+    # The Nx path transfers one compact frame description and receives one
+    # 61,440-byte image. The native path keeps the original scanline binaries.
+    pixels =
+      if nx_renderer?(ppu),
+        do: apply(ppu.renderer, :render, [Enum.reverse(ppu.fb)]),
+        else: ppu.fb |> Enum.reverse() |> IO.iodata_to_binary()
+
     palette = for i <- 0..31, into: <<>>, do: <<Map.get(ppu.palette, i, 0)>>
 
     frame = %Beamicom.NES.Framebuffer{
