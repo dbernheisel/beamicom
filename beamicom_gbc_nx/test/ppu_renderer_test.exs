@@ -68,6 +68,38 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
            }
   end
 
+  for {model, lcdc} <- [dmg: 0xB1, dmg: 0x93, cgb: 0xB1, cgb: 0x93] do
+    test "#{model} LCDC #{Integer.to_string(lcdc, 16)} specialized graph matches the full graph" do
+      model = unquote(model)
+      lcdc = unquote(lcdc)
+
+      ppu =
+        PPU.new(model: model, lcdc: lcdc, bgp: 0xE4, obp0: 0xE4)
+        |> PPU.load_vram(0, :binary.copy(<<0x55, 0x33>>, 8))
+        |> PPU.load_vram(16, :binary.copy(<<0xAA, 0xCC>>, 8))
+        |> PPU.load_vram(0x1800, :binary.copy(<<0>>, 0x400))
+        |> PPU.load_vram(0x1C00, :binary.copy(<<1>>, 0x400))
+        |> PPU.load_oam(0, <<56, 24, 1, 0>>)
+
+      controls =
+        for line <- 0..143,
+            do: <<lcdc, 0, 0, 0xE4, 0xE4, 0xE4, 0, 7, line>>
+
+      payload = %{
+        controls: controls,
+        snapshot: {ppu.vram, ppu.oam, ppu.color_ram},
+        events: []
+      }
+
+      {specialized, nil} = Beamicom.GB.Nx.PPURenderer.render(model, payload, nil)
+      [controls, vram, oam, palettes] = renderer_tensors(payload)
+
+      generic = generic_static(model, controls, vram, oam, palettes) |> Nx.to_binary()
+
+      assert specialized == generic
+    end
+  end
+
   defp audible_audio(renderer) do
     apu =
       APU.new(model: :cgb)
@@ -84,6 +116,25 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
     {_count, pcm, _apu} = APU.take_samples(apu)
     pcm
   end
+
+  defp renderer_tensors(%{controls: controls, snapshot: {vram, oam, {bg, obj}}}) do
+    [
+      controls |> IO.iodata_to_binary() |> Nx.from_binary(:u8) |> Nx.reshape({144, 9}),
+      vram
+      |> Tuple.to_list()
+      |> IO.iodata_to_binary()
+      |> Nx.from_binary(:u8)
+      |> Nx.reshape({0x4000}),
+      oam |> Nx.from_binary(:u8) |> Nx.reshape({160}),
+      (bg <> obj) |> Nx.from_binary(:u8) |> Nx.reshape({128})
+    ]
+  end
+
+  defp generic_static(:dmg, controls, vram, oam, palettes),
+    do: Beamicom.GB.Nx.PPURenderer.render_dmg_static(controls, vram, oam, palettes)
+
+  defp generic_static(:cgb, controls, vram, oam, palettes),
+    do: Beamicom.GB.Nx.PPURenderer.render_cgb_static(controls, vram, oam, palettes)
 
   defp complex_audio(renderer) do
     apu =

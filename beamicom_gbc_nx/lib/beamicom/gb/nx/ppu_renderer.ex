@@ -37,7 +37,7 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     {kind, args} =
       case events do
         [] ->
-          {:static, base_args}
+          {static_kind(controls), base_args}
 
         events ->
           {event_rows, event_count, capacity} = pack_events(events)
@@ -61,12 +61,76 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     render_cgb(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
   end
 
+  defn render_dmg_background_static(controls, vram, _oam, _palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, _bg_attrs} = background_layer(vram, controls, events, Nx.tensor(0), false)
+    lcdc = column(controls, 0) |> Nx.broadcast({@height, @width})
+    bg_color = Nx.select(band(lcdc, 1) != 0, bg_color, 0)
+    bgp = column(controls, 3)
+    band(shr(bgp, bg_color * 2), 3) |> Nx.as_type(:u8)
+  end
+
+  defn render_cgb_background_static(controls, vram, _oam, palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, bg_attrs} = background_layer(vram, controls, events, Nx.tensor(0), true)
+    colors = cgb_colors(palettes, events, Nx.tensor(0))
+    palette_gather(colors, band(bg_attrs, 7) * 4 + bg_color)
+  end
+
+  defn render_dmg_no_sprites_static(controls, vram, _oam, _palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, _bg_attrs} = background(vram, controls, events, Nx.tensor(0), false)
+    lcdc = column(controls, 0) |> Nx.broadcast({@height, @width})
+    bg_color = Nx.select(band(lcdc, 1) != 0, bg_color, 0)
+    bgp = column(controls, 3)
+    band(shr(bgp, bg_color * 2), 3) |> Nx.as_type(:u8)
+  end
+
+  defn render_cgb_no_sprites_static(controls, vram, _oam, palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, bg_attrs} = background(vram, controls, events, Nx.tensor(0), true)
+    colors = cgb_colors(palettes, events, Nx.tensor(0))
+    palette_gather(colors, band(bg_attrs, 7) * 4 + bg_color)
+  end
+
+  defn render_dmg_no_window_static(controls, vram, oam, _palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, _bg_attrs} = background_layer(vram, controls, events, Nx.tensor(0), false)
+
+    {object_color, object_attrs, occupied} =
+      objects(vram, oam, controls, events, Nx.tensor(0), false)
+
+    compose_dmg(bg_color, object_color, object_attrs, occupied, controls)
+  end
+
+  defn render_cgb_no_window_static(controls, vram, oam, palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    {bg_color, bg_attrs} = background_layer(vram, controls, events, Nx.tensor(0), true)
+
+    {object_color, object_attrs, occupied} =
+      objects(vram, oam, controls, events, Nx.tensor(0), true)
+
+    compose_cgb(
+      bg_color,
+      bg_attrs,
+      object_color,
+      object_attrs,
+      occupied,
+      controls,
+      cgb_colors(palettes, events, Nx.tensor(0))
+    )
+  end
+
   defn render_dmg(controls, vram, oam, _palettes, events, event_count) do
     {bg_color, _bg_attrs} = background(vram, controls, events, event_count, false)
 
     {object_color, object_attrs, occupied} =
       objects(vram, oam, controls, events, event_count, false)
 
+    compose_dmg(bg_color, object_color, object_attrs, occupied, controls)
+  end
+
+  defnp compose_dmg(bg_color, object_color, object_attrs, occupied, controls) do
     lcdc = column(controls, 0) |> Nx.broadcast({@height, @width})
     bg_color = Nx.select(band(lcdc, 1) != 0, bg_color, 0)
     bgp = column(controls, 3)
@@ -85,27 +149,18 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     {object_color, object_attrs, occupied} =
       objects(vram, oam, controls, events, event_count, true)
 
-    palette_addresses = Nx.iota({@height, @palette_size}, axis: 1, type: :s32)
-    palette_lines = Nx.iota({@height, @palette_size}, axis: 0, type: :s32)
+    compose_cgb(
+      bg_color,
+      bg_attrs,
+      object_color,
+      object_attrs,
+      occupied,
+      controls,
+      cgb_colors(palettes, events, event_count)
+    )
+  end
 
-    palettes =
-      timed_read(palettes, palette_addresses, palette_lines, 2, events, event_count)
-
-    low = palettes[[.., 0..126//2]] |> Nx.as_type(:s32)
-    high = palettes[[.., 1..127//2]] |> Nx.as_type(:s32)
-    packed = low + high * 256
-
-    colors =
-      Nx.stack(
-        [
-          expand5(band(packed, 0x1F)),
-          expand5(band(shr(packed, 5), 0x1F)),
-          expand5(band(shr(packed, 10), 0x1F))
-        ],
-        axis: 2
-      )
-      |> Nx.as_type(:u8)
-
+  defnp compose_cgb(bg_color, bg_attrs, object_color, object_attrs, occupied, controls, colors) do
     bg_index = band(bg_attrs, 7) * 4 + bg_color
     object_index = 32 + band(object_attrs, 7) * 4 + object_color
     bg = palette_gather(colors, bg_index)
@@ -126,16 +181,11 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     line = Nx.iota({@height, @width}, axis: 0, type: :s32)
     x = Nx.iota({@height, @width}, axis: 1, type: :s32)
     lcdc = column(controls, 0)
-    scy = column(controls, 1)
-    scx = column(controls, 2)
     wy = column(controls, 6)
     wx = column(controls, 7)
     window_line = column(controls, 8)
 
-    bg_y = band(line + scy, 0xFF)
-    bg_x = band(x + scx, 0xFF)
-    bg_map = Nx.select(band(lcdc, 0x08) == 0, 0x1800, 0x1C00)
-    {bg_color, bg_attrs} = tile(vram, bg_map, bg_x, bg_y, lcdc, events, event_count, cgb?)
+    {bg_color, bg_attrs} = background_layer(vram, controls, events, event_count, cgb?)
 
     window_x = wx - 7
     window_map = Nx.select(band(lcdc, 0x40) == 0, 0x1800, 0x1C00)
@@ -156,6 +206,16 @@ defmodule Beamicom.GB.Nx.PPURenderer do
       band(lcdc, 0x20) != 0 and line >= wy and window_x < @width and x >= window_x
 
     {Nx.select(visible, window_color, bg_color), Nx.select(visible, window_attrs, bg_attrs)}
+  end
+
+  defnp background_layer(vram, controls, events, event_count, cgb?) do
+    line = Nx.iota({@height, @width}, axis: 0, type: :s32)
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    lcdc = column(controls, 0)
+    bg_y = band(line + column(controls, 1), 0xFF)
+    bg_x = band(x + column(controls, 2), 0xFF)
+    bg_map = Nx.select(band(lcdc, 0x08) == 0, 0x1800, 0x1C00)
+    tile(vram, bg_map, bg_x, bg_y, lcdc, events, event_count, cgb?)
   end
 
   defnp tile(vram, map, source_x, source_y, lcdc, events, event_count, cgb?) do
@@ -272,6 +332,28 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     Nx.take_along_axis(palettes, indexes, axis: 1)
   end
 
+  defnp cgb_colors(palettes, events, event_count) do
+    palette_addresses = Nx.iota({@height, @palette_size}, axis: 1, type: :s32)
+    palette_lines = Nx.iota({@height, @palette_size}, axis: 0, type: :s32)
+
+    palettes =
+      timed_read(palettes, palette_addresses, palette_lines, 2, events, event_count)
+
+    low = palettes[[.., 0..126//2]] |> Nx.as_type(:s32)
+    high = palettes[[.., 1..127//2]] |> Nx.as_type(:s32)
+    packed = low + high * 256
+
+    Nx.stack(
+      [
+        expand5(band(packed, 0x1F)),
+        expand5(band(shr(packed, 5), 0x1F)),
+        expand5(band(shr(packed, 10), 0x1F))
+      ],
+      axis: 2
+    )
+    |> Nx.as_type(:u8)
+  end
+
   defnp(expand5(component), do: component * 8 + shr(component, 2))
 
   defnp(column(tensor, index),
@@ -301,6 +383,12 @@ defmodule Beamicom.GB.Nx.PPURenderer do
           case {model, kind} do
             {:dmg, :static} -> &render_dmg_static/4
             {:cgb, :static} -> &render_cgb_static/4
+            {:dmg, :background_static} -> &render_dmg_background_static/4
+            {:cgb, :background_static} -> &render_cgb_background_static/4
+            {:dmg, :no_sprites_static} -> &render_dmg_no_sprites_static/4
+            {:cgb, :no_sprites_static} -> &render_cgb_no_sprites_static/4
+            {:dmg, :no_window_static} -> &render_dmg_no_window_static/4
+            {:cgb, :no_window_static} -> &render_cgb_no_window_static/4
             {:dmg, _capacity} -> &render_dmg/6
             {:cgb, _capacity} -> &render_cgb/6
           end
@@ -311,6 +399,18 @@ defmodule Beamicom.GB.Nx.PPURenderer do
 
       compiled ->
         compiled
+    end
+  end
+
+  defp static_kind(controls) do
+    sprites? = Enum.any?(controls, fn <<lcdc, _rest::binary>> -> Bitwise.band(lcdc, 0x02) != 0 end)
+    window? = Enum.any?(controls, fn <<lcdc, _rest::binary>> -> Bitwise.band(lcdc, 0x20) != 0 end)
+
+    case {sprites?, window?} do
+      {false, false} -> :background_static
+      {false, true} -> :no_sprites_static
+      {true, false} -> :no_window_static
+      {true, true} -> :static
     end
   end
 
