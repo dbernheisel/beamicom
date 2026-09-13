@@ -1,10 +1,11 @@
 defmodule Beamicom.GB.Nx.PPURenderer do
   @moduledoc """
-  Frame-wide DMG/CGB tile, window, sprite, priority, and palette renderer.
+  Frame-wide Game Boy renderer over frame-start PPU memory and timed writes.
 
-  The live PPU records compact mapper-timed tile-plane rows and the first ten
-  selected objects at HBlank. One EXLA operation expands and composes all
-  23,040 pixels at VBlank.
+  The live PPU sends a VRAM/OAM/palette snapshot, nine control bytes per
+  scanline, and the memory writes that become visible during the frame. EXLA
+  reconstructs scanline memory, performs tile-map lookup, evaluates all forty
+  OAM entries, applies the first-ten rule, and composes all pixels.
   """
 
   import Nx.Defn
@@ -12,56 +13,65 @@ defmodule Beamicom.GB.Nx.PPURenderer do
 
   @height 144
   @width 160
-  @tiles 21
-  @sprites 10
-  @layers_size @tiles * 3 * 2
-  @sprites_offset @layers_size
-  @control_offset @sprites_offset + @sprites * 5
-  @dmg_row_size @control_offset + 7
-  @cgb_pixel_row_size @control_offset + 4
-  @cgb_palette_size 64 * 2
-  @palette_capacities [1, 2, 4, 8, 16, 32, 64, 128, 144]
+  @vram_size 0x4000
+  @oam_size 160
+  @palette_size 128
+  @control_size 9
+  @event_capacities [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
   @impl true
   def prepare(model) when model in [:dmg, :cgb], do: nil
 
   @impl true
-  def render(:dmg, lines, state) when length(lines) == @height do
-    args = [tensor(IO.iodata_to_binary(lines), {@height, @dmg_row_size})]
-    frame = compiled(:dmg, args) |> apply(args)
-    {Nx.to_binary(frame), state}
-  end
+  def render(model, %{controls: controls, snapshot: snapshot, events: events}, state)
+      when model in [:dmg, :cgb] and length(controls) == @height do
+    {vram, oam, {bg_palette, obj_palette}} = snapshot
 
-  def render(:cgb, lines, state) when length(lines) == @height do
-    {pixel_rows, palettes, palette_indexes, palette_count} = pack_cgb(lines)
-    capacity = Enum.find(@palette_capacities, &(&1 >= palette_count))
-
-    palettes =
-      IO.iodata_to_binary([
-        palettes,
-        :binary.copy(<<0>>, (capacity - palette_count) * @cgb_palette_size)
-      ])
-
-    args = [
-      tensor(pixel_rows, {@height, @cgb_pixel_row_size}),
-      tensor(palettes, {capacity, 64, 2}),
-      tensor(palette_indexes, {@height})
+    base_args = [
+      tensor(controls, {@height, @control_size}),
+      tensor(Tuple.to_list(vram), {@vram_size}),
+      tensor(oam, {@oam_size}),
+      tensor(bg_palette <> obj_palette, {@palette_size})
     ]
 
-    frame = compiled(:cgb, args) |> apply(args)
+    {kind, args} =
+      case events do
+        [] ->
+          {:static, base_args}
+
+        events ->
+          {event_rows, event_count, capacity} = pack_events(events)
+
+          {capacity,
+           base_args ++
+             [Nx.tensor(event_rows, type: :s32), Nx.tensor(event_count, type: :s32)]}
+      end
+
+    frame = compiled(model, kind, args) |> apply(args)
     {Nx.to_binary(frame), state}
   end
 
-  defn compose_dmg(rows) do
-    {background, window, sprites, control} = unpack(rows, @dmg_row_size)
-    {bg_color, _bg_attrs} = layers(background, window, control)
-    {object_color, object_attrs, occupied} = objects(sprites)
+  defn render_dmg_static(controls, vram, oam, palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    render_dmg(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+  end
 
-    lcdc = column(control, 0) |> Nx.broadcast({@height, @width})
+  defn render_cgb_static(controls, vram, oam, palettes) do
+    events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
+    render_cgb(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+  end
+
+  defn render_dmg(controls, vram, oam, _palettes, events, event_count) do
+    {bg_color, _bg_attrs} = background(vram, controls, events, event_count, false)
+
+    {object_color, object_attrs, occupied} =
+      objects(vram, oam, controls, events, event_count, false)
+
+    lcdc = column(controls, 0) |> Nx.broadcast({@height, @width})
     bg_color = Nx.select(band(lcdc, 1) != 0, bg_color, 0)
-    bgp = column(control, 4) |> Nx.broadcast({@height, @width})
-    obp0 = column(control, 5) |> Nx.broadcast({@height, @width})
-    obp1 = column(control, 6) |> Nx.broadcast({@height, @width})
+    bgp = column(controls, 3)
+    obp0 = column(controls, 4)
+    obp1 = column(controls, 5)
     bg = band(shr(bgp, bg_color * 2), 3)
     object_palette = Nx.select(band(object_attrs, 0x10) != 0, obp1, obp0)
     object = band(shr(object_palette, object_color * 2), 3)
@@ -69,121 +79,192 @@ defmodule Beamicom.GB.Nx.PPURenderer do
     Nx.select(occupied and not behind_background, object, bg) |> Nx.as_type(:u8)
   end
 
-  defn compose_cgb(rows, palette_bytes, palette_indexes) do
-    {background, window, sprites, control} = unpack(rows, @cgb_pixel_row_size)
-    {bg_color, bg_attrs} = layers(background, window, control)
-    {object_color, object_attrs, occupied} = objects(sprites)
+  defn render_cgb(controls, vram, oam, palettes, events, event_count) do
+    {bg_color, bg_attrs} = background(vram, controls, events, event_count, true)
 
-    low = palette_bytes[[.., .., 0]] |> Nx.as_type(:s32)
-    high = palette_bytes[[.., .., 1]] |> Nx.as_type(:s32)
-    packed = low + high * 256
-    red = expand5(band(packed, 0x1F))
-    green = expand5(band(shr(packed, 5), 0x1F))
-    blue = expand5(band(shr(packed, 10), 0x1F))
+    {object_color, object_attrs, occupied} =
+      objects(vram, oam, controls, events, event_count, true)
+
+    palette_addresses = Nx.iota({@height, @palette_size}, axis: 1, type: :s32)
+    palette_lines = Nx.iota({@height, @palette_size}, axis: 0, type: :s32)
 
     palettes =
-      Nx.stack([red, green, blue], axis: 2)
+      timed_read(palettes, palette_addresses, palette_lines, 2, events, event_count)
+
+    low = palettes[[.., 0..126//2]] |> Nx.as_type(:s32)
+    high = palettes[[.., 1..127//2]] |> Nx.as_type(:s32)
+    packed = low + high * 256
+
+    colors =
+      Nx.stack(
+        [
+          expand5(band(packed, 0x1F)),
+          expand5(band(shr(packed, 5), 0x1F)),
+          expand5(band(shr(packed, 10), 0x1F))
+        ],
+        axis: 2
+      )
       |> Nx.as_type(:u8)
-      |> Nx.take(Nx.as_type(palette_indexes, :s32))
 
     bg_index = band(bg_attrs, 7) * 4 + bg_color
     object_index = 32 + band(object_attrs, 7) * 4 + object_color
-    bg = palette_gather(palettes, bg_index)
-    object = palette_gather(palettes, object_index)
-    lcdc = column(control, 0)
+    bg = palette_gather(colors, bg_index)
+    object = palette_gather(colors, object_index)
+    lcdc = column(controls, 0)
 
     priority =
       band(lcdc, 1) != 0 and bg_color != 0 and
         (band(bg_attrs, 0x80) != 0 or band(object_attrs, 0x80) != 0)
 
-    visible = occupied and not priority
-    visible = visible |> Nx.new_axis(2) |> Nx.broadcast({@height, @width, 3})
+    visible =
+      (occupied and not priority) |> Nx.new_axis(2) |> Nx.broadcast({@height, @width, 3})
+
     Nx.select(visible, object, bg)
   end
 
-  deftransformp unpack(rows, row_size) do
-    background = rows[[.., 0..(@tiles * 3 - 1)]] |> Nx.reshape({@height, @tiles, 3})
+  defnp background(vram, controls, events, event_count, cgb?) do
+    line = Nx.iota({@height, @width}, axis: 0, type: :s32)
+    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
+    lcdc = column(controls, 0)
+    scy = column(controls, 1)
+    scx = column(controls, 2)
+    wy = column(controls, 6)
+    wx = column(controls, 7)
+    window_line = column(controls, 8)
 
-    window =
-      rows[[.., (@tiles * 3)..(@layers_size - 1)]]
-      |> Nx.reshape({@height, @tiles, 3})
+    bg_y = band(line + scy, 0xFF)
+    bg_x = band(x + scx, 0xFF)
+    bg_map = Nx.select(band(lcdc, 0x08) == 0, 0x1800, 0x1C00)
+    {bg_color, bg_attrs} = tile(vram, bg_map, bg_x, bg_y, lcdc, events, event_count, cgb?)
+
+    window_x = wx - 7
+    window_map = Nx.select(band(lcdc, 0x40) == 0, 0x1800, 0x1C00)
+
+    {window_color, window_attrs} =
+      tile(
+        vram,
+        window_map,
+        Nx.max(x - window_x, 0),
+        window_line,
+        lcdc,
+        events,
+        event_count,
+        cgb?
+      )
+
+    visible =
+      band(lcdc, 0x20) != 0 and line >= wy and window_x < @width and x >= window_x
+
+    {Nx.select(visible, window_color, bg_color), Nx.select(visible, window_attrs, bg_attrs)}
+  end
+
+  defnp tile(vram, map, source_x, source_y, lcdc, events, event_count, cgb?) do
+    lcdc = Nx.broadcast(lcdc, {@height, @width})
+
+    map_address =
+      map + band(Nx.quotient(source_y, 8), 0x1F) * 32 +
+        band(Nx.quotient(source_x, 8), 0x1F)
+
+    lines = Nx.iota({@height, @width}, axis: 0, type: :s32)
+    tile_number = timed_read(vram, map_address, lines, 0, events, event_count)
+
+    attrs =
+      if cgb?,
+        do: timed_read(vram, map_address + 0x2000, lines, 0, events, event_count),
+        else: Nx.broadcast(0, {@height, @width})
+
+    row = band(source_y, 7)
+    row = Nx.select(cgb? and band(attrs, 0x40) != 0, 7 - row, row)
+    unsigned = tile_number * 16
+    signed = Nx.select(tile_number < 128, 0x1000 + unsigned, unsigned)
+    tile_address = Nx.select(band(lcdc, 0x10) != 0, unsigned, signed)
+    tile_address = tile_address + Nx.select(cgb? and band(attrs, 0x08) != 0, 0x2000, 0)
+    low = timed_read(vram, tile_address + row * 2, lines, 0, events, event_count)
+    high = timed_read(vram, tile_address + row * 2 + 1, lines, 0, events, event_count)
+    pixel = band(source_x, 7)
+    bit = Nx.select(cgb? and band(attrs, 0x20) != 0, pixel, 7 - pixel)
+    {bor(band(shr(low, bit), 1), band(shr(high, bit), 1) * 2), attrs}
+  end
+
+  defnp objects(vram, oam, controls, events, event_count, cgb?) do
+    oam_addresses = Nx.iota({@height, @oam_size}, axis: 1, type: :s32)
+    oam_lines = Nx.iota({@height, @oam_size}, axis: 0, type: :s32)
 
     sprites =
-      rows[[.., @sprites_offset..(@control_offset - 1)]]
-      |> Nx.reshape({@height, @sprites, 5})
+      timed_read(oam, oam_addresses, oam_lines, 1, events, event_count)
+      |> Nx.reshape({@height, 40, 4})
 
-    control = rows[[.., @control_offset..(row_size - 1)]]
-    {background, window, sprites, control}
+    y = sprites[[.., .., 0]] - 16
+    raw_x = sprites[[.., .., 1]]
+    left = raw_x - 8
+    tile_number = sprites[[.., .., 2]]
+    attrs = sprites[[.., .., 3]]
+    line = Nx.iota({@height, 40}, axis: 0, type: :s32)
+    height = Nx.select(band(column(controls, 0), 0x04) == 0, 8, 16)
+    height = Nx.broadcast(height, {@height, 40})
+    in_range = line >= y and line < y + height
+    selected = Nx.cumulative_sum(Nx.as_type(in_range, :s32), axis: 1) <= 10 and in_range
+
+    source_y = line - y
+    source_y = Nx.select(band(attrs, 0x40) != 0, height - 1 - source_y, source_y)
+
+    tile_number =
+      Nx.select(
+        height == 8,
+        tile_number,
+        band(tile_number, 0xFE) + Nx.quotient(source_y, 8)
+      )
+
+    address = tile_number * 16 + band(source_y, 7) * 2
+    address = address + Nx.select(cgb? and band(attrs, 0x08) != 0, 0x2000, 0)
+    sprite_lines = Nx.iota({@height, 40}, axis: 0, type: :s32)
+    low = timed_read(vram, address, sprite_lines, 0, events, event_count)
+    high = timed_read(vram, address + 1, sprite_lines, 0, events, event_count)
+
+    x = Nx.iota({@height, 40, @width}, axis: 2, type: :s32)
+    source_x = x - Nx.new_axis(left, 2)
+    safe_x = Nx.clip(source_x, 0, 7)
+    attrs3 = Nx.new_axis(attrs, 2) |> Nx.broadcast({@height, 40, @width})
+    bit = Nx.select(band(attrs3, 0x20) != 0, safe_x, 7 - safe_x)
+
+    color =
+      bor(
+        band(shr(Nx.new_axis(low, 2), bit), 1),
+        band(shr(Nx.new_axis(high, 2), bit), 1) * 2
+      )
+
+    enabled = (band(column(controls, 0), 0x02) != 0) |> Nx.new_axis(1)
+
+    visible =
+      Nx.new_axis(selected, 2) and enabled and source_x >= 0 and source_x < 8 and color != 0
+
+    indexes = Nx.iota({@height, 40}, axis: 1, type: :s32)
+    score = if cgb?, do: indexes, else: raw_x * 64 + indexes
+    score = Nx.new_axis(score, 2) |> Nx.broadcast({@height, 40, @width})
+    winner = Nx.argmin(Nx.select(visible, score, 1_000_000), axis: 1) |> Nx.new_axis(1)
+    color = Nx.take_along_axis(color, winner, axis: 1) |> Nx.squeeze(axes: [1])
+
+    attrs =
+      Nx.take_along_axis(Nx.broadcast(attrs3, {@height, 40, @width}), winner, axis: 1)
+      |> Nx.squeeze(axes: [1])
+
+    {color, attrs, Nx.any(visible, axes: [1])}
   end
 
-  defnp layers(background, window, control) do
-    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
-    fine = column(control, 1) |> Nx.as_type(:s32)
-    {bg_color, bg_attrs} = tile_pixels(background, x + fine)
+  defnp timed_read(memory, addresses, lines, kind, events, event_count) do
+    addresses = Nx.as_type(addresses, :s32)
+    values = Nx.take(memory, addresses) |> Nx.as_type(:s32)
 
-    wx = column(control, 3) |> Nx.as_type(:s32)
-    window_x = wx - 7
-    window_source = Nx.max(x - window_x, 0)
-    {window_color, window_attrs} = tile_pixels(window, window_source)
-    window_visible = column(control, 2) != 0 and x >= window_x
+    {_, values, _, _, _, _} =
+      while {index = Nx.tensor(0, type: :s32), values, addresses, lines, events, event_count},
+            index < event_count do
+        event = events[index]
+        active = event[1] == kind and lines >= event[0] and addresses == event[2]
+        values = Nx.select(active, event[3], values)
+        {index + 1, values, addresses, lines, events, event_count}
+      end
 
-    {Nx.select(window_visible, window_color, bg_color),
-     Nx.select(window_visible, window_attrs, bg_attrs)}
-  end
-
-  defnp tile_pixels(tiles, source_x) do
-    tile_index = Nx.quotient(source_x, 8)
-    pixel = band(source_x, 7)
-    low = Nx.take_along_axis(tiles[[.., .., 0]], tile_index, axis: 1) |> Nx.as_type(:s32)
-    high = Nx.take_along_axis(tiles[[.., .., 1]], tile_index, axis: 1) |> Nx.as_type(:s32)
-    attrs = Nx.take_along_axis(tiles[[.., .., 2]], tile_index, axis: 1) |> Nx.as_type(:s32)
-    bit = Nx.select(band(attrs, 0x20) != 0, pixel, 7 - pixel)
-    color = bor(band(shr(low, bit), 1), band(shr(high, bit), 1) * 2)
-    {color, attrs}
-  end
-
-  deftransformp objects(sprites) do
-    x = Nx.iota({@height, @width}, axis: 1, type: :s32)
-    color = Nx.broadcast(0, {@height, @width})
-    attrs = Nx.broadcast(0, {@height, @width})
-
-    {color, attrs} =
-      Enum.reduce((@sprites - 1)..0//-1, {color, attrs}, fn index, {color, attrs} ->
-        sprite = sprites[[.., index, ..]]
-        left = Nx.subtract(Nx.as_type(column(sprite, 0), :s32), 8)
-        low = sprite |> column(1) |> Nx.as_type(:s32) |> Nx.broadcast({@height, @width})
-        high = sprite |> column(2) |> Nx.as_type(:s32) |> Nx.broadcast({@height, @width})
-
-        sprite_attrs =
-          sprite |> column(3) |> Nx.as_type(:s32) |> Nx.broadcast({@height, @width})
-
-        valid = sprite |> column(4) |> Nx.not_equal(0) |> Nx.broadcast({@height, @width})
-        source = Nx.subtract(x, left)
-        safe_source = Nx.clip(source, 0, 7)
-
-        bit =
-          Nx.select(
-            Nx.not_equal(band(sprite_attrs, 0x20), 0),
-            safe_source,
-            Nx.subtract(7, safe_source)
-          )
-
-        sprite_color =
-          bor(band(shr(low, bit), 1), Nx.multiply(band(shr(high, bit), 1), 2))
-
-        visible =
-          Nx.logical_and(
-            valid,
-            Nx.logical_and(
-              Nx.greater_equal(source, 0),
-              Nx.logical_and(Nx.less(source, 8), Nx.not_equal(sprite_color, 0))
-            )
-          )
-
-        {Nx.select(visible, sprite_color, color), Nx.select(visible, sprite_attrs, attrs)}
-      end)
-
-    {color, attrs, Nx.not_equal(color, 0)}
+    values
   end
 
   defnp palette_gather(palettes, indexes) do
@@ -193,36 +274,37 @@ defmodule Beamicom.GB.Nx.PPURenderer do
 
   defnp(expand5(component), do: component * 8 + shr(component, 2))
 
-  defnp(column(tensor, index), do: tensor[[.., index]] |> Nx.reshape({@height, 1}))
+  defnp(column(tensor, index),
+    do: tensor[[.., index]] |> Nx.reshape({@height, 1}) |> Nx.as_type(:s32)
+  )
 
   defp tensor(data, shape),
     do: data |> IO.iodata_to_binary() |> Nx.from_binary(:u8) |> Nx.reshape(shape)
 
-  defp pack_cgb(lines) do
-    {rows, palettes, _lookup, indexes, count} =
-      Enum.reduce(lines, {[], [], %{}, [], 0}, fn line, {rows, palettes, lookup, indexes, count} ->
-        <<row::binary-size(@cgb_pixel_row_size), palette::binary-size(@cgb_palette_size)>> =
-          line
+  defp pack_events(events) do
+    count = length(events)
 
-        case lookup do
-          %{^palette => index} ->
-            {[row | rows], palettes, lookup, [index | indexes], count}
+    capacity =
+      Enum.find(@event_capacities, &(&1 >= count)) ||
+        raise("too many visible PPU writes in one frame: #{count}")
 
-          _ ->
-            {[row | rows], [palette | palettes], Map.put(lookup, palette, count), [count | indexes],
-             count + 1}
-        end
-      end)
-
-    {:lists.reverse(rows), :lists.reverse(palettes), :lists.reverse(indexes), count}
+    rows = Enum.map(events, &Tuple.to_list/1) ++ List.duplicate([0, 0, 0, 0], capacity - count)
+    {rows, count, capacity}
   end
 
-  defp compiled(kind, args) do
-    key = {__MODULE__, kind, Enum.map(args, &Nx.shape/1), :raw_rows_compiled}
+  defp compiled(model, kind, args) do
+    key = {__MODULE__, model, kind, :frame_memory_v2}
 
     case :persistent_term.get(key, nil) do
       nil ->
-        function = if kind == :dmg, do: &compose_dmg/1, else: &compose_cgb/3
+        function =
+          case {model, kind} do
+            {:dmg, :static} -> &render_dmg_static/4
+            {:cgb, :static} -> &render_cgb_static/4
+            {:dmg, _capacity} -> &render_dmg/6
+            {:cgb, _capacity} -> &render_cgb/6
+          end
+
         compiled = EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)
         :persistent_term.put(key, compiled)
         compiled

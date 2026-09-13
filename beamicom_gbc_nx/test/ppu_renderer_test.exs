@@ -32,6 +32,15 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
     assert actual == expected
   end
 
+  for model <- [:dmg, :cgb] do
+    test "#{model} applies timestamped VRAM, OAM, and palette writes on the correct lines" do
+      model = unquote(model)
+      native = timed_ppu_frame(model, :native)
+      accelerated = timed_ppu_frame(model, Beamicom.GB.Nx.PPURenderer)
+      assert accelerated == native
+    end
+  end
+
   test "block APU mixing is exact for routed audible channel output" do
     native = audible_audio(:native)
     accelerated = audible_audio(Beamicom.GB.Nx.APUBlockRenderer)
@@ -107,5 +116,33 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
 
     {count, pcm, _apu} = APU.take_samples(apu)
     {count, pcm}
+  end
+
+  defp timed_ppu_frame(model, renderer) do
+    ppu =
+      PPU.new(model: model, lcdc: 0x93, bgp: 0xE4, obp0: 0xE4)
+      |> PPU.set_renderer(renderer)
+      |> PPU.load_vram(0, :binary.copy(<<0x55, 0x33>>, 8))
+      |> PPU.load_vram(16, :binary.copy(<<0xAA, 0xCC>>, 8))
+      |> PPU.load_vram(0x1800, :binary.copy(<<0>>, 0x400))
+      |> PPU.load_oam(0, <<56, 24, 1, 0>>)
+
+    {ppu, _signals} = PPU.tick(ppu, 40 * 456 + 252)
+    {ppu, []} = PPU.write(ppu, 0x8000, 0xFF)
+    {ppu, []} = PPU.write(ppu, 0xFE00, 72)
+
+    ppu =
+      if model == :cgb do
+        {ppu, []} = PPU.write(ppu, 0xFF68, 0)
+        {ppu, []} = PPU.write(ppu, 0xFF69, 0x1F)
+        ppu
+      else
+        ppu
+      end
+
+    {_ppu, signals} = PPU.tick(ppu, 144 * 456 - ppu.clock)
+    {:frame, 0, frame} = Enum.find(signals, &match?({:frame, 0, _}, &1))
+    {frame, _state} = PPU.resolve_frame(frame)
+    frame
   end
 end

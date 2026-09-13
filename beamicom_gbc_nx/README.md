@@ -2,10 +2,11 @@
 
 Optional EXLA frame and audio renderers for `beamicom_gbc`, covering both DMG
 and CGB execution. The dependency-free core keeps LCD timing and memory access
-rules in Elixir. At each HBlank it records compact tile-plane rows and the first
-ten selected objects. At VBlank one EXLA operation performs bit-plane expansion,
-scroll and window selection, sprite composition, priority, and palette lookup
-for all 144×160 pixels.
+rules in Elixir. The renderer receives frame-start VRAM, OAM, and palette RAM,
+nine control bytes per scanline, and accepted visible memory writes tagged with
+the first line they affect. At VBlank one EXLA operation performs tile-map and
+pattern lookup, evaluates all 40 sprites with the first-10 rule, expands bit
+planes, and composes all 144×160 pixels.
 
 The default Nx audio renderer batches the already resolved channel levels. The
 package also contains `Beamicom.GB.Nx.APUSynthRenderer`, which accepts compact
@@ -47,25 +48,24 @@ mix gb.bench /path/to/game.gbc --frames 120 --repeats 3 \
   --renderer nx --audio-renderer nx_synth
 ```
 
-On the current EXLA CPU client, three 120-frame Link's Awakening DX runs gave
-these medians with identical video and audio hashes:
+On the current EXLA CPU client, two warmed 60-frame runs of the bundled CGB
+compatibility fixture gave these medians with identical video and audio hashes:
 
 | PPU | APU | FPS | Difference from native |
 | --- | --- | ---: | ---: |
-| native | block Elixir | 52.72 | — |
-| frame-wide Nx | block Nx | 51.90 | -1.6% |
+| native | block Elixir | 67.74 | — |
+| frame-wide Nx | block Nx | 54.41 | -19.7% |
 
-Moving deferred APU time into the compact bus state and skipping inactive
-device work raised both current paths. The dependency-free core now uses its
-Elixir block mixer by default, while the optional package selects the Nx block
-mixer at compile time. Their matching hashes confirm the same output; on this
-single-instance workload the Elixir path remains slightly faster. The raw-row
-and event-block boundaries remain available for larger kernels and future
+The dependency-free core uses its Elixir block mixer by default, while the
+optional package selects the Nx block mixer at compile time. Their matching
+hashes confirm the same output. On this single-instance CPU workload, full tile
+lookup and 40-sprite evaluation cost more in EXLA than the native scanline path;
+the frame-wide graph is intended to support larger kernels and future
 leading-axis batching.
 
-CGB capture keeps hardware BGR555 palettes and deduplicates them per frame.
-Link's Awakening used one palette snapshot across all 144 scanlines: the PPU
-input fell from 53,568 to 26,192 bytes per frame, and the isolated EXLA PPU
-boundary fell from roughly 116 ms to 79 ms over 120 frames. Runtime renderer
-detection is compiled out of normal APU builds; it is enabled only by the Nx
-cross-backend test configuration.
+The base frame payload is about 18 KB: 16 KB VRAM, 160-byte OAM, 128-byte CGB
+palette RAM, and 1,296 bytes of scanline controls. Each visible memory write adds
+one compact event. Sparse timed reads overlay those events at lookup sites, so
+the graph does not materialize a 144×16 KB copy of VRAM. Runtime renderer
+detection is compiled out of normal PPU and APU builds; it is enabled only by
+the Nx cross-backend test configuration.

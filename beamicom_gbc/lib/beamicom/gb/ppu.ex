@@ -21,6 +21,41 @@ defmodule Beamicom.GB.PPU do
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
   @renderer Application.compile_env(:beamicom_gbc, :ppu_renderer, :native)
+  @dynamic_renderers Application.compile_env(:beamicom_gbc, :allow_runtime_renderers, false)
+
+  if @renderer != :native and not @dynamic_renderers do
+    @compile {:nowarn_unused_function,
+              render_native_line: 1,
+              cgb_background_line: 3,
+              cgb_background_tiles: 4,
+              cgb_window_tiles: 3,
+              cgb_tile_row: 5,
+              reverse_row: 1,
+              apply_cgb_metadata: 2,
+              background_line: 3,
+              background_tiles: 4,
+              window_tiles: 3,
+              tile_row: 4,
+              combine_planes: 2,
+              apply_palette: 2,
+              apply_cgb_palette: 2,
+              apply_cgb_palette: 3,
+              select_sprites: 6,
+              sort_sprites: 1,
+              select_cgb_sprites: 6,
+              compose_sprites: 8,
+              compose_pixel: 10,
+              sprite_pixel: 5,
+              tile_pixel: 4,
+              compose_cgb_sprites: 8,
+              compose_cgb_pixels: 5,
+              compose_cgb_pixels_no_priority: 4,
+              cgb_pixel_no_priority: 4,
+              compose_cgb_pixels_with_priority: 4,
+              cgb_pixel_with_priority: 4,
+              cgb_sprite_overlay: 5,
+              merge_cgb_sprite_row: 4}
+  end
 
   @width 160
   @height 144
@@ -91,7 +126,9 @@ defmodule Beamicom.GB.PPU do
             color_cache: {@white_colors, @white_colors},
             color_indexes: {0, 0},
             renderer: @renderer,
-            renderer_state: nil
+            renderer_state: nil,
+            renderer_snapshot: nil,
+            renderer_events: []
 
   @type mode :: 0 | 1 | 2 | 3
   @type frame :: binary() | DeferredFrame.t()
@@ -113,7 +150,9 @@ defmodule Beamicom.GB.PPU do
           color_cache: {tuple(), tuple()},
           color_indexes: {byte(), byte()},
           renderer: :native | module(),
-          renderer_state: term()
+          renderer_state: term(),
+          renderer_snapshot: nil | {tuple(), binary(), {binary(), binary()}},
+          renderer_events: [{0..143, 0..2, non_neg_integer(), byte()}]
         }
 
   @doc "Creates a post-boot-shaped PPU with optional DMG register values."
@@ -146,16 +185,33 @@ defmodule Beamicom.GB.PPU do
       renderer_state: renderer_state
     }
 
+    ppu = reset_renderer_capture(ppu)
     %{ppu | stat_line: stat_condition?(ppu)}
   end
 
   @doc "Selects native scanline composition or an optional frame renderer."
   @spec set_renderer(t(), :native | :nx | module()) :: t()
-  def set_renderer(ppu, :native), do: %{ppu | renderer: :native, renderer_state: nil, lines: []}
+  def set_renderer(ppu, :native),
+    do: %{
+      ppu
+      | renderer: :native,
+        renderer_state: nil,
+        lines: [],
+        renderer_snapshot: nil,
+        renderer_events: []
+    }
+
   def set_renderer(ppu, :nx), do: set_renderer(ppu, Beamicom.GB.Nx.PPURenderer)
 
   def set_renderer(ppu, renderer) when is_atom(renderer) do
-    %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.model), lines: []}
+    ppu = %{
+      ppu
+      | renderer: renderer,
+        renderer_state: prepare_renderer(renderer, ppu.model),
+        lines: []
+    }
+
+    reset_renderer_capture(ppu)
   end
 
   defp prepare_renderer(renderer, model) do
@@ -273,11 +329,19 @@ defmodule Beamicom.GB.PPU do
 
   def write(%__MODULE__{model: :dmg, vram: vram} = ppu, address, value)
       when address in 0x8000..0x9FFF and value in 0..0xFF,
-      do: {%{ppu | vram: put_vram_byte(vram, address - 0x8000, value)}, []}
+      do:
+        {put_renderer_byte(ppu, :vram, address - 0x8000, value, %{
+           ppu
+           | vram: put_vram_byte(vram, address - 0x8000, value)
+         }), []}
 
   def write(%__MODULE__{vram: vram, vram_bank: bank} = ppu, address, value)
       when address in 0x8000..0x9FFF and value in 0..0xFF,
-      do: {%{ppu | vram: put_vram_byte(vram, bank * 0x2000 + address - 0x8000, value)}, []}
+      do:
+        {put_renderer_byte(ppu, :vram, bank * 0x2000 + address - 0x8000, value, %{
+           ppu
+           | vram: put_vram_byte(vram, bank * 0x2000 + address - 0x8000, value)
+         }), []}
 
   def write(
         %__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock} = ppu,
@@ -291,7 +355,11 @@ defmodule Beamicom.GB.PPU do
 
   def write(%__MODULE__{oam: oam} = ppu, address, value)
       when address in 0xFE00..0xFE9F and value in 0..0xFF,
-      do: {%{ppu | oam: put_binary_byte(oam, address - 0xFE00, value)}, []}
+      do:
+        {put_renderer_byte(ppu, :oam, address - 0xFE00, value, %{
+           ppu
+           | oam: put_binary_byte(oam, address - 0xFE00, value)
+         }), []}
 
   def write(ppu, 0xFF40, value) when value in 0..0xFF do
     old_lcdc = lcdc(ppu)
@@ -301,9 +369,11 @@ defmodule Beamicom.GB.PPU do
       cond do
         (value &&& 0x80) == 0 ->
           %{ppu | clock: 0, lines: [], window_line: 0, stat_line: false}
+          |> reset_renderer_capture()
 
         (old_lcdc &&& 0x80) == 0 ->
           %{ppu | clock: 0, lines: [], window_line: 0, stat_line: false}
+          |> reset_renderer_capture()
 
         true ->
           ppu
@@ -338,15 +408,21 @@ defmodule Beamicom.GB.PPU do
       when value in 0..0xFF,
       do: {%{ppu | color_indexes: put_elem(indexes, 0, value &&& 0xBF)}, []}
 
-  def write(%__MODULE__{model: :cgb} = ppu, 0xFF69, value) when value in 0..0xFF,
-    do: {write_color_data(ppu, 0, value), []}
+  def write(%__MODULE__{model: :cgb, color_indexes: indexes} = ppu, 0xFF69, value)
+      when value in 0..0xFF do
+    updated = write_color_data(ppu, 0, value)
+    {put_renderer_byte(ppu, :palette, elem(indexes, 0) &&& 0x3F, value, updated), []}
+  end
 
   def write(%__MODULE__{model: :cgb, color_indexes: indexes} = ppu, 0xFF6A, value)
       when value in 0..0xFF,
       do: {%{ppu | color_indexes: put_elem(indexes, 1, value &&& 0xBF)}, []}
 
-  def write(%__MODULE__{model: :cgb} = ppu, 0xFF6B, value) when value in 0..0xFF,
-    do: {write_color_data(ppu, 1, value), []}
+  def write(%__MODULE__{model: :cgb, color_indexes: indexes} = ppu, 0xFF6B, value)
+      when value in 0..0xFF do
+    updated = write_color_data(ppu, 1, value)
+    {put_renderer_byte(ppu, :palette, 64 + (elem(indexes, 1) &&& 0x3F), value, updated), []}
+  end
 
   def write(%__MODULE__{model: :dmg} = ppu, address, value)
       when address in 0xFF68..0xFF6B and value in 0..0xFF,
@@ -356,14 +432,16 @@ defmodule Beamicom.GB.PPU do
   @spec load_vram(t(), 0..0x3FFF, binary()) :: t()
   def load_vram(%__MODULE__{} = ppu, offset, data)
       when offset in 0..0x3FFF and is_binary(data) and offset + byte_size(data) <= 0x4000 do
-    %{ppu | vram: load_vram_bytes(ppu.vram, offset, data)}
+    updated = %{ppu | vram: load_vram_bytes(ppu.vram, offset, data)}
+    put_renderer_bytes(ppu, updated, :vram, offset, data)
   end
 
   @doc "Loads bytes directly into OAM, bypassing CPU access restrictions."
   @spec load_oam(t(), 0..0x9F, binary()) :: t()
   def load_oam(%__MODULE__{} = ppu, offset, data)
       when offset in 0..0x9F and is_binary(data) and offset + byte_size(data) <= 0xA0 do
-    %{ppu | oam: replace_binary(ppu.oam, offset, data)}
+    updated = %{ppu | oam: replace_binary(ppu.oam, offset, data)}
+    put_renderer_bytes(ppu, updated, :oam, offset, data)
   end
 
   @doc "Advances an exact number of LCD dots and returns chronological signals."
@@ -439,7 +517,7 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp handle_event(%__MODULE__{clock: @frame_dots} = ppu, :line_end) do
-    ppu = %{ppu | clock: 0, lines: [], window_line: 0}
+    ppu = %{ppu | clock: 0, lines: [], window_line: 0} |> reset_renderer_capture()
     refresh_stat(ppu)
   end
 
@@ -468,7 +546,11 @@ defmodule Beamicom.GB.PPU do
     deferred = %DeferredFrame{
       model: ppu.model,
       renderer: ppu.renderer,
-      lines: :lists.reverse(ppu.lines),
+      lines: %{
+        controls: :lists.reverse(ppu.lines),
+        snapshot: ppu.renderer_snapshot,
+        events: :lists.reverse(ppu.renderer_events)
+      },
       state: ppu.renderer_state
     }
 
@@ -482,8 +564,16 @@ defmodule Beamicom.GB.PPU do
 
   def resolve_frame(frame) when is_binary(frame), do: {frame, nil}
 
-  defp render_line(%__MODULE__{renderer: :native} = ppu), do: render_native_line(ppu)
-  defp render_line(%__MODULE__{} = ppu), do: capture_renderer_line(ppu)
+  if @dynamic_renderers do
+    defp render_line(%__MODULE__{renderer: :native} = ppu), do: render_native_line(ppu)
+    defp render_line(%__MODULE__{} = ppu), do: capture_renderer_controls(ppu)
+  else
+    if @renderer == :native do
+      defp render_line(ppu), do: render_native_line(ppu)
+    else
+      defp render_line(ppu), do: capture_renderer_controls(ppu)
+    end
+  end
 
   # CGB composition remains separate from DMG so color metadata and RGB output
   # add no work to the common DMG path.
@@ -548,125 +638,99 @@ defmodule Beamicom.GB.PPU do
     %{ppu | lines: [line | ppu.lines]}
   end
 
-  defp capture_renderer_line(
-         %__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, bgp, obp0, obp1, _, _}} =
-           ppu
-       ) do
-    line_number = ly(ppu)
-    {background, window, window_visible, ppu} = raw_tile_layers(ppu, line_number, lcdc, false)
-    sprites = raw_sprite_rows(ppu, line_number, lcdc, false)
-
-    # bg/window each contain 21 {low, high, attrs} rows. Sprite rows contain
-    # ten {x + 8, low, high, attrs, valid} entries. Keeping this scanline-time
-    # snapshot compact preserves mid-frame VRAM/register effects while leaving
-    # bit-plane expansion and all 160-pixel composition to the frame renderer.
-    line =
-      background <>
-        window <>
-        sprites <>
-        <<lcdc &&& 0x03, elem(ppu.registers, 3) &&& 7, window_visible, elem(ppu.registers, 9),
-          bgp, obp0, obp1>>
-
-    %{ppu | lines: [line | ppu.lines]}
-  end
-
-  defp capture_renderer_line(
-         %__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
-       ) do
-    line_number = ly(ppu)
-    {background, window, window_visible, ppu} = raw_tile_layers(ppu, line_number, lcdc, true)
-    sprites = raw_sprite_rows(ppu, line_number, lcdc, true)
-
-    # Preserve the scanline's hardware palette RAM. The frame renderer expands
-    # BGR555 to RGB once in its fused tensor program instead of copying the
-    # 192-byte host-side RGB cache into every captured row.
-    {bg, obj} = ppu.color_ram
-    palettes = bg <> obj
-
-    line =
-      background <>
-        window <>
-        sprites <>
-        <<lcdc &&& 0x03, elem(ppu.registers, 3) &&& 7, window_visible, elem(ppu.registers, 9)>> <>
-        palettes
-
-    %{ppu | lines: [line | ppu.lines]}
-  end
-
-  defp raw_tile_layers(ppu, line, lcdc, cgb?) do
-    {_, _, scy, scx, _, _, _, _, wy, wx} = ppu.registers
-    bg_map = if (lcdc &&& 0x08) == 0, do: 0x1800, else: 0x1C00
-    bg_y = line + scy &&& 0xFF
-
-    background =
-      if cgb? or (lcdc &&& 0x01) != 0,
-        do: raw_tile_rows(ppu.vram, bg_map, bg_y, scx >>> 3, lcdc, cgb?),
-        else: :binary.copy(<<0>>, 21 * 3)
-
-    window_visible =
-      if (lcdc &&& 0x20) != 0 and line >= wy and wx - 7 < @width, do: 1, else: 0
-
-    if window_visible == 1 do
-      window_map = if (lcdc &&& 0x40) == 0, do: 0x1800, else: 0x1C00
-      window = raw_tile_rows(ppu.vram, window_map, ppu.window_line, 0, lcdc, cgb?)
-      {background, window, 1, %{ppu | window_line: ppu.window_line + 1}}
-    else
-      {background, :binary.copy(<<0>>, 21 * 3), 0, ppu}
+  if @renderer != :native or @dynamic_renderers do
+    defp capture_renderer_controls(
+           %__MODULE__{registers: {lcdc, _, scy, scx, _, bgp, obp0, obp1, wy, wx}} = ppu
+         ) do
+      line = ly(ppu)
+      visible = (lcdc &&& 0x20) != 0 and line >= wy and wx - 7 < @width
+      controls = <<lcdc, scy, scx, bgp, obp0, obp1, wy, wx, ppu.window_line>>
+      ppu = if visible, do: %{ppu | window_line: ppu.window_line + 1}, else: ppu
+      %{ppu | lines: [controls | ppu.lines]}
     end
   end
 
-  defp raw_tile_rows(vram, map, y, first_tile, lcdc, cgb?) do
-    tile_y = y >>> 3 &&& 0x1F
-    row = y &&& 7
+  if @renderer == :native and not @dynamic_renderers do
+    defp reset_renderer_capture(ppu),
+      do: %{ppu | renderer_snapshot: nil, renderer_events: []}
 
-    for column <- 0..20, into: <<>> do
-      tile_x = first_tile + column &&& 0x1F
-      map_offset = map + tile_y * 32 + tile_x
-      tile = vram_byte(vram, map_offset)
-      attrs = if cgb?, do: vram_byte(vram, 0x2000 + map_offset), else: 0
-      source_row = if cgb? and (attrs &&& 0x40) != 0, do: 7 - row, else: row
-
-      tile_offset =
-        if (lcdc &&& 0x10) == 0,
-          do: elem(@signed_tile_offsets, tile),
-          else: tile * 16
-
-      tile_offset = if cgb? and (attrs &&& 0x08) != 0, do: tile_offset + 0x2000, else: tile_offset
-      low = vram_byte(vram, tile_offset + source_row * 2)
-      high = vram_byte(vram, tile_offset + source_row * 2 + 1)
-      <<low, high, attrs>>
+    defp put_renderer_bytes(_old, updated, _kind, _offset, _data), do: updated
+    defp put_renderer_byte(_old, _kind, _address, _value, updated), do: updated
+  else
+    if @dynamic_renderers do
+      defp reset_renderer_capture(%__MODULE__{renderer: :native} = ppu),
+        do: %{ppu | renderer_snapshot: nil, renderer_events: []}
     end
-  end
 
-  defp raw_sprite_rows(ppu, line, lcdc, cgb?) do
-    if (lcdc &&& 0x02) == 0 do
-      :binary.copy(<<0>>, 10 * 5)
-    else
-      height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
+    defp reset_renderer_capture(ppu),
+      do: %{ppu | renderer_snapshot: {ppu.vram, ppu.oam, ppu.color_ram}, renderer_events: []}
 
-      sprites =
-        if cgb?,
-          do: select_cgb_sprites(ppu.oam, line, height, 0, 0, []),
-          else: select_sprites(ppu.oam, line, height, 0, 0, [])
-
-      rows = Enum.map(sprites, &raw_sprite_row(&1, ppu.vram, line, height, cgb?))
-      IO.iodata_to_binary([rows, :binary.copy(<<0>>, (10 - length(rows)) * 5)])
+    defp put_renderer_bytes(old, updated, kind, offset, data) do
+      data
+      |> :binary.bin_to_list()
+      |> Enum.with_index(offset)
+      |> Enum.reduce(updated, fn {value, address}, ppu ->
+        put_renderer_byte(old, kind, address, value, ppu)
+      end)
     end
-  end
 
-  defp raw_sprite_row(sprite, vram, line, height, cgb?) do
-    {left, top, tile, attrs} =
-      case sprite do
-        {left, top, tile, attrs, _index} -> {left, top, tile, attrs}
-        {left, top, tile, attrs} -> {left, top, tile, attrs}
+    if @dynamic_renderers do
+      defp put_renderer_byte(
+             %__MODULE__{renderer: :native},
+             _kind,
+             _address,
+             _value,
+             updated
+           ),
+           do: updated
+    end
+
+    defp put_renderer_byte(old, kind, address, value, updated) do
+      effective_line = ly(old) + if(dot(old) >= @transfer_end, do: 1, else: 0)
+
+      cond do
+        memory_byte(old, kind, address) == memory_byte(updated, kind, address) ->
+          updated
+
+        effective_line == 0 and old.lines == [] ->
+          %{
+            updated
+            | renderer_snapshot: snapshot_put(updated.renderer_snapshot, kind, address, value)
+          }
+
+        effective_line < @height ->
+          kind = if kind == :vram, do: 0, else: if(kind == :oam, do: 1, else: 2)
+
+          %{
+            updated
+            | renderer_events: [{effective_line, kind, address, value} | updated.renderer_events]
+          }
+
+        true ->
+          updated
       end
+    end
 
-    source_y = line - top
-    source_y = if (attrs &&& 0x40) == 0, do: source_y, else: height - 1 - source_y
-    tile = if height == 8, do: tile, else: (tile &&& 0xFE) + (source_y >>> 3)
-    bank_offset = if cgb? and (attrs &&& 0x08) != 0, do: 0x2000, else: 0
-    offset = bank_offset + tile * 16 + (source_y &&& 7) * 2
-    <<left + 8, vram_byte(vram, offset), vram_byte(vram, offset + 1), attrs, 1>>
+    defp memory_byte(ppu, :vram, address), do: vram_byte(ppu.vram, address)
+    defp memory_byte(ppu, :oam, address), do: :binary.at(ppu.oam, address)
+
+    defp memory_byte(ppu, :palette, address) when address < 64,
+      do: :binary.at(elem(ppu.color_ram, 0), address)
+
+    defp memory_byte(ppu, :palette, address),
+      do: :binary.at(elem(ppu.color_ram, 1), address - 64)
+
+    defp snapshot_put({vram, oam, palettes}, :vram, address, value),
+      do: {put_vram_byte(vram, address, value), oam, palettes}
+
+    defp snapshot_put({vram, oam, palettes}, :oam, address, value),
+      do: {vram, put_binary_byte(oam, address, value), palettes}
+
+    defp snapshot_put({vram, oam, {bg, obj}}, :palette, address, value) when address < 64,
+      do: {vram, oam, {put_binary_byte(bg, address, value), obj}}
+
+    defp snapshot_put({vram, oam, {bg, obj}}, :palette, address, value),
+      do: {vram, oam, {bg, put_binary_byte(obj, address - 64, value)}}
   end
 
   # Each CGB background byte packs color in bits 0..1, palette in bits 2..4,
