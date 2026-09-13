@@ -67,7 +67,7 @@ defmodule BeamicomPhx.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      {:beamicom, path: "../beamicom"},
+      {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
       {:beamicom_host, path: "../beamicom_host"},
       {:beamicom_stream, path: "../beamicom_stream"},

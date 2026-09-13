@@ -24,7 +24,7 @@ defmodule BeamicomV4L2.MixProject do
 
   defp deps do
     [
-      {:beamicom, path: "../beamicom"},
+      {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
       {:beamicom_host, path: "../beamicom_host"},
       {:rustler_precompiled, "~> 0.9"},

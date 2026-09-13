@@ -1,9 +1,0 @@
-Compiling 1 file (.ex)
-Generated nx_nes app
-%{
-  ppu_lines: 2160,
-  apu_segments: 9235,
-  ppu_modes: %{{0, false} => 2160},
-  dmc_segments: 0,
-  mmc5_segments: 8204
-}

@@ -1,6 +1,6 @@
 # BeamicomScenic
 
-Local-verification client for the [`beamicom`](../beamicom/README.md) NES and
+Local-verification client for the [`beamicom_nes`](../beamicom_nes/README.md) NES and
 Game Boy / Game Boy Color cores. A [Scenic](https://hexdocs.pm/scenic) window
 renders each core's native video output and an optional ffmpeg player process
 handles audio. Keeping this host separate means neither emulator core takes a
@@ -64,7 +64,7 @@ mix compile
 iex -S mix
 ```
 ```elixir
-Beamicom.Scenic.play("../beamicom/roms/game.nes")
+Beamicom.Scenic.play("../beamicom_nes/roms/game.nes")
 Beamicom.Scenic.play("/path/to/open-source-game.gbc")
 Beamicom.Scenic.play("/path/to/game.gb", scale: 4)   # integer scale, default 3
 Beamicom.Scenic.play("/path/to/game.gbc", speed: 0.5) # half speed, default 1.0

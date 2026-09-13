@@ -1,6 +1,6 @@
 # BeamicomPhx
 
-Browser client for the [`beamicom`](../beamicom/README.md) NES and
+Browser client for the [`beamicom_nes`](../beamicom_nes/README.md) NES and
 [`beamicom_gbc`](../beamicom_gbc/README.md) Game Boy emulator cores. A Phoenix
 LiveView app streams the active console's audio/video over WebRTC and relays
 controller input back through the shared host/stream boundaries.
