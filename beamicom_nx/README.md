@@ -37,8 +37,8 @@ improves this three-sink workload by 17.0%.
 
 The optional `nx_atlas` renderer expands immutable CHR ROM into a resident tile
 atlas at cartridge load. Deferring both background and sprite pattern fetches
-raises the median full fifteen-second Castlevania III result to 78.99 FPS. That
-is 18.7% faster than native with three RGB consumers and 1.5% faster than the Nx
+raises the median full fifteen-second Castlevania III result to 79.09 FPS. That
+is 18.9% faster than native with three RGB consumers and 1.6% faster than the Nx
 byte renderer. The byte renderer remains the default because it also handles
 mutable and latch-driven CHR directly; the atlas path falls back to byte capture
 for those cartridges.

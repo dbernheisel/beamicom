@@ -301,8 +301,11 @@ defmodule Beamicom.NES.PPU do
 
   defp atlas_bg?(ppu) do
     nx_renderer?(ppu) and ppu.chr_latch == nil and byte_size(ppu.chr) > 0 and
-      Enum.all?(Tuple.to_list(bg_banks(ppu)) ++ Tuple.to_list(ppu.chr_banks), &(&1 >= 0))
+      rom_banks?(bg_banks(ppu)) and rom_banks?(ppu.chr_banks)
   end
+
+  defp rom_banks?({a, b, c, d, e, f, g, h}),
+    do: a >= 0 and b >= 0 and c >= 0 and d >= 0 and e >= 0 and f >= 0 and g >= 0 and h >= 0
 
   defp nx_blank_line(%{renderer_state: nil}) do
     {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, 0, 0, <<0::size(8 * 8)>>,
@@ -406,24 +409,30 @@ defmodule Beamicom.NES.PPU do
   end
 
   defp sprite_ref_planes(sprites) do
-    padded = Enum.take(sprites, 8) ++ List.duplicate(nil, max(8 - length(sprites), 0))
-
-    Enum.reduce(padded, {[], [], [], []}, fn
-      nil, {xs, refs, attrs, valid} ->
-        {[0 | xs], [<<0::native-unsigned-32>> | refs], [0 | attrs], [0 | valid]}
-
-      sp, {xs, refs, attrs, valid} ->
-        {[sp.x | xs], [<<sp.ref::native-unsigned-32>> | refs], [sp.attr | attrs], [1 | valid]}
-    end)
-    |> then(fn {xs, refs, attrs, valid} ->
-      {
-        xs |> Enum.reverse() |> :erlang.list_to_binary(),
-        refs |> Enum.reverse() |> IO.iodata_to_binary(),
-        attrs |> Enum.reverse() |> :erlang.list_to_binary(),
-        valid |> Enum.reverse() |> :erlang.list_to_binary()
-      }
-    end)
+    sprite_ref_planes(sprites, 0, [], [], [], [])
   end
+
+  defp sprite_ref_planes(_sprites, 8, xs, refs, attrs, valid),
+    do:
+      {:erlang.list_to_binary(Enum.reverse(xs)), refs |> Enum.reverse() |> IO.iodata_to_binary(),
+       :erlang.list_to_binary(Enum.reverse(attrs)), :erlang.list_to_binary(Enum.reverse(valid))}
+
+  defp sprite_ref_planes([], i, xs, refs, attrs, valid),
+    do:
+      sprite_ref_planes([], i + 1, [0 | xs], [<<0::native-unsigned-32>> | refs], [0 | attrs], [
+        0 | valid
+      ])
+
+  defp sprite_ref_planes([sp | rest], i, xs, refs, attrs, valid),
+    do:
+      sprite_ref_planes(
+        rest,
+        i + 1,
+        [sp.x | xs],
+        [<<sp.ref::native-unsigned-32>> | refs],
+        [sp.attr | attrs],
+        [1 | valid]
+      )
 
   # Fetch the 33 background tiles that cover the 256 visible pixels plus the fine-x
   # slack, walking coarse X with inc_hori. Each entry is {pattern-lo, pattern-hi,
