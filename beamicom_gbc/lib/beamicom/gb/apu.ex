@@ -70,6 +70,8 @@ defmodule Beamicom.GB.APU do
 
   import Bitwise
 
+  @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
+
   @clock_rate 4_194_304
   @sample_rate 44_100
   @sequencer_period 8_192
@@ -105,7 +107,9 @@ defmodule Beamicom.GB.APU do
             sample_phase: 0,
             pending_dots: 0,
             samples: [],
-            sample_count: 0
+            sample_count: 0,
+            renderer: :native,
+            renderer_state: nil
 
   @type t :: %__MODULE__{}
 
@@ -114,7 +118,37 @@ defmodule Beamicom.GB.APU do
   def new(opts \\ []) when is_list(opts) do
     model = Keyword.get(opts, :model, :dmg)
     unless model in [:dmg, :cgb], do: raise(ArgumentError, "model must be :dmg or :cgb")
-    %__MODULE__{model: model}
+
+    renderer =
+      case Application.get_env(:beamicom_gbc, :apu_renderer, :native) do
+        :nx_block -> Beamicom.GB.Nx.APUBlockRenderer
+        configured -> configured
+      end
+
+    renderer_state = prepare_renderer(renderer, model)
+    %__MODULE__{model: model, renderer: renderer, renderer_state: renderer_state}
+  end
+
+  @doc "Selects inline native mixing or an optional block renderer."
+  @spec set_renderer(t(), :native | :nx_block | module()) :: t()
+  def set_renderer(apu, :native),
+    do: %{apu | renderer: :native, renderer_state: nil, samples: [], sample_count: 0}
+
+  def set_renderer(apu, :nx_block),
+    do: set_renderer(apu, Beamicom.GB.Nx.APUBlockRenderer)
+
+  def set_renderer(apu, renderer) when is_atom(renderer) do
+    state = prepare_renderer(renderer, apu.model)
+    %{apu | renderer: renderer, renderer_state: state, samples: [], sample_count: 0}
+  end
+
+  defp prepare_renderer(:native, _model), do: nil
+
+  defp prepare_renderer(renderer, model) do
+    unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
+      do: raise("invalid Game Boy APU renderer: #{inspect(renderer)}")
+
+    apply(renderer, :prepare, [model])
   end
 
   @doc "Creates the stable, documented portion of the post-boot audio state."
@@ -303,8 +337,7 @@ defmodule Beamicom.GB.APU do
     seq_ticks = div(seq_total, @sequencer_period)
     seq_phase = seq_total - seq_ticks * @sequencer_period
 
-    silence =
-      if count == 0, do: apu.samples, else: [:binary.copy(@silence, count) | apu.samples]
+    silence = append_silence(apu, count)
 
     %{
       apu
@@ -339,8 +372,15 @@ defmodule Beamicom.GB.APU do
   @spec take_samples(t()) :: {non_neg_integer(), binary(), t()}
   def take_samples(%__MODULE__{} = apu) do
     %__MODULE__{samples: samples, sample_count: count} = apu = flush(apu)
-    pcm = samples |> :lists.reverse() |> IO.iodata_to_binary()
-    {count, pcm, %{apu | samples: [], sample_count: 0}}
+
+    {pcm, renderer_state} =
+      if apu.renderer == :native do
+        {samples |> :lists.reverse() |> IO.iodata_to_binary(), nil}
+      else
+        apply(apu.renderer, :render, [apu.renderer_state, :lists.reverse(samples), count])
+      end
+
+    {count, pcm, %{apu | samples: [], sample_count: 0, renderer_state: renderer_state}}
   end
 
   defp advance(apu, 0), do: apu
@@ -356,7 +396,7 @@ defmodule Beamicom.GB.APU do
 
     apu =
       if sample_phase >= @clock_rate do
-        sample = mix_sample(apu)
+        sample = if apu.renderer == :native, do: mix_sample(apu), else: sample_levels(apu)
 
         %{
           apu
@@ -531,6 +571,20 @@ defmodule Beamicom.GB.APU do
     left = routed_sum(outputs, nr51 >>> 4) * ((nr50 >>> 4 &&& 7) + 1) * 64
     <<clamp16(left)::little-signed-16, clamp16(right)::little-signed-16>>
   end
+
+  defp sample_levels(apu) do
+    <<pulse_output(apu.ch1)::little-signed-16, pulse_output(apu.ch2)::little-signed-16,
+      wave_output(apu.ch3, apu.wave_ram)::little-signed-16,
+      noise_output(apu.ch4)::little-signed-16, elem(apu.registers, 20)::little-signed-16,
+      elem(apu.registers, 21)::little-signed-16>>
+  end
+
+  defp append_silence(apu, 0), do: apu.samples
+
+  defp append_silence(%__MODULE__{renderer: :native} = apu, count),
+    do: [:binary.copy(@silence, count) | apu.samples]
+
+  defp append_silence(apu, count), do: [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples]
 
   defp routed_sum(outputs, routes) do
     if((routes &&& 1) != 0, do: elem(outputs, 0), else: 0) +

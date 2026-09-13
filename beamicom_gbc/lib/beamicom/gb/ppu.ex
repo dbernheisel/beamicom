@@ -17,6 +17,8 @@ defmodule Beamicom.GB.PPU do
 
   import Bitwise
 
+  @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
+
   @width 160
   @height 144
   @dots_per_line 456
@@ -84,7 +86,9 @@ defmodule Beamicom.GB.PPU do
             vram_bank: 0,
             color_ram: {@blank_color_ram, @blank_color_ram},
             color_cache: {@white_colors, @white_colors},
-            color_indexes: {0, 0}
+            color_indexes: {0, 0},
+            renderer: :native,
+            renderer_state: nil
 
   @type mode :: 0 | 1 | 2 | 3
   @type signal :: :vblank | :lcd_stat | {:frame, non_neg_integer(), binary()}
@@ -103,7 +107,9 @@ defmodule Beamicom.GB.PPU do
           vram_bank: 0 | 1,
           color_ram: {binary(), binary()},
           color_cache: {tuple(), tuple()},
-          color_indexes: {byte(), byte()}
+          color_indexes: {byte(), byte()},
+          renderer: :native | module(),
+          renderer_state: term()
         }
 
   @doc "Creates a post-boot-shaped PPU with optional DMG register values."
@@ -124,15 +130,43 @@ defmodule Beamicom.GB.PPU do
 
     model = Keyword.get(opts, :model, :dmg)
 
+    renderer =
+      case Application.get_env(:beamicom_gbc, :ppu_renderer, :native) do
+        :nx -> Beamicom.GB.Nx.PPURenderer
+        configured -> configured
+      end
+
+    renderer_state = prepare_renderer(renderer, model)
+
     ppu = %__MODULE__{
       vram: @blank_vram,
       oam: @blank_oam,
       frame: initial_frame(model),
       registers: registers,
-      model: model
+      model: model,
+      renderer: renderer,
+      renderer_state: renderer_state
     }
 
     %{ppu | stat_line: stat_condition?(ppu)}
+  end
+
+  @doc "Selects native scanline composition or an optional frame renderer."
+  @spec set_renderer(t(), :native | :nx | module()) :: t()
+  def set_renderer(ppu, :native), do: %{ppu | renderer: :native, renderer_state: nil, lines: []}
+  def set_renderer(ppu, :nx), do: set_renderer(ppu, Beamicom.GB.Nx.PPURenderer)
+
+  def set_renderer(ppu, renderer) when is_atom(renderer) do
+    %{ppu | renderer: renderer, renderer_state: prepare_renderer(renderer, ppu.model), lines: []}
+  end
+
+  defp prepare_renderer(:native, _model), do: nil
+
+  defp prepare_renderer(renderer, model) do
+    unless Code.ensure_loaded?(renderer) and function_exported?(renderer, :prepare, 1),
+      do: raise("invalid Game Boy PPU renderer: #{inspect(renderer)}")
+
+    apply(renderer, :prepare, [model])
   end
 
   @doc "Current LCD scanline, derived from the compact frame clock."
@@ -411,25 +445,46 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp handle_event(%__MODULE__{clock: @vblank_start} = ppu, :line_end) do
-    frame = ppu.lines |> :lists.reverse() |> IO.iodata_to_binary()
+    {frame, renderer_state} = finish_frame(ppu)
     number = ppu.frame_number
-    ppu = %{ppu | frame: frame, lines: [], frame_number: number + 1}
+
+    ppu = %{
+      ppu
+      | frame: frame,
+        lines: [],
+        frame_number: number + 1,
+        renderer_state: renderer_state
+    }
+
     {ppu, stat} = refresh_stat(ppu)
     {ppu, [{:frame, number, frame}, :vblank | stat]}
   end
 
   defp handle_event(ppu, :line_end), do: refresh_stat(ppu)
 
+  defp finish_frame(%__MODULE__{renderer: :native} = ppu),
+    do: {ppu.lines |> :lists.reverse() |> IO.iodata_to_binary(), nil}
+
+  defp finish_frame(ppu),
+    do: apply(ppu.renderer, :render, [ppu.model, :lists.reverse(ppu.lines), ppu.renderer_state])
+
+  defp render_line(%__MODULE__{renderer: :native} = ppu), do: render_native_line(ppu)
+  defp render_line(%__MODULE__{} = ppu), do: capture_renderer_line(ppu)
+
   # CGB composition remains separate from DMG so color metadata and RGB output
   # add no work to the common DMG path.
-  defp render_line(%__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu)
+  defp render_native_line(
+         %__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
+       )
        when (lcdc &&& 0x02) == 0 do
     {colors, ppu} = cgb_background_line(ppu, ly(ppu), lcdc)
     line = apply_cgb_palette(colors, elem(ppu.color_cache, 0))
     %{ppu | lines: [line | ppu.lines]}
   end
 
-  defp render_line(%__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu) do
+  defp render_native_line(
+         %__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
+       ) do
     line_number = ly(ppu)
     {colors, ppu} = cgb_background_line(ppu, line_number, lcdc)
     height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
@@ -452,19 +507,23 @@ defmodule Beamicom.GB.PPU do
   end
 
   # Both layers disabled is common for blanking and avoids all tile/OAM work.
-  defp render_line(%__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu)
+  defp render_native_line(
+         %__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
+       )
        when (lcdc &&& 0x03) == 0,
        do: %{ppu | lines: [@blank_line | ppu.lines]}
 
   # Object-disabled games take the background-only path without OAM scanning.
-  defp render_line(%__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, bgp, _, _, _, _}} = ppu)
+  defp render_native_line(
+         %__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, bgp, _, _, _, _}} = ppu
+       )
        when (lcdc &&& 0x02) == 0 do
     {colors, ppu} = background_line(ppu, ly(ppu), lcdc)
     line = apply_palette(colors, bgp)
     %{ppu | lines: [line | ppu.lines]}
   end
 
-  defp render_line(
+  defp render_native_line(
          %__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, bgp, obp0, obp1, _, _}} = ppu
        ) do
     line_number = ly(ppu)
@@ -472,6 +531,47 @@ defmodule Beamicom.GB.PPU do
     height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
     sprites = select_sprites(ppu.oam, line_number, height, 0, 0, [])
     line = compose_sprites(colors, sprites, ppu.vram, line_number, height, bgp, obp0, obp1)
+    %{ppu | lines: [line | ppu.lines]}
+  end
+
+  defp capture_renderer_line(
+         %__MODULE__{model: :dmg, registers: {lcdc, _, _, _, _, bgp, obp0, obp1, _, _}} =
+           ppu
+       ) do
+    line_number = ly(ppu)
+    {colors, ppu} = background_line(ppu, line_number, lcdc)
+
+    objects =
+      if (lcdc &&& 0x02) == 0 do
+        @blank_line
+      else
+        height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
+        sprites = select_sprites(ppu.oam, line_number, height, 0, 0, [])
+        dmg_sprite_overlay(Enum.reverse(sprites), ppu.vram, line_number, height, @blank_line)
+      end
+
+    line = colors <> objects <> <<bgp, obp0, obp1>>
+    %{ppu | lines: [line | ppu.lines]}
+  end
+
+  defp capture_renderer_line(
+         %__MODULE__{model: :cgb, registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu
+       ) do
+    line_number = ly(ppu)
+    {colors, ppu} = cgb_background_line(ppu, line_number, lcdc)
+
+    objects =
+      if (lcdc &&& 0x02) == 0 do
+        @blank_line
+      else
+        height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
+        sprites = select_cgb_sprites(ppu.oam, line_number, height, 0, 0, [])
+        cgb_sprite_overlay(sprites, ppu.vram, line_number, height, @blank_line)
+      end
+
+    {bg, obj} = ppu.color_cache
+    palettes = IO.iodata_to_binary([Tuple.to_list(bg), Tuple.to_list(obj)])
+    line = colors <> objects <> <<lcdc &&& 1>> <> palettes
     %{ppu | lines: [line | ppu.lines]}
   end
 
@@ -763,6 +863,68 @@ defmodule Beamicom.GB.PPU do
     (vram_byte(vram, offset) >>> bit &&& 1) |||
       (vram_byte(vram, offset + 1) >>> bit &&& 1) <<< 1
   end
+
+  # DMG objects are processed from lowest to highest priority here, so every
+  # opaque pixel may replace the prior value. The final overlay therefore
+  # matches sprite_pixel/5's first-visible-object rule without scanning ten
+  # objects for each of the 160 output pixels.
+  defp dmg_sprite_overlay([], _vram, _line, _height, overlay), do: overlay
+
+  defp dmg_sprite_overlay(
+         [{left, _top, _tile, _attrs, _index} | sprites],
+         vram,
+         line,
+         height,
+         overlay
+       )
+       when left >= @width or left <= -8,
+       do: dmg_sprite_overlay(sprites, vram, line, height, overlay)
+
+  defp dmg_sprite_overlay(
+         [{left, top, tile, attrs, _index} | sprites],
+         vram,
+         line,
+         height,
+         overlay
+       ) do
+    source_y = line - top
+    source_y = if (attrs &&& 0x40) == 0, do: source_y, else: height - 1 - source_y
+    tile = if height == 8, do: tile, else: (tile &&& 0xFE) + (source_y >>> 3)
+    offset = tile * 16 + (source_y &&& 0x07) * 2
+    low = vram_byte(vram, offset)
+    high = vram_byte(vram, offset + 1)
+    colors = combine_planes(elem(@bit_rows, low), elem(@bit_rows, high))
+    colors = if (attrs &&& 0x20) == 0, do: colors, else: reverse_row(colors)
+    visible_left = max(left, 0)
+    source_x = visible_left - left
+    count = min(8 - source_x, @width - visible_left)
+    colors = binary_part(colors, source_x, count)
+    existing = binary_part(overlay, visible_left, count)
+    metadata = 0x80 ||| (attrs &&& 0x10) <<< 1 ||| (attrs &&& 0x80) >>> 1
+    merged = merge_dmg_sprite_row(existing, colors, metadata, [])
+    overlay = replace_binary(overlay, visible_left, merged)
+    dmg_sprite_overlay(sprites, vram, line, height, overlay)
+  end
+
+  defp merge_dmg_sprite_row(<<>>, <<>>, _metadata, acc),
+    do: acc |> :lists.reverse() |> :erlang.list_to_binary()
+
+  defp merge_dmg_sprite_row(
+         <<_existing, rest::binary>>,
+         <<color, colors::binary>>,
+         metadata,
+         acc
+       )
+       when color != 0,
+       do: merge_dmg_sprite_row(rest, colors, metadata, [metadata ||| color | acc])
+
+  defp merge_dmg_sprite_row(
+         <<existing, rest::binary>>,
+         <<0, colors::binary>>,
+         metadata,
+         acc
+       ),
+       do: merge_dmg_sprite_row(rest, colors, metadata, [existing | acc])
 
   defp compose_cgb_sprites(colors, sprites, vram, line, height, lcdc, bg, obj) do
     objects = cgb_sprite_overlay(sprites, vram, line, height, @blank_line)
