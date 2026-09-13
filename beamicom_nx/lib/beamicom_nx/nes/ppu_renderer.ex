@@ -67,7 +67,7 @@ defmodule BeamicomNx.NES.PPURenderer do
            ]}
 
         atlas_only?(lines) ->
-          {attr, refs, fine_x, mask, sx, slo, shi, sattr, svalid} = pack_atlas(lines)
+          {attr, refs, fine_x, mask, sx, sprite_refs, sattr, svalid} = pack_atlas(lines)
 
           {:atlas,
            [
@@ -76,8 +76,7 @@ defmodule BeamicomNx.NES.PPURenderer do
              tensor(fine_x, {@height, 1}),
              tensor(mask, {@height, 1}),
              tensor(sx, {@height, @sprites}),
-             tensor(slo, {@height, @sprites}),
-             tensor(shi, {@height, @sprites}),
+             tensor(sprite_refs, {@height, @sprites}, :u32),
              tensor(sattr, {@height, @sprites}),
              tensor(svalid, {@height, @sprites})
              | common
@@ -152,14 +151,47 @@ defmodule BeamicomNx.NES.PPURenderer do
     )
   end
 
+  defnp compose_pixels_atlas(
+          pattern,
+          bg_attr,
+          x,
+          mask,
+          sx,
+          sprite_refs,
+          sattr,
+          svalid,
+          palette,
+          master,
+          color_mask,
+          edge_mask,
+          atlas
+        ) do
+    bg =
+      Nx.select(
+        pattern == 0 or band(mask, 8) == 0 or (x < 8 and band(mask, 2) == 0),
+        0,
+        bg_attr * 4 + pattern
+      )
+
+    sprite = Nx.broadcast(0, {@height, @width + 1})
+    sprite = scatter_sprite_atlas(sprite, 7, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 6, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 5, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 4, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 3, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 2, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 1, mask, sx, sprite_refs, sattr, svalid, atlas)
+    sprite = scatter_sprite_atlas(sprite, 0, mask, sx, sprite_refs, sattr, svalid, atlas)
+    finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask)
+  end
+
   defn compose_atlas(
          attr,
          refs,
          fine_x,
          mask,
          sx,
-         slo,
-         shi,
+         sprite_refs,
          sattr,
          svalid,
          palette,
@@ -176,20 +208,20 @@ defmodule BeamicomNx.NES.PPURenderer do
     column = band(source_x, 7)
     pattern = Nx.gather(atlas, Nx.stack([bg_ref, column], axis: 2))
 
-    compose_pixels(
+    compose_pixels_atlas(
       pattern,
       bg_attr,
       x,
       mask,
       sx,
-      slo,
-      shi,
+      sprite_refs,
       sattr,
       svalid,
       palette,
       master,
       color_mask,
-      edge_mask
+      edge_mask,
+      atlas
     )
   end
 
@@ -278,6 +310,10 @@ defmodule BeamicomNx.NES.PPURenderer do
     sprite = scatter_sprite(sprite, 1, mask, sx, slo, shi, sattr, svalid)
     sprite = scatter_sprite(sprite, 0, mask, sx, slo, shi, sattr, svalid)
 
+    finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask)
+  end
+
+  defnp finish_pixels(bg, sprite, x, palette, master, color_mask, edge_mask) do
     sprite = Nx.slice_along_axis(sprite, 0, @width, axis: 1)
     sprite_addr = band(sprite, 0x3F)
     sprite_front = band(sprite, 0x40) != 0
@@ -296,6 +332,30 @@ defmodule BeamicomNx.NES.PPURenderer do
       |> Nx.as_type(:u8)
 
     {pixels, rgb}
+  end
+
+  defnp scatter_sprite_atlas(pixels, rank, mask, sx, sprite_refs, sattr, svalid, atlas) do
+    rows = Nx.iota({@height, 8}, axis: 0, type: :s32)
+    subpixel = Nx.iota({@height, 8}, axis: 1, type: :s32)
+    x = Nx.new_axis(Nx.as_type(sx[[.., rank]], :s32), 1) + subpixel
+    attr = Nx.new_axis(Nx.as_type(sattr[[.., rank]], :s32), 1)
+    flip = Nx.broadcast(band(attr, 64) != 0, {@height, 8})
+    source_col = Nx.select(flip, 7 - subpixel, subpixel)
+    ref = Nx.new_axis(Nx.as_type(sprite_refs[[.., rank]], :s32), 1)
+    ref = Nx.broadcast(ref, {@height, 8})
+    pattern = Nx.gather(atlas, Nx.stack([ref, source_col], axis: 2))
+    line_mask = Nx.as_type(mask, :s32)
+
+    visible =
+      Nx.new_axis(svalid[[.., rank]] != 0, 1) and pattern != 0 and x < @width and
+        band(line_mask, 16) != 0 and
+        (x >= 8 or band(line_mask, 4) != 0)
+
+    columns = Nx.select(visible, x, @width)
+    indices = Nx.stack([rows, columns], axis: 2) |> Nx.reshape({@height * 8, 2})
+    front = Nx.select(band(attr, 32) == 0, 0x40, 0)
+    values = 16 + band(attr, 3) * 4 + pattern + front
+    Nx.indexed_put(pixels, indices, Nx.reshape(values, {@height * 8}))
   end
 
   defnp scatter_sprite(pixels, rank, mask, sx, slo, shi, sattr, svalid) do
@@ -344,17 +404,16 @@ defmodule BeamicomNx.NES.PPURenderer do
   end
 
   defp pack_atlas(lines) do
-    Enum.reduce(lines, {[], [], [], [], [], [], [], [], []}, fn
-      {_lo, _hi, attr, refs, _bg_mode, fine_x, mask, sx, slo, shi, sattr, svalid},
-      {attrs, all_refs, fine_xs, masks, sxs, slos, shis, sattrs, svalids} ->
+    Enum.reduce(lines, {[], [], [], [], [], [], [], []}, fn
+      {_lo, _hi, attr, refs, _bg_mode, fine_x, mask, sx, sprite_refs, _shi, sattr, svalid},
+      {attrs, all_refs, fine_xs, masks, sxs, all_sprite_refs, sattrs, svalids} ->
         {
           [attr | attrs],
           [refs | all_refs],
           [<<fine_x>> | fine_xs],
           [<<mask>> | masks],
           [sx | sxs],
-          [slo | slos],
-          [shi | shis],
+          [sprite_refs | all_sprite_refs],
           [sattr | sattrs],
           [svalid | svalids]
         }
@@ -402,7 +461,7 @@ defmodule BeamicomNx.NES.PPURenderer do
               EXLA.compile(&compose_bytes/14, Enum.map(args, &Nx.to_template/1), client: :host)
 
             :atlas ->
-              EXLA.compile(&compose_atlas/14, Enum.map(args, &Nx.to_template/1), client: :host)
+              EXLA.compile(&compose_atlas/13, Enum.map(args, &Nx.to_template/1), client: :host)
 
             :hybrid ->
               EXLA.compile(&compose_hybrid/17, Enum.map(args, &Nx.to_template/1), client: :host)

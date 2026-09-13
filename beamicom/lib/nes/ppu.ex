@@ -280,7 +280,7 @@ defmodule Beamicom.NES.PPU do
       {tiles, blank?, ppu} =
         if atlas?, do: fetch_line_refs(ppu, line_v), else: fetch_line_tiles(ppu, line_v)
 
-      ppu = eval_sprites(ppu)
+      ppu = eval_sprites(ppu, atlas?)
 
       {line, ppu} =
         cond do
@@ -301,7 +301,7 @@ defmodule Beamicom.NES.PPU do
 
   defp atlas_bg?(ppu) do
     nx_renderer?(ppu) and ppu.chr_latch == nil and byte_size(ppu.chr) > 0 and
-      ppu |> bg_banks() |> Tuple.to_list() |> Enum.all?(&(&1 >= 0))
+      Enum.all?(Tuple.to_list(bg_banks(ppu)) ++ Tuple.to_list(ppu.chr_banks), &(&1 >= 0))
   end
 
   defp nx_blank_line(%{renderer_state: nil}) do
@@ -309,10 +309,17 @@ defmodule Beamicom.NES.PPU do
      <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
   end
 
-  defp nx_blank_line(_ppu) do
-    {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 32)>>, 0, 0, 0,
-     <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>,
-     <<0::size(8 * 8)>>}
+  defp nx_blank_line(ppu) do
+    zeros = <<0::size(33 * 8)>>
+    refs = <<0::size(33 * 32)>>
+
+    if atlas_bg?(ppu) do
+      {zeros, zeros, zeros, refs, 1, 0, 0, <<0::size(8 * 8)>>, <<0::size(8 * 32)>>, <<>>,
+       <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+    else
+      {zeros, zeros, zeros, refs, 0, 0, 0, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>,
+       <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+    end
   end
 
   # Keep the mapper-sensitive work on the BEAM and retain only the compact inputs
@@ -339,18 +346,17 @@ defmodule Beamicom.NES.PPU do
 
   defp capture_nx_atlas_line(ppu, tiles, fine_x) do
     {refs, attr} = tile_refs(tiles, 0, [], [])
-    {sx, slo, shi, sattr, svalid} = sprite_planes(ppu.line_sprites)
+    {sx, sprite_refs, sattr, svalid} = sprite_ref_planes(ppu.line_sprites)
     bg_on = bg_on?(ppu)
-    buf = if sprites_on?(ppu), do: sprite_buffer(ppu.line_sprites), else: %{}
 
     ppu =
-      if not bg_on or map_size(buf) == 0,
+      if not bg_on or not sprites_on?(ppu),
         do: ppu,
-        else: sprite0_hit_refs(ppu, buf, tiles, fine_x)
+        else: sprite0_hit_atlas(ppu, ppu.line_sprites, tiles, fine_x)
 
     zeros = <<0::size(33 * 8)>>
     mask = if bg_on, do: ppu.mask, else: ppu.mask &&& bxor(0xFF, 0x08)
-    {{zeros, zeros, attr, refs, 1, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+    {{zeros, zeros, attr, refs, 1, fine_x, mask, sx, sprite_refs, <<>>, sattr, svalid}, ppu}
   end
 
   defp capture_nx_hybrid_line(ppu, tiles, fine_x, blank?) do
@@ -396,6 +402,26 @@ defmodule Beamicom.NES.PPU do
       |> Tuple.to_list()
       |> Enum.map(&(&1 |> Enum.reverse() |> :erlang.list_to_binary()))
       |> List.to_tuple()
+    end)
+  end
+
+  defp sprite_ref_planes(sprites) do
+    padded = Enum.take(sprites, 8) ++ List.duplicate(nil, max(8 - length(sprites), 0))
+
+    Enum.reduce(padded, {[], [], [], []}, fn
+      nil, {xs, refs, attrs, valid} ->
+        {[0 | xs], [<<0::native-unsigned-32>> | refs], [0 | attrs], [0 | valid]}
+
+      sp, {xs, refs, attrs, valid} ->
+        {[sp.x | xs], [<<sp.ref::native-unsigned-32>> | refs], [sp.attr | attrs], [1 | valid]}
+    end)
+    |> then(fn {xs, refs, attrs, valid} ->
+      {
+        xs |> Enum.reverse() |> :erlang.list_to_binary(),
+        refs |> Enum.reverse() |> IO.iodata_to_binary(),
+        attrs |> Enum.reverse() |> :erlang.list_to_binary(),
+        valid |> Enum.reverse() |> :erlang.list_to_binary()
+      }
     end)
   end
 
@@ -728,17 +754,33 @@ defmodule Beamicom.NES.PPU do
     if hit?, do: %{ppu | status: ppu.status ||| 0x40}, else: ppu
   end
 
-  defp sprite0_hit_refs(ppu, buf, refs, fine_x) do
+  defp sprite0_hit_atlas(ppu, sprites, refs, fine_x) do
     hit? =
-      Enum.any?(buf, fn
-        {c, {_addr, _front?, true}} ->
-          c != 255 and not clipped?(ppu, c) and bg_ref_at(ppu, refs, fine_x, c) != 0
-
-        _ ->
+      case Enum.find(sprites, &(&1.index == 0)) do
+        nil ->
           false
-      end)
+
+        sprite ->
+          Enum.any?(0..7, fn col ->
+            x = sprite.x + col
+            source_col = if (sprite.attr &&& 0x40) != 0, do: 7 - col, else: col
+
+            x <= 255 and x != 255 and not clipped?(ppu, x) and
+              pattern_at_ref(ppu, sprite.ref, source_col) != 0 and
+              bg_ref_at(ppu, refs, fine_x, x) != 0
+          end)
+      end
 
     if hit?, do: %{ppu | status: ppu.status ||| 0x40}, else: ppu
+  end
+
+  defp pattern_at_ref(ppu, ref, col) do
+    tile = div(ref, 8)
+    row = rem(ref, 8)
+    lo = :binary.at(ppu.chr, tile * 16 + row)
+    hi = :binary.at(ppu.chr, tile * 16 + row + 8)
+    bit = 7 - col
+    sel(hi, bit) <<< 1 ||| sel(lo, bit)
   end
 
   defp bg_ref_at(ppu, refs, fine_x, c) do
@@ -792,10 +834,10 @@ defmodule Beamicom.NES.PPU do
   # the overflow flag in either mode. Sprite Y is stored one line early, so a
   # sprite at OAM Y renders on scanlines Y+1..Y+height.
 
-  defp eval_sprites(ppu) do
+  defp eval_sprites(ppu, atlas?) do
     height = if (ppu.ctrl &&& 0x20) != 0, do: 16, else: 8
     limit = if ppu.unlimited_sprites, do: 64, else: 8
-    {sprites, count} = scan_oam(ppu.oam, 0, ppu, height, limit, [], 0)
+    {sprites, count} = scan_oam(ppu.oam, 0, ppu, height, limit, atlas?, [], 0)
     status = if count > 8, do: ppu.status ||| 0x20, else: ppu.status
     %{ppu | line_sprites: Enum.reverse(sprites), status: status}
   end
@@ -803,21 +845,25 @@ defmodule Beamicom.NES.PPU do
   # Walk the 256-byte OAM binary four bytes (one sprite) at a time. Hardware mode
   # keeps the first 8 in range; enhanced mode keeps all 64. Either way, a 9th
   # in-range entry sets overflow in eval_sprites/1.
-  defp scan_oam(<<>>, _i, _ppu, _height, _limit, acc, count), do: {acc, count}
+  defp scan_oam(<<>>, _i, _ppu, _height, _limit, _atlas?, acc, count), do: {acc, count}
 
-  defp scan_oam(<<y, tile, attr, x, rest::binary>>, i, ppu, height, limit, acc, count) do
+  defp scan_oam(<<y, tile, attr, x, rest::binary>>, i, ppu, height, limit, atlas?, acc, count) do
     row = ppu.scanline - y - 1
 
     cond do
       row < 0 or row >= height ->
-        scan_oam(rest, i + 1, ppu, height, limit, acc, count)
+        scan_oam(rest, i + 1, ppu, height, limit, atlas?, acc, count)
 
       count < limit ->
-        sprite = build_sprite(ppu, i, tile, attr, x, row, height)
-        scan_oam(rest, i + 1, ppu, height, limit, [sprite | acc], count + 1)
+        sprite =
+          if atlas?,
+            do: build_sprite_ref(ppu, i, tile, attr, x, row, height),
+            else: build_sprite(ppu, i, tile, attr, x, row, height)
+
+        scan_oam(rest, i + 1, ppu, height, limit, atlas?, [sprite | acc], count + 1)
 
       true ->
-        scan_oam(rest, i + 1, ppu, height, limit, acc, count + 1)
+        scan_oam(rest, i + 1, ppu, height, limit, atlas?, acc, count + 1)
     end
   end
 
@@ -828,6 +874,16 @@ defmodule Beamicom.NES.PPU do
     hi = read(ppu, addr ||| row + 8)
     {lo, hi} = if (attr &&& 0x40) != 0, do: {reverse_byte(lo), reverse_byte(hi)}, else: {lo, hi}
     %{index: i, x: x, attr: attr, lo: lo, hi: hi}
+  end
+
+  defp build_sprite_ref(ppu, i, tile, attr, x, row, height) do
+    row = if (attr &&& 0x80) != 0, do: height - 1 - row, else: row
+    {addr, row} = sprite_pattern_addr(ppu, tile, row, height)
+    addr = addr ||| row
+    flat = elem(ppu.chr_banks, addr >>> 10) + (addr &&& 0x03FF)
+    flat = rem(flat, byte_size(ppu.chr))
+    ref = div(flat, 16) * 8 + rem(flat, 16)
+    %{index: i, x: x, attr: attr, ref: ref}
   end
 
   # 8x8: pattern table from PPUCTRL bit 3. 8x16: table from tile bit 0, tile pair

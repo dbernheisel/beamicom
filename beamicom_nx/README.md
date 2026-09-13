@@ -3,7 +3,9 @@
 This optional adapter leaves the NES CPU, memory, mapper, PPU timing, and APU in
 the dependency-free `beamicom` application. At each visible scanline the native
 PPU resolves mapper-sensitive tile rows, evaluates sprites, and applies status
-side effects. At frame completion this adapter composes all 240 by 256 palette
+side effects. The atlas variant records compact CHR row references for both
+background tiles and sprites instead of fetching their pattern bytes. At frame
+completion this adapter gathers those rows and composes all 240 by 256 palette
 addresses in one EXLA CPU call.
 
 Configure it before loading a console:
@@ -34,11 +36,12 @@ FPS. Deferring palette expansion and doing it once in the frame kernel therefore
 improves this three-sink workload by 17.0%.
 
 The optional `nx_atlas` renderer expands immutable CHR ROM into a resident tile
-atlas at cartridge load. It reaches 79.32 FPS during Castlevania III's first five
-seconds versus 76.54 FPS for byte decoding, but over the full fifteen seconds it
-runs at 75.31 FPS versus 77.83 FPS. The access pattern changes with the scene, so
-the byte renderer remains the default while the atlas path is available for GPU
-and batched-instance measurements.
+atlas at cartridge load. Deferring both background and sprite pattern fetches
+raises the median full fifteen-second Castlevania III result to 78.99 FPS. That
+is 18.7% faster than native with three RGB consumers and 1.5% faster than the Nx
+byte renderer. The byte renderer remains the default because it also handles
+mutable and latch-driven CHR directly; the atlas path falls back to byte capture
+for those cartridges.
 
 PPU status timing and mapper-visible effects remain native even when visual work
 moves into the adapter. CHR RAM and latch-driven cartridges automatically use
