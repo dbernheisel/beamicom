@@ -154,6 +154,28 @@ defmodule BeamicomPhx.EmulatorTest do
     refute_receive {:emulator_profile, _profile}
   end
 
+  test "load starts the configured RTP broadcast" do
+    previous_target = Application.get_env(:beamicom_phx, :rtp_target)
+    Application.put_env(:beamicom_phx, :rtp_target, {{127, 0, 0, 1}, 15_000})
+
+    on_exit(fn ->
+      if is_nil(previous_target) do
+        Application.delete_env(:beamicom_phx, :rtp_target)
+      else
+        Application.put_env(:beamicom_phx, :rtp_target, previous_target)
+      end
+    end)
+
+    rom = temporary_rom("gbc", DiagnosticROM.build_cgb())
+    assert :ok = Emulator.load(rom)
+
+    assert %{session: %{broadcast: %{supervisor: supervisor, pipeline: pipeline}}} =
+             :sys.get_state(Emulator)
+
+    assert is_pid(supervisor)
+    assert is_pid(pipeline)
+  end
+
   test "independent browser sources aggregate held input and disconnect releases it" do
     rom = temporary_rom("gbc", DiagnosticROM.build_cgb())
     assert :ok = Emulator.load(rom)

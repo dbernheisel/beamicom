@@ -314,7 +314,7 @@ defmodule BeamicomPhx.Emulator do
 
         case DynamicSupervisor.start_child(
                @runtime_sup,
-               child(Membrane.Pipeline, [BeamicomStream.AV.RtpBroadcast, opts], :supervisor)
+               pipeline_child(BeamicomStream.AV.RtpBroadcast, opts)
              ) do
           {:ok, supervisor, pipeline} -> {:ok, %{supervisor: supervisor, pipeline: pipeline}}
           {:error, _reason} = error -> error
@@ -640,6 +640,15 @@ defmodule BeamicomPhx.Emulator do
       start: {module, :start_link, [opts]},
       restart: :temporary,
       type: type
+    }
+  end
+
+  defp pipeline_child(module, opts) do
+    %{
+      id: make_ref(),
+      start: {Membrane.Pipeline, :start_link, [module, opts]},
+      restart: :temporary,
+      type: :supervisor
     }
   end
 end
