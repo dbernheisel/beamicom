@@ -26,15 +26,41 @@ defmodule BeamicomStream.AV.Av1PayloaderTest do
              <<0::1, 6::4, 0::1, 0::1, 0::1, payload::binary>>
   end
 
-  test "the first sequence-header packet alone carries the new coded sequence bit" do
+  test "a sequence header is aggregated with its keyframe" do
     sequence_header = OBU.serialize(%OBU{type: 1, x: 0, s: 1, payload: <<1, 2, 3>>})
     frame = OBU.serialize(%OBU{type: 6, x: 0, s: 1, payload: <<4, 5, 6>>})
 
-    assert [sequence, frame] = Av1Payloader.packetize(sequence_header <> frame)
-    assert <<0::1, 0::1, 1::2, 1::1, 0::3, _::binary>> = sequence.payload
-    assert <<0::1, 0::1, 1::2, 0::1, 0::3, _::binary>> = frame.payload
-    refute sequence.marker
-    assert frame.marker
+    assert [packet] = Av1Payloader.packetize(sequence_header <> frame)
+
+    assert <<0::1, 0::1, 2::2, 1::1, 0::3, sequence_size, payload::binary>> =
+             packet.payload
+
+    assert sequence_size == 4
+    assert <<sequence::binary-size(^sequence_size), transmitted_frame::binary>> = payload
+    assert <<0::1, 1::4, 0::1, 0::1, 0::1, 1, 2, 3>> = sequence
+    assert <<0::1, 6::4, 0::1, 0::1, 0::1, 4, 5, 6>> = transmitted_frame
+    assert packet.marker
+  end
+
+  test "a sequence header and fragmented keyframe remain one RTP frame" do
+    sequence_header = OBU.serialize(%OBU{type: 1, x: 0, s: 1, payload: <<1, 2, 3>>})
+    frame_payload = :binary.copy(<<0xA5>>, 2_500)
+    frame = OBU.serialize(%OBU{type: 6, x: 0, s: 1, payload: frame_payload})
+
+    assert [first, middle, last] = Av1Payloader.packetize(sequence_header <> frame)
+    assert <<0::1, 1::1, 2::2, 1::1, 0::3, sequence_size, first_payload::binary>> = first.payload
+    assert <<1::1, 1::1, 1::2, 0::1, 0::3, middle_payload::binary>> = middle.payload
+    assert <<1::1, 0::1, 1::2, 0::1, 0::3, last_payload::binary>> = last.payload
+
+    assert <<_sequence::binary-size(^sequence_size), first_frame_fragment::binary>> =
+             first_payload
+
+    assert first_frame_fragment <> middle_payload <> last_payload ==
+             <<0::1, 6::4, 0::1, 0::1, 0::1, frame_payload::binary>>
+
+    refute first.marker
+    refute middle.marker
+    assert last.marker
   end
 
   test "the 999-byte OBU fragment boundary keeps every RTP payload at 1000 bytes or less" do
