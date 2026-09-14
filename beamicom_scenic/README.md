@@ -1,10 +1,9 @@
 # BeamicomScenic
 
-Local-verification client for the [`beamicom_nes`](../beamicom_nes/README.md) NES and
-Game Boy / Game Boy Color cores. A [Scenic](https://hexdocs.pm/scenic) window
-renders each core's native video output and an optional ffmpeg player process
-handles audio. Keeping this host separate means neither emulator core takes a
-Scenic or OpenGL dependency.
+Local-verification client for the NES, Game Boy / Game Boy Color, and SNES cores.
+A [Scenic](https://hexdocs.pm/scenic) window renders each core's native video
+output and a host-owned audio sink plays PCM. Keeping this host separate means
+no emulator core takes a Scenic, OpenGL, or platform audio dependency.
 
 ![Screenshot](./assets/screenshot.jpg)
 
@@ -26,8 +25,8 @@ can't locate GLFW/GLEW, point `PKG_CONFIG_PATH` at Homebrew's `.pc` files:
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/glew/lib/pkgconfig"
 ```
 
-Audio playback shells out to ffmpeg's low-latency `audiotoolbox` output on
-macOS; it's optional — the sink declines gracefully if ffmpeg is missing:
+Audio playback uses ffplay on macOS and Linux with the same low-buffer raw PCM
+path for every supported core:
 
 ```sh
 brew install ffmpeg

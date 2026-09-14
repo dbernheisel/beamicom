@@ -517,7 +517,7 @@ defmodule Beamicom.NES.PPU do
         {[0 | xs], [0 | tiles], [0 | los], [0 | his], [0 | attrs], [0 | valid]}
 
       sp, {xs, tiles, los, his, attrs, valid} ->
-        {[sp.x | xs], [sp.tile | tiles], [sp.lo | los], [sp.hi | his], [sp.attr | attrs],
+        {[sp.x | xs], [sp.ref | tiles], [sp.lo | los], [sp.hi | his], [sp.attr | attrs],
          [1 | valid]}
     end)
     |> then(fn planes ->
@@ -983,7 +983,7 @@ defmodule Beamicom.NES.PPU do
 
         if x <= 255 and pat != 0 and not Map.has_key?(buf, x) do
           addr = 0x10 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
-          provenance = sp.tile <<< 4 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
+          provenance = sp.ref <<< 4 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
 
           Map.put(
             buf,
@@ -1051,7 +1051,8 @@ defmodule Beamicom.NES.PPU do
     lo = read(ppu, addr ||| row)
     hi = read(ppu, addr ||| row + 8)
     {lo, hi} = if (attr &&& 0x40) != 0, do: {reverse_byte(lo), reverse_byte(hi)}, else: {lo, hi}
-    %{index: i, x: x, tile: addr >>> 4, attr: attr, lo: lo, hi: hi}
+    tile = addr >>> 4
+    %{index: i, x: x, tile: tile, ref: tile * 8 + row, attr: attr, lo: lo, hi: hi}
   end
 
   defp build_sprite_ref(ppu, i, tile, attr, x, row, height) do

@@ -158,24 +158,19 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   end
 
   test "builds mono and stereo player commands from core capabilities" do
-    assert "mono" in AudioSink.default_command(1.0)
+    assert ["ffplay" | mono_command] = AudioSink.default_command(1.0)
+    assert "mono" in mono_command
 
-    assert "stereo" in AudioSink.default_command(1.0, %{
-             sample_rate: 44_100,
-             channels: 2,
-             sample_format: :s16le
-           })
-
-    assert ["ffmpeg" | command] =
+    assert ["ffplay" | macos_command] =
              AudioSink.default_command(
                1.0,
                %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
                {:unix, :darwin}
              )
 
-    assert "audiotoolbox" in command
-    refute "direct" in command
-    refute Enum.any?(command, &String.contains?(&1, "asetnsamples"))
+    assert "stereo" in macos_command
+    refute "direct" in macos_command
+    assert "nobuffer" in macos_command
 
     assert ["ffplay" | slow_command] =
              AudioSink.default_command(
@@ -183,6 +178,8 @@ defmodule Beamicom.Scenic.AudioSinkTest do
                %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
                {:unix, :linux}
              )
+
+    assert "stereo" in slow_command
 
     assert Enum.find(slow_command, &String.starts_with?(&1, "atempo=")) ==
              "atempo=0.5,atempo=0.5,atempo=0.5,atempo=0.8"

@@ -7,13 +7,13 @@ defmodule Beamicom.Scenic.AudioSink do
   any emulator core. Initial PCM is prebuffered briefly so renderer compilation
   and ordinary frame-time jitter do not starve the external player.
 
-  On macOS the existing low-latency CoreAudio path is retained through ffmpeg;
-  other platforms use ffplay. If the selected executable is unavailable, the
-  sink quietly declines to start (`:ignore`) so video still works.
+  macOS and Linux use ffplay's SDL audio output with low-buffer input options.
+  If ffplay is unavailable, the sink quietly declines to start (`:ignore`) so
+  video still works.
 
   ## Sources
 
-    * ffmpeg raw PCM input and CoreAudio output; ffplay elsewhere.
+    * ffplay raw PCM input and SDL audio output.
   """
   use GenServer
   require Logger
@@ -82,18 +82,11 @@ defmodule Beamicom.Scenic.AudioSink do
   end
 
   @doc false
-  def default_command(speed, audio \\ @default_audio, os \\ :os.type()) do
+  def default_command(speed, audio \\ @default_audio, _os \\ :os.type()) do
     layout = if audio.channels == 1, do: "mono", else: "stereo"
 
-    case os do
-      {:unix, :darwin} ->
-        ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
-          audio_filters(speed) ++ ~w(-f audiotoolbox -)
-
-      _other ->
-        ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
-          audio_filters(speed)
-    end
+    ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
+      audio_filters(speed)
   end
 
   defp audio_filters(speed) do

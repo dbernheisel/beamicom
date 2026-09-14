@@ -64,10 +64,13 @@ Use `tile_space: :chr` for a physical tile number in immutable CHR ROM. Use
 `:ppu` for the logical PPU pattern-table tile number from 0 through 511; this is
 the useful identity for CHR-RAM games such as The Legend of Zelda. Rules can
 also constrain the two-bit sprite subpalette and the nontransparent pattern
-color slots 1 through 3. Several rules may target different object groups or
-use different intensities. Flicker is opt-in per rule: `flicker: :organic` uses
-a restrained 18% variation, while `flicker: [amount: 0.3]` or a numeric value
-from `0.0` through `1.0` controls its depth. The waveform combines three
+color slots 1 through 3. `rows: 0..4` can further restrict emission to source
+pattern rows, counted from zero at the top; flipped sprites keep the restriction
+attached to the pattern pixels. Several rules may target different object groups
+or use intensities from 0.0 through 1.5. Flicker is opt-in per rule:
+`flicker: :organic` uses a restrained 18% variation, while
+`flicker: [amount: 0.3]` or a numeric value from `0.0` through `1.0` controls
+its depth. The waveform combines three
 incommensurate temporal frequencies with a position-derived phase, so nearby
 pixels remain coherent while separate emitters do not pulse in lockstep. It is
 derived only from the emulated frame number and screen position, making replay
@@ -95,10 +98,13 @@ animated subpalette, color slot 3 for the four beam-burst particles. The flame
 uses deterministic organic flicker. Additional verified emitters are rupee tiles
 50-51 in flashing subpalettes 1-2 at 60% intensity; enemy-fireball tiles 68-69
 across all four animated subpalettes; enemy-death burst tiles 98 and 100 across
-all four animated subpalettes and all three visible color slots; and heart-pickup
-tiles 498-499 in flashing subpalettes 1-2. Link is not an emitter. The other pixels
-in those sprites remain non-emitting, although they can still receive the nearby
-halo.
+all four animated subpalettes and all three visible color slots; candle tile 38,
+blue/red subpalettes 1-2, slots 1-2, rows 0-4; and heart-pickup tiles 498-499 in
+flashing subpalettes 1-2. The candle rules intentionally exclude the body and
+apply organic flicker only to the tip. The darker blue palette uses 150%
+intensity, while red uses the standard 100%. Key tile 46 and Link are not
+emitters. The other pixels in those sprites remain non-emitting, although they
+can still receive the nearby halo.
 
 The Blargg renderer keeps the identity-derived emissive plane at native
 resolution, applies the selected NTSC filter, and adds the resampled halo to the
@@ -116,6 +122,9 @@ BEAMICOM_NX=1 BEAMICOM_ZELDA_STATE=/path/to/zelda-state.png \
 
 BEAMICOM_NX=1 BEAMICOM_ZELDA_DEATH_STATE=/path/to/zelda-death-state.png \
   mix test nx_test/nes/zelda_enemy_death_lighting_e2e_test.exs
+
+BEAMICOM_NX=1 BEAMICOM_ZELDA_CANDLE_STATE=/path/to/zelda-candle-state.png \
+  mix test nx_test/nes/zelda_candle_lighting_e2e_test.exs
 ```
 
 The test validates the ROM-content and checkpoint hashes, exercises all twenty

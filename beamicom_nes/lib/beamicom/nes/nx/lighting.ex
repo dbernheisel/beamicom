@@ -74,6 +74,28 @@ if Code.ensure_loaded?(Nx.Defn) do
           intensity: 1.0
         ],
         [
+          id: :blue_candle_tip,
+          layer: :sprite,
+          tile_space: :ppu,
+          tiles: [38],
+          subpalettes: [1],
+          color_slots: [1, 2],
+          rows: 0..4,
+          intensity: 1.5,
+          flicker: :organic
+        ],
+        [
+          id: :red_candle_tip,
+          layer: :sprite,
+          tile_space: :ppu,
+          tiles: [38],
+          subpalettes: [2],
+          color_slots: [1, 2],
+          rows: 0..4,
+          intensity: 1.0,
+          flicker: :organic
+        ],
+        [
           id: :heart_pickup,
           layer: :sprite,
           tile_space: :ppu,
