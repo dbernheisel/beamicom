@@ -51,13 +51,11 @@ defmodule Beamicom.SNES.CPU do
 
   @doc false
   def step_deferred(%__MODULE__{} = cpu, %SystemBus{} = bus) do
-    {nmi?, bus} = Bus.take_nmi(bus)
-
     cond do
-      nmi? ->
-        finish_deferred_interrupt(cpu, bus, :nmi)
+      bus.nmi_pending? ->
+        finish_deferred_interrupt(cpu, %{bus | nmi_pending?: false}, :nmi)
 
-      Bus.irq_pending?(bus) and (cpu.p &&& @i) == 0 ->
+      bus.irq_flag? and (cpu.p &&& @i) == 0 ->
         finish_deferred_interrupt(cpu, bus, :irq)
 
       true ->
@@ -66,7 +64,7 @@ defmodule Beamicom.SNES.CPU do
 
         case execute(opcode, cpu, bus) do
           {:ok, cpu, bus} ->
-            {:ok, %{cpu | instructions: cpu.instructions + 1}, Bus.flush_events(bus), 0}
+            {:ok, %{cpu | instructions: cpu.instructions + 1}, Bus.flush_events(bus)}
 
           {:error, reason, cpu, bus} ->
             {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
@@ -76,13 +74,12 @@ defmodule Beamicom.SNES.CPU do
 
   defp do_step(cpu, bus, sync) do
     start = Bus.master_clocks(bus)
-    {nmi?, bus} = Bus.take_nmi(bus)
 
     cond do
-      nmi? ->
-        finish_interrupt(cpu, bus, :nmi, start, sync)
+      bus.nmi_pending? ->
+        finish_interrupt(cpu, %{bus | nmi_pending?: false}, :nmi, start, sync)
 
-      Bus.irq_pending?(bus) and (cpu.p &&& @i) == 0 ->
+      bus.irq_flag? and (cpu.p &&& @i) == 0 ->
         finish_interrupt(cpu, bus, :irq, start, sync)
 
       true ->
@@ -519,7 +516,7 @@ defmodule Beamicom.SNES.CPU do
   end
 
   defp execute(0xD4, cpu, bus) do
-    {pointer, cpu, bus} = direct_address(cpu, bus, 0)
+    {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {value, bus} = read_pointer16(bus, pointer)
     {cpu, bus} = push(cpu, bus, value >>> 8)
     {cpu, bus} = push(cpu, bus, value)
@@ -560,8 +557,8 @@ defmodule Beamicom.SNES.CPU do
   defp execute(opcode, cpu, bus) when opcode in [0x64, 0x74, 0x9C, 0x9E] do
     {address, cpu, bus} =
       case opcode do
-        0x64 -> direct_address(cpu, bus, 0)
-        0x74 -> direct_address(cpu, bus, cpu.x)
+        0x64 -> direct_address(cpu, bus, 0, false)
+        0x74 -> direct_address(cpu, bus, cpu.x, true)
         0x9C -> absolute_address(cpu, bus, 0)
         0x9E -> absolute_address(cpu, bus, cpu.x)
       end
@@ -659,7 +656,7 @@ defmodule Beamicom.SNES.CPU do
   defp fetch_width(cpu, bus, 8), do: fetch8(cpu, bus)
   defp fetch_width(cpu, bus, 16), do: fetch16(cpu, bus)
 
-  defp direct_address(cpu, bus, index, indexed? \\ false) do
+  defp direct_address(cpu, bus, index, indexed?) do
     {operand, cpu, bus} = fetch8(cpu, bus)
     extra = if (cpu.d &&& 0xFF) != 0 or indexed?, do: 1, else: 0
     {bus, _clocks} = if extra == 1, do: Bus.idle(bus), else: {bus, 0}
@@ -671,7 +668,7 @@ defmodule Beamicom.SNES.CPU do
     {cpu.db <<< 16 ||| (operand + index &&& 0xFFFF), cpu, bus}
   end
 
-  defp resolve_address(:dp, cpu, bus), do: direct_address(cpu, bus, 0)
+  defp resolve_address(:dp, cpu, bus), do: direct_address(cpu, bus, 0, false)
   defp resolve_address(:dpx, cpu, bus), do: direct_address(cpu, bus, cpu.x, true)
   defp resolve_address(:dpy, cpu, bus), do: direct_address(cpu, bus, cpu.y, true)
   defp resolve_address(:abs, cpu, bus), do: absolute_address(cpu, bus, 0)
@@ -698,25 +695,25 @@ defmodule Beamicom.SNES.CPU do
   end
 
   defp resolve_address(:dpi, cpu, bus) do
-    {pointer, cpu, bus} = direct_address(cpu, bus, 0)
+    {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {address, bus} = read_pointer16(bus, pointer)
     {cpu.db <<< 16 ||| address, cpu, bus}
   end
 
   defp resolve_address(:dpiy, cpu, bus) do
-    {pointer, cpu, bus} = direct_address(cpu, bus, 0)
+    {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {address, bus} = read_pointer16(bus, pointer)
     {cpu.db <<< 16 ||| (address + cpu.y &&& 0xFFFF), cpu, bus}
   end
 
   defp resolve_address(:dpil, cpu, bus) do
-    {pointer, cpu, bus} = direct_address(cpu, bus, 0)
+    {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {address, bus} = read_pointer24(bus, pointer)
     {address, cpu, bus}
   end
 
   defp resolve_address(:dpily, cpu, bus) do
-    {pointer, cpu, bus} = direct_address(cpu, bus, 0)
+    {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {address, bus} = read_pointer24(bus, pointer)
     {address + cpu.y &&& 0xFFFFFF, cpu, bus}
   end
@@ -975,7 +972,7 @@ defmodule Beamicom.SNES.CPU do
 
   defp finish_deferred_interrupt(cpu, bus, kind) do
     {cpu, bus} = interrupt(cpu, bus, kind)
-    {:ok, cpu, Bus.flush_events(bus), 0}
+    {:ok, cpu, Bus.flush_events(bus)}
   end
 
   defp sync_bus(bus, :all), do: Bus.flush(bus)

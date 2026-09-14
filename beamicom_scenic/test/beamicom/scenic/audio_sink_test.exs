@@ -68,6 +68,36 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert Process.alive?(pid)
   end
 
+  test "prebuffers typed 32 kHz stereo chunks from the SNES host output" do
+    output = start_supervised!({Output, name: nil})
+
+    pid =
+      start_supervised!(
+        {AudioSink,
+         command: ["sh", "-c", "cat >/dev/null"],
+         name: :test_snes_audio_sink,
+         output: output,
+         audio: %{sample_rate: 32_000, channels: 2, sample_format: :s16le},
+         prebuffer_ms: 1}
+      )
+
+    pcm = :binary.copy(<<1::signed-little-16, -1::signed-little-16>>, 32)
+
+    Output.publish_audio(output, %AudioChunk{
+      system: :snes,
+      sample_rate: 32_000,
+      channels: 2,
+      sample_format: :s16le,
+      frame_count: 32,
+      data: pcm
+    })
+
+    :sys.get_state(output)
+
+    assert %{ready?: true, pending: [], audio: %{sample_rate: 32_000, channels: 2}} =
+             :sys.get_state(pid)
+  end
+
   test "builds mono and stereo player commands from core capabilities" do
     assert "mono" in AudioSink.default_command(1.0)
 

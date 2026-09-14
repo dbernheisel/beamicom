@@ -1,27 +1,27 @@
 # Beamicom SNES
 
-A dependency-free Super NES core written in Elixir. The native implementation
-currently establishes:
+A Super NES core written in Elixir, with a native implementation and optional
+Nx/EXLA PPU acceleration. The implementation currently includes:
 
 - copier-header detection and LoROM, HiROM, and ExHiROM header selection;
 - SNES header metadata and mirrored ROM addressing, including non-power-of-two
   images such as 3 MiB cartridges;
-- the CPU-visible WRAM, MMIO, and cartridge ROM map with slow/fast access costs;
+- the CPU-visible WRAM, SRAM, MMIO, and cartridge ROM map with slow/fast access costs;
 - an NTSC/PAL master-clock beam counter with NMI and H/V timer IRQs;
-- native Mode 0/1 background rendering and the initial S-PPU register path;
-- general DMA, the WRAM data port, and fast-ROM selection;
-- directional CPU/APU ports, an IPL upload handshake, and synchronized
-  SPC700/32 kHz timelines; and
-- an emulation/native-mode 65C816 interpreter subset with interrupt entry/RTI.
+- native Mode 0, Mode 1, and Mode 7 rendering with OBJ, windows, color math,
+  brightness, and scanline-varying state;
+- general DMA, HDMA, the WRAM data port, and fast-ROM selection;
+- directional CPU/APU ports, IPL upload, an SPC700 interpreter, S-DSP mixing,
+  and synchronized 32 kHz stereo PCM output;
+- an emulation/native-mode 65C816 interpreter with interrupt entry/RTI; and
+- optional frame-wide Nx/EXLA renderers for the supported Mode 1 and Mode 7
+  paths, with automatic native fallback.
 
-It boots the HiROM `Final Fantasy III` test image through its title screen, but
-it is not yet a playable core. Unsupported CPU opcodes return an error instead
-of silently behaving like NOP. Sprites, windows, color math, the remaining
-background modes, HDMA, controllers, cartridge coprocessors, SRAM, the
-SPC700/DSP engines, and DRAM-refresh stall insertion remain future milestones.
-The host-facing
-`Beamicom.Host.System` adapter should be added once the core can produce a real
-frame and audio boundary.
+It boots and renders the tested Final Fantasy II, Final Fantasy III, Super Mario
+World, and Super Metroid scenes with active audio. It is not yet a complete or
+cycle-perfect core: unsupported CPU operations return an error instead of
+silently behaving like NOP, and controllers, the remaining background modes,
+cartridge coprocessors, and further timing/DSP accuracy remain future work.
 
 Widths follow the 65C816 M and X flags. Bus accesses advance SNES master clocks
 using their mapped 6-, 8-, or 12-clock cost, while internal CPU cycles take six
@@ -36,17 +36,17 @@ reuses a completed RGB frame when final visual state is unchanged.
 mix test
 ```
 
-Run the reproducible native FF3 title-loop benchmark (180 warmup frames, then a
-360-frame window with a 60 FPS minimum):
+Run the default native FF3 benchmark:
 
 ```sh
 mix beamicom.snes.benchmark
 ```
 
-An explicit ROM path and workload can also be supplied:
+Select the optimized renderer explicitly for the 60 FPS E2E gate:
 
 ```sh
-mix beamicom.snes.benchmark /path/to/game.sfc --warmup 180 --frames 360 --minimum-fps 60.0
+mix beamicom.snes.benchmark "roms/Final Fantasy III.sfc" \
+  --renderer nx --warmup 1700 --frames 240 --minimum-fps 60.0
 ```
 
 ## Bring-up order
@@ -55,13 +55,11 @@ mix beamicom.snes.benchmark /path/to/game.sfc --warmup 180 --frames 360 --minimu
    decimal arithmetic, and emulation/native-mode edge cases.
 2. Complete the remaining CPU I/O registers, multiplication/division, WRAM
    port, DRAM refresh, DMA, and HDMA on the established master-clock timeline.
-3. Extend the native PPU through OBJ, windows, color math, and Modes 2-7;
-   implement the SPC700 and S-DSP behind the established ports and independent
-   1.024 MHz/32 kHz timing accumulators.
-4. Expose real frame/audio slices through `Beamicom.Host.System` and register
-   the core in clients.
-5. Add optional Nx renderers at the same frame/block boundary used by the NES
-   and Game Boy cores, keeping CPU-visible timing in native control state.
+3. Extend the native PPU through the remaining modes, mosaic, offset-per-tile,
+   hires, and interlace details; continue improving S-DSP accuracy.
+4. Complete controllers and host integration, then add cartridge coprocessors
+   such as Cx4 and Super FX behind the cartridge boundary.
+5. Expand Nx coverage while keeping CPU-visible timing in native control state.
 
 ## References
 

@@ -137,6 +137,50 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(frame.data, 0, 6) == <<255, 0, 0, 0, 0, 0>>
   end
 
+  test "Nx Mode 7 rendering is pixel-exact with the native renderer" do
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      ppu =
+        PPU.new()
+        |> PPU.write(0x2100, 0x0F)
+        |> PPU.write(0x2105, 0x07)
+        |> PPU.write(0x212C, 0x01)
+        |> PPU.write(0x211B, 0x00)
+        |> PPU.write(0x211B, 0x01)
+        |> write_vram_byte(0x0000, 0x01)
+        |> write_vram_byte(0x0081, 0x01)
+        |> write_cgram_color(1, 0x001F)
+
+      native = PPU.render_frame(ppu).data
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      nx = Beamicom.SNES.Nx.PPURenderer.render(ppu, objects)
+      assert nx == native
+    end
+  end
+
+  test "Nx resident VRAM is isolated between PPU instances" do
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      build_ppu = fn pixel ->
+        PPU.new()
+        |> PPU.write(0x2100, 0x0F)
+        |> PPU.write(0x2105, 0x07)
+        |> PPU.write(0x212C, 0x01)
+        |> PPU.write(0x211B, 0x00)
+        |> PPU.write(0x211B, 0x01)
+        |> write_vram_byte(0x0000, 0x01)
+        |> write_vram_byte(0x0081, pixel)
+        |> write_cgram_color(1, 0x001F)
+        |> write_cgram_color(2, 0x7C00)
+      end
+
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      red = Beamicom.SNES.Nx.PPURenderer.render(build_ppu.(1), objects)
+      blue = Beamicom.SNES.Nx.PPURenderer.render(build_ppu.(2), objects)
+
+      assert binary_part(red, 0, 3) == <<255, 0, 0>>
+      assert binary_part(blue, 0, 3) == <<0, 0, 255>>
+    end
+  end
+
   test "latches all Mode 7 transform registers through their shared byte latch" do
     ppu =
       PPU.new()

@@ -154,10 +154,13 @@ Beamicom.Scenic.play("../beamicom_snes/roms/Super Mario World.sfc")
 
 `.sfc` and `.smc` files can be loaded through a temporary Scenic adapter for
 checking the progress of the in-development SNES core. Its current frame and
-audio boundaries use the same host runtime and `GameSurface` as the other
-cores. Controller input and save states are disabled until the core supports
-them. If an unimplemented CPU instruction is reached, the adapter freezes at
-that point and continues displaying the current PPU state for inspection.
+32 kHz stereo audio boundaries use the same host runtime, prebuffered audio
+sink, and `GameSurface` as the other cores. Scenic selects the SNES Nx renderer
+by default so the audio producer remains realtime; the standalone SNES package
+retains its native-renderer default. Controller input and save states are
+disabled until the core supports them. If an unimplemented CPU instruction is
+reached, the adapter freezes at that point and continues displaying the current
+PPU state for inspection.
 
 ### Persistent configuration
 

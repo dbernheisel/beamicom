@@ -5,7 +5,8 @@ defmodule Beamicom.Scenic.AudioSink do
   PCM chunks, and writes raw signed-16-bit little-endian audio to an external
   player. This supports NES mono and Game Boy stereo without changing either
   emulator core. Initial PCM is prebuffered so renderer compilation and ordinary
-  frame-time jitter cannot starve the external player.
+  frame-time jitter cannot starve the external player. This supports NES mono
+  plus Game Boy and SNES stereo streams.
 
   On macOS the existing low-latency CoreAudio path is retained through ffmpeg;
   other platforms use ffplay. If the selected executable is unavailable, the

@@ -15,6 +15,10 @@ defmodule Beamicom.Scenic.SNESSystemTest do
     assert byte_size(video.data) == 256 * 224 * 3
     assert audio.system == :snes
     assert audio.sample_rate == 32_000
+    assert audio.channels == 2
+    assert audio.sample_format == :s16le
+    assert audio.frame_count > 0
+    assert byte_size(audio.data) == audio.frame_count * 4
     assert state.halted == nil
   end
 

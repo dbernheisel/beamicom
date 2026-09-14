@@ -45,22 +45,15 @@ defmodule Beamicom.SNES.Machine do
 
   defp next_frame(cpu, bus, target, remaining, machine) do
     case CPU.step_deferred(cpu, bus) do
-      {:ok, cpu, bus, clocks} ->
-        continue_frame(cpu, bus, target, remaining, clocks, machine)
-
-      {:error, reason, cpu, bus} ->
-        {:error, reason, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
-    end
-  end
-
-  defp continue_frame(cpu, bus, target, remaining, _clocks, machine) do
-    case bus do
-      %{ppu: %{frame_number: frame_number}} when frame_number > target ->
+      {:ok, cpu, %{ppu: %{frame_number: frame_number}} = bus} when frame_number > target ->
         {frame, bus} = Bus.take_frame(bus)
         {:ok, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}, frame}
 
-      _bus ->
+      {:ok, cpu, bus} ->
         next_frame(cpu, bus, target, remaining - 1, machine)
+
+      {:error, reason, cpu, bus} ->
+        {:error, reason, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
     end
   end
 

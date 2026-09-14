@@ -1,6 +1,6 @@
 if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
   defmodule Beamicom.SNES.Nx.PPURenderer do
-    @moduledoc "Frame-wide EXLA renderer for the common 256x224 Mode 1 background path."
+    @moduledoc "Frame-wide EXLA renderer for supported 256x224 Mode 1 and Mode 7 paths."
 
     import Nx.Defn
 
@@ -9,17 +9,15 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     def supported?(ppu) do
       states = states(ppu)
 
-      ppu.overscan? == false and length(states) == @height and
+      ppu.overscan? == false and length(states) in [1, @height] and
         Enum.uniq_by(states, &elem(&1, 20)) |> length() == 1 and
-        Enum.all?(states, fn state ->
-          elem(state, 2) == 1 and elem(state, 4) == 0
-        end)
+        supported_mode?(states)
     end
 
     def render(ppu, object_layer) do
       states = states(ppu)
 
-      controls =
+      control_rows =
         Enum.map(states, fn state ->
           bg_sc = elem(state, 5)
           name = elem(state, 6)
@@ -56,18 +54,31 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
             elem(elem(state, 11), 2),
             elem(elem(state, 11), 3),
             elem(elem(state, 12), 0),
-            elem(elem(state, 12), 1)
+            elem(elem(state, 12), 1),
+            elem(state, 22),
+            elem(state, 23),
+            elem(state, 24),
+            elem(state, 25),
+            elem(state, 26),
+            elem(state, 27),
+            elem(state, 28),
+            elem(state, 29),
+            elem(state, 30)
           ]
         end)
+
+      controls = controls_tensor(control_rows)
 
       palette = states |> hd() |> elem(21) |> :array.to_list()
 
       args = [
-        Nx.tensor(controls, type: :s32),
+        controls,
         vram_tensor(ppu),
         Nx.tensor(palette, type: :u16),
         object_layer |> Nx.from_binary(:u8) |> Nx.reshape({@height, @width, 2})
       ]
+
+      mode = states |> hd() |> elem(2)
 
       windowed? =
         Enum.any?(states, fn state ->
@@ -75,7 +86,37 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
             Bitwise.band(elem(state, 17), 0xF0) != 0
         end)
 
-      compiled(args, windowed?) |> apply(args) |> Nx.to_binary()
+      constant? = length(states) == 1
+
+      variant =
+        case {mode, windowed?, constant?} do
+          {7, _windowed?, true} -> :mode7_constant
+          {7, _windowed?, false} -> :mode7
+          {1, true, true} -> :mode1_windowed_constant
+          {1, true, false} -> :mode1_windowed
+          {1, false, true} -> :mode1_constant
+          {1, false, false} -> :mode1
+        end
+
+      compiled(args, variant) |> apply(args) |> Nx.to_binary()
+    end
+
+    defp supported_mode?(states) do
+      mode = states |> hd() |> elem(2)
+
+      case mode do
+        1 ->
+          Enum.all?(states, &(elem(&1, 2) == 1 and elem(&1, 4) == 0))
+
+        7 ->
+          Enum.all?(states, fn state ->
+            elem(state, 2) == 7 and elem(state, 10) == {0, 0, 0} and
+              Bitwise.band(elem(state, 17), 0xF0) == 0
+          end)
+
+        _other ->
+          false
+      end
     end
 
     defn render_mode1(controls, vram, palettes, objects) do
@@ -179,7 +220,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       object_priority = objects[[.., .., 1]] |> Nx.as_type(:s32)
 
       {main_index, main_layer} =
-        compose(
+        compose_unwindowed(
           c0,
           c1,
           c2,
@@ -192,13 +233,11 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           object_index,
           object_priority,
           main,
-          0,
-          controls,
           bg3_high
         )
 
       {sub_index, _sub_layer} =
-        compose(
+        compose_unwindowed(
           c0,
           c1,
           c2,
@@ -211,8 +250,6 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           object_index,
           object_priority,
           sub,
-          0,
-          controls,
           bg3_high
         )
 
@@ -243,6 +280,148 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       )
       |> Nx.as_type(:u8)
     end
+
+    defn render_mode7(controls, vram, palettes, objects) do
+      {bg_index, bg_opaque} = mode7_background(vram, controls)
+      object_index = objects[[.., .., 0]] |> Nx.as_type(:s32)
+      object_priority = objects[[.., .., 1]] |> Nx.as_type(:s32)
+
+      {main_index, main_layer} =
+        compose_mode7(
+          bg_index,
+          bg_opaque,
+          object_index,
+          object_priority,
+          full_column(controls, 14)
+        )
+
+      {sub_index, sub_layer} =
+        compose_mode7(
+          bg_index,
+          bg_opaque,
+          object_index,
+          object_priority,
+          full_column(controls, 15)
+        )
+
+      select = full_column(controls, 16)
+      palette_main = Nx.take(palettes, Nx.flatten(main_index)) |> Nx.reshape({@height, @width})
+      palette_sub = Nx.take(palettes, Nx.flatten(sub_index)) |> Nx.reshape({@height, @width})
+      direct_main = mode7_direct_color(main_index)
+      direct_sub = mode7_direct_color(sub_index)
+      first = Nx.select(band(select, 1) != 0 and main_layer == 0, direct_main, palette_main)
+      sub_color = Nx.select(band(select, 1) != 0 and sub_layer == 0, direct_sub, palette_sub)
+      second = Nx.select(band(select, 2) != 0, sub_color, full_column(controls, 18))
+      math = full_column(controls, 17)
+      enabled = band(shr(math, main_layer), 1) != 0
+      enabled = Nx.select(main_layer == 5, band(math, 0x20) != 0, enabled)
+      enabled = Nx.select(main_layer == 4, enabled and main_index >= 192, enabled)
+      color = Nx.select(enabled, blend(first, second, math), first)
+      brightness = column(controls, 0)
+
+      Nx.stack(
+        [
+          expand(band(color, 0x1F), brightness),
+          expand(band(shr(color, 5), 0x1F), brightness),
+          expand(band(shr(color, 10), 0x1F), brightness)
+        ],
+        axis: 2
+      )
+      |> Nx.as_type(:u8)
+    end
+
+    defnp mode7_background(vram, controls) do
+      a = signed16(column(controls, 33))
+      b = signed16(column(controls, 34))
+      c = signed16(column(controls, 35))
+      d = signed16(column(controls, 36))
+      center_x = signed13(column(controls, 37))
+      center_y = signed13(column(controls, 38))
+      hofs = signed13(column(controls, 31))
+      vofs = signed13(column(controls, 32))
+      select = column(controls, 30)
+      screen_y = Nx.iota({@height, 1}, type: :s32) + 1
+      screen_y = Nx.select(band(select, 2) != 0, 255 - screen_y, screen_y)
+      screen_x = Nx.iota({1, @width}, type: :s32) |> Nx.broadcast({@height, @width})
+      screen_x = Nx.select(band(full_column(controls, 30), 1) != 0, 255 - screen_x, screen_x)
+      xx = clip_mode7_offset(hofs - center_x)
+      yy = clip_mode7_offset(vofs - center_y)
+      row_x = band64(b * screen_y) + band64(b * yy) + center_x * 256
+      row_y = band64(d * screen_y) + band64(d * yy) + center_y * 256
+      texture_x = shr(a * screen_x + band64(a * xx) + row_x, 8)
+      texture_y = shr(c * screen_x + band64(c * xx) + row_y, 8)
+      in_bounds = texture_x >= 0 and texture_x < 1024 and texture_y >= 0 and texture_y < 1024
+      x = band(texture_x, 0x3FF)
+      y = band(texture_y, 0x3FF)
+      tilemap_address = band(y, -8) * 32 + band(shr(x, 2), -2)
+
+      tile =
+        Nx.take(vram, Nx.flatten(tilemap_address))
+        |> Nx.reshape({@height, @width})
+        |> Nx.as_type(:s32)
+
+      pixel_address = 1 + tile * 128 + band(y, 7) * 16 + band(x, 7) * 2
+
+      color =
+        Nx.take(vram, Nx.flatten(pixel_address))
+        |> Nx.reshape({@height, @width})
+        |> Nx.as_type(:s32)
+
+      tile_zero_address = 1 + band(y, 7) * 16 + band(x, 7) * 2
+
+      tile_zero_color =
+        Nx.take(vram, Nx.flatten(tile_zero_address))
+        |> Nx.reshape({@height, @width})
+        |> Nx.as_type(:s32)
+
+      repeat = band(shr(full_column(controls, 30), 6), 3)
+      wrapped = repeat == 0 or repeat == 1
+      color = Nx.select(wrapped or in_bounds, color, Nx.select(repeat == 3, tile_zero_color, 0))
+      {color, color != 0}
+    end
+
+    defnp compose_mode7(bg_index, bg_opaque, object_index, object_priority, screen) do
+      bg_score = Nx.select(bg_opaque and band(screen, 1) != 0, 2, 0)
+
+      object_score =
+        Nx.select(
+          object_priority == 4,
+          5,
+          Nx.select(
+            object_priority == 3,
+            4,
+            Nx.select(object_priority == 2, 3, Nx.select(object_priority == 1, 1, 0))
+          )
+        )
+
+      object_score =
+        Nx.select(object_priority > 0 and band(screen, 0x10) != 0, object_score, 0)
+
+      object_wins = object_score > bg_score
+      index = Nx.select(object_wins, object_index, Nx.select(bg_score > 0, bg_index, 0))
+      layer = Nx.select(object_wins, 4, Nx.select(bg_score > 0, 0, 5))
+      {index, layer}
+    end
+
+    defnp mode7_direct_color(index) do
+      band(index, 0x07) * 4 + band(index, 0x38) * 16 + band(index, 0xC0) * 128
+    end
+
+    defnp signed16(value) do
+      value = band(value, 0xFFFF)
+      Nx.select(band(value, 0x8000) != 0, value - 0x10000, value)
+    end
+
+    defnp signed13(value) do
+      value = band(value, 0x1FFF)
+      Nx.select(band(value, 0x1000) != 0, value - 0x2000, value)
+    end
+
+    defnp clip_mode7_offset(value) do
+      Nx.select(band(value, 0x2000) != 0, bor(value, -0x400), band(value, 0x3FF))
+    end
+
+    defnp(band64(value), do: band(value, -64))
 
     defnp background(vram, controls, bg, bpp) do
       x = Nx.iota({1, @width}, type: :s32) + column(controls, 8 + bg)
@@ -361,6 +540,62 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       {Nx.select(object_wins, object_index, bg_index), Nx.select(object_wins, 4, bg_layer)}
     end
 
+    defnp compose_unwindowed(
+            c0,
+            c1,
+            c2,
+            r0,
+            r1,
+            r2,
+            o0,
+            o1,
+            o2,
+            object_index,
+            object_priority,
+            screen,
+            bg3_high
+          ) do
+      s0 = Nx.select(o0 and band(screen, 1) != 0, r0, 0)
+      s1 = Nx.select(o1 and band(screen, 2) != 0, r1, 0)
+      s2 = Nx.select(o2 and band(screen, 4) != 0, r2, 0)
+      bg_score = Nx.max(Nx.max(s0, s1), s2)
+
+      bg_index =
+        Nx.select(
+          s0 >= s1 and s0 >= s2 and s0 > 0,
+          c0,
+          Nx.select(s1 >= s2 and s1 > 0, c1, Nx.select(s2 > 0, c2, 0))
+        )
+
+      bg_layer =
+        Nx.select(
+          s0 >= s1 and s0 >= s2 and s0 > 0,
+          0,
+          Nx.select(s1 >= s2 and s1 > 0, 1, Nx.select(s2 > 0, 2, 5))
+        )
+
+      object_score =
+        Nx.select(
+          bg3_high,
+          Nx.select(
+            object_priority == 4,
+            9,
+            Nx.select(object_priority == 3, 6, Nx.select(object_priority == 2, 3, 2))
+          ),
+          Nx.select(
+            object_priority == 4,
+            11,
+            Nx.select(object_priority == 3, 8, Nx.select(object_priority == 2, 5, 2))
+          )
+        )
+
+      object_score =
+        Nx.select(object_priority > 0 and band(screen, 0x10) != 0, object_score, 0)
+
+      object_wins = object_score > bg_score
+      {Nx.select(object_wins, object_index, bg_index), Nx.select(object_wins, 4, bg_layer)}
+    end
+
     defnp layer_masked(controls, screen_window, layer) do
       band(screen_window, 1 <<< layer) != 0 and window_mask(controls, layer)
     end
@@ -441,25 +676,38 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defnp(expand(component, brightness), do: Nx.quotient(component * 255 * brightness, 31 * 15))
-    defnp(column(tensor, index), do: tensor[[.., index]] |> Nx.reshape({@height, 1}))
+
+    defnp column(tensor, index) do
+      tensor[[.., index]] |> Nx.new_axis(1) |> Nx.broadcast({@height, 1})
+    end
 
     defnp(full_column(tensor, index),
       do: Nx.broadcast(column(tensor, index), {@height, @width})
     )
 
     defnp(band(a, b), do: Nx.bitwise_and(a, b))
+    defnp(bor(a, b), do: Nx.bitwise_or(a, b))
     defnp(shr(a, b), do: Nx.right_shift(a, b))
 
     defp states(%{scanline_states: states}) when is_list(states), do: Enum.reverse(states)
 
     defp states(ppu),
-      do: List.duplicate(Beamicom.SNES.PPU.visual_state(ppu), @height)
+      do: [Beamicom.SNES.PPU.visual_state(ppu)]
+
+    defp controls_tensor([row]) do
+      row
+      |> Nx.tensor(type: :s32)
+      |> Nx.reshape({1, length(row)})
+    end
+
+    defp controls_tensor(rows), do: Nx.tensor(rows, type: :s32)
 
     defp vram_tensor(ppu) do
       key = {__MODULE__, :resident_vram}
 
       case Process.get(key) do
-        {version, tensor} when version == ppu.vram_version ->
+        {identity, version, tensor}
+        when identity == ppu.cache_identity and version == ppu.vram_version ->
           tensor
 
         _other ->
@@ -470,17 +718,27 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
             |> Nx.from_binary(:u8)
             |> Nx.backend_copy({EXLA.Backend, client: :host})
 
-          Process.put(key, {ppu.vram_version, tensor})
+          Process.put(key, {ppu.cache_identity, ppu.vram_version, tensor})
           tensor
       end
     end
 
-    defp compiled(args, windowed?) do
-      key = {__MODULE__, :mode1_background_obj_windows_v3, windowed?}
+    defp compiled(args, variant) do
+      key = {__MODULE__, :background_obj_v4, variant}
 
       case :persistent_term.get(key, nil) do
         nil ->
-          function = if windowed?, do: &render_mode1/4, else: &render_mode1_unwindowed/4
+          function =
+            case variant do
+              variant when variant in [:mode1_windowed, :mode1_windowed_constant] ->
+                &render_mode1/4
+
+              variant when variant in [:mode1, :mode1_constant] ->
+                &render_mode1_unwindowed/4
+
+              variant when variant in [:mode7, :mode7_constant] ->
+                &render_mode7/4
+            end
 
           compiled =
             EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)

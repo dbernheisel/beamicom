@@ -1,12 +1,12 @@
 defmodule Beamicom.SNES.PPU do
   @moduledoc """
-  Initial native S-PPU register file and frame renderer.
+  Native S-PPU register file and frame renderer.
 
   The register path implements forced blank/brightness, BG mode and tile-map
   bases, BG tile-data bases, scroll, VRAM addressing/increment, CGRAM writes,
-  main-screen enables, and SETINI. The renderer currently supports the four
-  Mode 0 backgrounds and the three Mode 1 backgrounds; OBJ, windows, color
-  math, mosaic, offset-per-tile, hires, and interlace field weaving are pending.
+  main/sub-screen enables, windows, color math, Mode 7 transforms, and SETINI.
+  The native renderer supports Mode 0, Mode 1, Mode 7, and OBJ. Mosaic,
+  offset-per-tile modes, hires, and interlace field weaving are pending.
 
   VRAM and CGRAM use fixed persistent arrays so a byte write updates a shallow
   tree rather than copying the complete memory binary.
@@ -65,6 +65,7 @@ defmodule Beamicom.SNES.PPU do
   ]
 
   defstruct vram: :array.new(0x10000, default: 0, fixed: true),
+            cache_identity: nil,
             cgram: :array.new(256, default: 0, fixed: true),
             oam: :array.new(544, default: 0, fixed: true),
             brightness: 0,
@@ -114,6 +115,7 @@ defmodule Beamicom.SNES.PPU do
             render_dirty?: true,
             vram_version: 0,
             vram_page_versions: List.duplicate(0, 256) |> List.to_tuple(),
+            vram_block_versions: List.duplicate(0, 8) |> List.to_tuple(),
             cgram_version: 0,
             cached_render_key: nil,
             cached_frame_data: nil,
@@ -131,7 +133,7 @@ defmodule Beamicom.SNES.PPU do
   @type t :: %__MODULE__{}
 
   @spec new() :: t()
-  def new, do: %__MODULE__{}
+  def new, do: %__MODULE__{cache_identity: make_ref()}
 
   @spec write(t(), 0x2100..0x213F, byte()) :: t()
   def write(ppu, 0x2100, value) do
@@ -433,7 +435,9 @@ defmodule Beamicom.SNES.PPU do
         do: 0..(height - 1) |> Enum.map(&elem(elem(scanlines, &1), 9)) |> List.to_tuple(),
         else: ppu.obsel
 
-    cache_key = {ppu.oam_version, ppu.vram_version, obsel_key}
+    cache_key =
+      {ppu.cache_identity, ppu.oam_version, object_vram_versions(ppu, obsel_key), obsel_key}
+
     process_key = {__MODULE__, :nx_object_layer}
 
     case Process.get(process_key) do
@@ -448,28 +452,114 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp build_nx_object_layer(ppu, height, scanlines) do
+    obsel_key =
+      if scanlines,
+        do: 0..(height - 1) |> Enum.map(&elem(elem(scanlines, &1), 9)) |> List.to_tuple(),
+        else: ppu.obsel
+
+    cache_key = {ppu.cache_identity, ppu.oam_version, obsel_key}
+    process_key = {__MODULE__, :nx_object_rows}
+
+    {rows, entries} =
+      case Process.get(process_key) do
+        {^cache_key, entries} ->
+          refresh_nx_object_rows(ppu, entries)
+
+        _other ->
+          build_nx_object_rows(ppu, height, scanlines)
+      end
+
+    Process.put(process_key, {cache_key, entries})
+    IO.iodata_to_binary(rows)
+  end
+
+  defp build_nx_object_rows(ppu, height, scanlines) do
     object_ppu = %{ppu | oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()}
 
-    {rows, _cache} =
+    {entries, _cache} =
       Enum.map_reduce(0..(height - 1), %{}, fn y, cache ->
         row_ppu =
           if scanlines, do: apply_visual_state(object_ppu, elem(scanlines, y)), else: object_ppu
 
         {sprites, cache} = cached_obj_sprites(row_ppu, cache)
-        {pixels, _priorities} = render_obj_row(row_ppu, y, sprites)
-
-        row =
-          for x <- 0..(@width - 1), into: <<>> do
-            case Map.get(pixels, x) do
-              {priority, color} -> <<color, priority + 1>>
-              nil -> <<0, 0>>
-            end
-          end
-
-        {row, cache}
+        selected = select_obj_sprites(sprites, y)
+        pages = obj_row_vram_pages(row_ppu, selected)
+        versions = obj_page_versions(row_ppu, pages)
+        row = render_nx_obj_row(row_ppu, selected)
+        {{row_ppu.obsel, selected, pages, versions, row}, cache}
       end)
 
-    rows |> IO.iodata_to_binary()
+    entries = List.to_tuple(entries)
+    {entries |> Tuple.to_list() |> Enum.map(&elem(&1, 4)), entries}
+  end
+
+  defp refresh_nx_object_rows(ppu, entries) do
+    {rows, entries} =
+      entries
+      |> Tuple.to_list()
+      |> Enum.map_reduce([], fn {obsel, sprites, pages, old_versions, old_row}, entries ->
+        row_ppu = %{ppu | obsel: obsel}
+        versions = obj_page_versions(row_ppu, pages)
+
+        row =
+          if versions == old_versions,
+            do: old_row,
+            else: render_nx_obj_row(row_ppu, sprites)
+
+        {row, [{obsel, sprites, pages, versions, row} | entries]}
+      end)
+
+    {rows, entries |> Enum.reverse() |> List.to_tuple()}
+  end
+
+  defp render_nx_obj_row(ppu, sprites) do
+    {pixels, _priorities} = render_selected_obj_row(ppu, sprites)
+
+    for x <- 0..(@width - 1), into: <<>> do
+      case Map.get(pixels, x) do
+        {priority, color} -> <<color, priority + 1>>
+        nil -> <<0, 0>>
+      end
+    end
+  end
+
+  defp obj_row_vram_pages(ppu, sprites) do
+    sprites
+    |> Enum.flat_map(fn {x, row, size, tile, attributes} ->
+      if x >= @width or x + size <= 0 do
+        []
+      else
+        source_y = if((attributes &&& 0x80) != 0, do: size - 1 - row, else: row)
+
+        name_offset =
+          if (attributes &&& 1) != 0, do: ((ppu.obsel >>> 3 &&& 3) + 1) * 0x2000, else: 0
+
+        base = (ppu.obsel &&& 0x07) * 0x4000 + name_offset
+
+        for tile_x <- 0..(div(size, 8) - 1) do
+          obj_tile = tile + tile_x + div(source_y, 8) * 16 &&& 0xFF
+          (base + obj_tile * 32 &&& 0xFFFF) >>> 8
+        end
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp obj_page_versions(ppu, pages),
+    do: Enum.map(pages, &elem(ppu.vram_page_versions, &1))
+
+  defp object_vram_versions(ppu, obsel) when is_integer(obsel) do
+    base = (obsel &&& 0x03) <<< 1
+    second = base + (obsel >>> 3 &&& 0x03) + 1 &&& 0x07
+    {elem(ppu.vram_block_versions, base), elem(ppu.vram_block_versions, second)}
+  end
+
+  defp object_vram_versions(ppu, obsel_per_line) when is_tuple(obsel_per_line) do
+    obsel_per_line
+    |> Tuple.to_list()
+    |> Enum.uniq()
+    |> Enum.map(&{&1, object_vram_versions(ppu, &1)})
   end
 
   defp render_rows(rows, render_ppu, scanlines, palette, color_data) do
@@ -833,22 +923,29 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp render_obj_row(ppu, screen_y, parsed_sprites) do
-    sprites =
-      parsed_sprites
-      |> Enum.reduce_while({[], 0}, fn {x, y, size, tile, attributes}, {sprites, count} ->
-        row = screen_y - y &&& 0xFF
+    parsed_sprites
+    |> select_obj_sprites(screen_y)
+    |> then(&render_selected_obj_row(ppu, &1))
+  end
 
-        if row < size do
-          sprites = [{x, row, size, tile, attributes} | sprites]
-          count = count + 1
+  defp select_obj_sprites(parsed_sprites, screen_y) do
+    parsed_sprites
+    |> Enum.reduce_while({[], 0}, fn {x, y, size, tile, attributes}, {sprites, count} ->
+      row = screen_y - y &&& 0xFF
 
-          if count == 32, do: {:halt, {sprites, count}}, else: {:cont, {sprites, count}}
-        else
-          {:cont, {sprites, count}}
-        end
-      end)
-      |> elem(0)
+      if row < size do
+        sprites = [{x, row, size, tile, attributes} | sprites]
+        count = count + 1
 
+        if count == 32, do: {:halt, {sprites, count}}, else: {:cont, {sprites, count}}
+      else
+        {:cont, {sprites, count}}
+      end
+    end)
+    |> elem(0)
+  end
+
+  defp render_selected_obj_row(ppu, sprites) do
     pixels =
       Enum.reduce(sprites, %{}, fn {x, row, size, tile, attributes}, pixels ->
         render_obj_sprite_row(ppu, pixels, x, row, size, tile, attributes)
@@ -859,6 +956,10 @@ defmodule Beamicom.SNES.PPU do
 
     {pixels, priorities}
   end
+
+  defp render_obj_sprite_row(_ppu, pixels, x, _row, size, _tile, _attributes)
+       when x >= @width or x + size <= 0,
+       do: pixels
 
   defp render_obj_sprite_row(ppu, pixels, x, row, size, tile, attributes) do
     hflip? = (attributes &&& 0x40) != 0
@@ -1122,6 +1223,13 @@ defmodule Beamicom.SNES.PPU do
         do: put_elem(ppu.vram_page_versions, page, elem(ppu.vram_page_versions, page) + 1),
         else: ppu.vram_page_versions
 
+    block = address >>> 13
+
+    block_versions =
+      if dirty?,
+        do: put_elem(ppu.vram_block_versions, block, elem(ppu.vram_block_versions, block) + 1),
+        else: ppu.vram_block_versions
+
     increment_on_high? = (ppu.vmain &&& 0x80) != 0
 
     if increment_on_high? == (byte == :high) do
@@ -1131,7 +1239,8 @@ defmodule Beamicom.SNES.PPU do
           vmadd: ppu.vmadd + vram_increment(ppu.vmain) &&& 0xFFFF,
           render_dirty?: ppu.render_dirty? or dirty?,
           vram_version: ppu.vram_version + if(dirty?, do: 1, else: 0),
-          vram_page_versions: page_versions
+          vram_page_versions: page_versions,
+          vram_block_versions: block_versions
       }
     else
       %{
@@ -1139,7 +1248,8 @@ defmodule Beamicom.SNES.PPU do
         | vram: vram,
           render_dirty?: ppu.render_dirty? or dirty?,
           vram_version: ppu.vram_version + if(dirty?, do: 1, else: 0),
-          vram_page_versions: page_versions
+          vram_page_versions: page_versions,
+          vram_block_versions: block_versions
       }
     end
   end

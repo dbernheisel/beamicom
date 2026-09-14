@@ -1,5 +1,11 @@
 import Config
 
+# Scenic already ships Nx and EXLA, and the SNES core needs its accelerated
+# Mode 1/7 renderer to keep the 32 kHz audio stream fed in realtime. This only
+# changes the renderer default when the core is hosted by this application;
+# the standalone SNES package remains native-first.
+config :beamicom_snes, ppu_renderer: :nx
+
 # Opt the NES and Game Boy render boundaries into their EXLA implementations at compile
 # time. Keep this environment variable set for every Mix invocation so Mix's
 # compile-env validation sees the same configuration at build and launch.

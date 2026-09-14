@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
   alias Beamicom.SNES.Machine
 
-  @shortdoc "Benchmarks the native SNES core with a local ROM"
+  @shortdoc "Benchmarks the SNES core with a local ROM"
   @default_roms ["roms/Final Fantasy III.sfc", "roms/Final Fantasy 3.sfc"]
 
   @impl Mix.Task
@@ -12,7 +12,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
     {opts, paths, invalid} =
       OptionParser.parse(args,
-        strict: [warmup: :integer, frames: :integer, minimum_fps: :float]
+        strict: [warmup: :integer, frames: :integer, minimum_fps: :float, renderer: :string]
       )
 
     if invalid != [], do: Mix.raise("invalid benchmark options: #{inspect(invalid)}")
@@ -21,6 +21,8 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     warmup = positive_option!(opts, :warmup, 300)
     frames = positive_option!(opts, :frames, 360)
     minimum_fps = Keyword.get(opts, :minimum_fps, 60.0)
+    renderer = renderer_option!(opts)
+    Application.put_env(:beamicom_snes, :ppu_renderer, renderer)
 
     {:ok, machine} = path |> File.read!() |> Machine.load()
     {machine, warmup_frame, _warmup_audio_frames, _warmup_pcm} = run_frames!(machine, warmup)
@@ -28,6 +30,11 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     if all_black?(warmup_frame) do
       Mix.raise("#{Path.basename(path)} still produced an all-black frame after #{warmup} frames")
     end
+
+    # Do not charge the measured interval for short-lived data retained from
+    # ROM loading and warm-up. Collections caused by the measured frames are
+    # still included in elapsed time.
+    :erlang.garbage_collect()
 
     renders_before = machine.bus.ppu.rendered_frames
     reuses_before = machine.bus.ppu.reused_frames
@@ -38,6 +45,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     fps = frames / elapsed_seconds
 
     Mix.shell().info("ROM: #{path}")
+    Mix.shell().info("Renderer: #{renderer}")
     Mix.shell().info("Frames: #{frames} after #{warmup} warmup frames")
     Mix.shell().info(:io_lib.format("Throughput: ~.2f FPS (~.2f ms/frame)", [fps, 1_000 / fps]))
 
@@ -57,7 +65,8 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
     if fps < minimum_fps do
       Mix.raise(
-        :io_lib.format("native throughput ~.2f FPS is below the ~.2f FPS requirement", [
+        :io_lib.format("~s throughput ~.2f FPS is below the ~.2f FPS requirement", [
+          Atom.to_string(renderer),
           fps,
           minimum_fps
         ])
@@ -66,16 +75,18 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     end
   end
 
-  defp run_frames!(machine, count), do: run_frames!(machine, count, nil, 0, <<>>)
+  defp run_frames!(machine, 1), do: run_frame!(machine)
 
-  defp run_frames!(machine, 0, frame, audio_frames, pcm),
-    do: {machine, frame, audio_frames, pcm}
+  defp run_frames!(machine, remaining) when remaining > 1 do
+    {machine, _frame, _audio_frames, _pcm} = run_frame!(machine)
+    run_frames!(machine, remaining - 1)
+  end
 
-  defp run_frames!(machine, remaining, _frame, _audio_frames, _pcm) do
+  defp run_frame!(machine) do
     case Machine.run_until_frame(machine) do
       {:ok, machine, frame} ->
         {audio_frames, pcm, machine} = Machine.take_audio_pcm(machine)
-        run_frames!(machine, remaining - 1, frame, audio_frames, pcm)
+        {machine, frame, audio_frames, pcm}
 
       {:error, reason, _machine} ->
         Mix.raise("emulation stopped: #{inspect(reason)}")
@@ -87,6 +98,16 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
   defp positive_option!(opts, key, default) do
     value = Keyword.get(opts, key, default)
     if is_integer(value) and value > 0, do: value, else: Mix.raise("--#{key} must be positive")
+  end
+
+  defp renderer_option!(opts) do
+    default = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
+
+    case Keyword.get(opts, :renderer, Atom.to_string(default)) do
+      "native" -> :native
+      "nx" -> :nx
+      _other -> Mix.raise("--renderer must be native or nx")
+    end
   end
 
   defp default_rom! do
