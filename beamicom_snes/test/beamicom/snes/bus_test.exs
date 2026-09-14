@@ -18,6 +18,16 @@ defmodule Beamicom.SNES.BusTest do
     assert Bus.peek(bus, 0x7F0020) == 0x99
   end
 
+  test "persists cartridge SRAM through LoROM mirrors" do
+    {:ok, cartridge} = :lorom |> SNESTestROM.build(ram_size_code: 3) |> Cartridge.load()
+    bus = Bus.new(cartridge)
+
+    assert Bus.peek(bus, 0x700123) == 0xFF
+    {bus, 8} = Bus.write(bus, 0x700123, 0x42)
+    assert Bus.peek(bus, 0x702123) == 0x42
+    assert Bus.peek(bus, 0xF00123) == 0x42
+  end
+
   test "prices WRAM, MMIO, JOYSER, slow ROM, and fast ROM accesses", %{bus: bus} do
     assert Bus.access_clocks(bus, 0x7E0000) == 8
     assert Bus.access_clocks(bus, 0x002100) == 6

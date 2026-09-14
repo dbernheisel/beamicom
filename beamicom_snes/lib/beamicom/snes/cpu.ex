@@ -9,6 +9,7 @@ defmodule Beamicom.SNES.CPU do
   """
 
   import Bitwise
+  require Beamicom.SNES.Bus.CPUAccess
   alias Beamicom.SNES.Bus, as: SystemBus
   alias Beamicom.SNES.Bus.CPUAccess, as: Bus
 
@@ -50,7 +51,27 @@ defmodule Beamicom.SNES.CPU do
 
   @doc false
   def step_deferred(%__MODULE__{} = cpu, %SystemBus{} = bus) do
-    do_step(cpu, bus, :events)
+    {nmi?, bus} = Bus.take_nmi(bus)
+
+    cond do
+      nmi? ->
+        finish_deferred_interrupt(cpu, bus, :nmi)
+
+      Bus.irq_pending?(bus) and (cpu.p &&& @i) == 0 ->
+        finish_deferred_interrupt(cpu, bus, :irq)
+
+      true ->
+        opcode_address = cpu.pb <<< 16 ||| cpu.pc
+        {opcode, cpu, bus} = fetch8(cpu, bus)
+
+        case execute(opcode, cpu, bus) do
+          {:ok, cpu, bus} ->
+            {:ok, %{cpu | instructions: cpu.instructions + 1}, Bus.flush_events(bus), 0}
+
+          {:error, reason, cpu, bus} ->
+            {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
+        end
+    end
   end
 
   defp do_step(cpu, bus, sync) do
@@ -950,6 +971,11 @@ defmodule Beamicom.SNES.CPU do
     bus = sync_bus(bus, sync)
     clocks = Bus.master_clocks(bus) - start
     {:ok, %{cpu | master_clocks: cpu.master_clocks + clocks}, bus, clocks}
+  end
+
+  defp finish_deferred_interrupt(cpu, bus, kind) do
+    {cpu, bus} = interrupt(cpu, bus, kind)
+    {:ok, cpu, Bus.flush_events(bus), 0}
   end
 
   defp sync_bus(bus, :all), do: Bus.flush(bus)

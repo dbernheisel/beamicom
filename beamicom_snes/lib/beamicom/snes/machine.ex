@@ -31,7 +31,7 @@ defmodule Beamicom.SNES.Machine do
           {:ok, t(), Beamicom.SNES.PPU.frame()} | {:error, term(), t()}
   def run_until_frame(%__MODULE__{} = machine, limit \\ @max_instructions_per_frame)
       when is_integer(limit) and limit > 0 do
-    next_frame(machine, machine.bus.ppu.frame_number, limit)
+    next_frame(machine.cpu, machine.bus, machine.bus.ppu.frame_number, limit, machine)
   end
 
   @doc "Drains audio accumulated on the shared master-clock timeline."
@@ -40,26 +40,29 @@ defmodule Beamicom.SNES.Machine do
     {frames, pcm, %{machine | bus: bus}}
   end
 
-  defp next_frame(machine, _target, 0), do: {:error, :frame_timeout, machine}
+  defp next_frame(cpu, bus, _target, 0, machine),
+    do: {:error, :frame_timeout, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
 
-  defp next_frame(machine, target, remaining) do
-    case CPU.step_deferred(machine.cpu, machine.bus) do
+  defp next_frame(cpu, bus, target, remaining, machine) do
+    case CPU.step_deferred(cpu, bus) do
       {:ok, cpu, bus, clocks} ->
-        continue_frame(%{machine | cpu: cpu, bus: bus}, target, remaining, clocks)
+        continue_frame(cpu, bus, target, remaining, clocks, machine)
 
       {:error, reason, cpu, bus} ->
-        {:error, reason, %{machine | cpu: cpu, bus: bus}}
+        {:error, reason, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
     end
   end
 
-  defp continue_frame(machine, target, remaining, _clocks) do
-    case machine do
-      %{bus: %{ppu: %{frame_number: frame_number}}} when frame_number > target ->
-        {frame, bus} = Bus.take_frame(machine.bus)
-        {:ok, %{machine | bus: bus}, frame}
+  defp continue_frame(cpu, bus, target, remaining, _clocks, machine) do
+    case bus do
+      %{ppu: %{frame_number: frame_number}} when frame_number > target ->
+        {frame, bus} = Bus.take_frame(bus)
+        {:ok, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}, frame}
 
-      _machine ->
-        next_frame(machine, target, remaining - 1)
+      _bus ->
+        next_frame(cpu, bus, target, remaining - 1, machine)
     end
   end
+
+  defp sync_cpu_clock(cpu, bus), do: %{cpu | master_clocks: Bus.cpu_master_clocks(bus)}
 end

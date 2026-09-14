@@ -9,7 +9,10 @@ defmodule BeamicomSNES.MixProject do
       # explicit while accepting the stable 1.x toolchain as it lands.
       elixir: ">= 1.20.0-rc.1 and < 2.0.0",
       start_permanent: Mix.env() == :prod,
-      deps: []
+      deps: [
+        {:nx, "~> 1.0", optional: true},
+        {:exla, "~> 1.0", optional: true}
+      ]
     ]
   end
 

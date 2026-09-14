@@ -59,6 +59,7 @@ defmodule Beamicom.SNES.Cartridge do
       when is_integer(address) and address in 0..0xFFFFFF do
     case raw_offset(cart.layout, address) do
       :unmapped -> :unmapped
+      offset when offset < cart.size -> {:ok, offset}
       offset -> {:ok, mirror_offset(offset, cart.size)}
     end
   end
@@ -72,6 +73,51 @@ defmodule Beamicom.SNES.Cartridge do
       {:ok, :binary.at(cart.rom, offset)}
     end
   end
+
+  @doc false
+  def read_or(%__MODULE__{} = cart, address, default)
+      when is_integer(address) and address in 0..0xFFFFFF do
+    case raw_offset(cart.layout, address) do
+      :unmapped -> default
+      offset when offset < cart.size -> :binary.at(cart.rom, offset)
+      offset -> :binary.at(cart.rom, mirror_offset(offset, cart.size))
+    end
+  end
+
+  def read_or(%__MODULE__{}, _address, default), do: default
+
+  @doc "Maps a CPU address to battery-backed cartridge RAM when present."
+  @spec address_to_sram_offset(t(), non_neg_integer()) ::
+          {:ok, non_neg_integer()} | :unmapped
+  def address_to_sram_offset(%__MODULE__{header: %{declared_ram_size: size}}, _address)
+      when not is_integer(size) or size <= 0,
+      do: :unmapped
+
+  def address_to_sram_offset(%__MODULE__{} = cart, address)
+      when is_integer(address) and address in 0..0xFFFFFF do
+    bank = address >>> 16
+    offset = address &&& 0xFFFF
+
+    raw =
+      case cart.layout do
+        :lorom when offset < 0x8000 and (bank in 0x70..0x7D or bank in 0xF0..0xFF) ->
+          (bank &&& 0x0F) <<< 15 ||| offset
+
+        layout
+        when layout in [:hirom, :exhirom] and offset in 0x6000..0x7FFF and
+               (bank in 0x20..0x3F or bank in 0xA0..0xBF) ->
+          (bank &&& 0x1F) <<< 13 ||| (offset &&& 0x1FFF)
+
+        _other ->
+          :unmapped
+      end
+
+    if raw == :unmapped,
+      do: :unmapped,
+      else: {:ok, rem(raw, cart.header.declared_ram_size)}
+  end
+
+  def address_to_sram_offset(%__MODULE__{}, _address), do: :unmapped
 
   @doc "Mirrors an offset into a possibly non-power-of-two physical ROM size."
   @spec mirror_offset(non_neg_integer(), pos_integer()) :: non_neg_integer()

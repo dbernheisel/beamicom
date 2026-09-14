@@ -70,6 +70,21 @@ defmodule Beamicom.SNES.CartridgeTest do
     assert Cartridge.checksum(<<1, 2, 3, 4, 5>>) == 30
   end
 
+  test "maps LoROM and HiROM battery-backed RAM mirrors" do
+    lorom = load!(:lorom, ram_size_code: 3)
+    hirom = load!(:hirom, ram_size_code: 3)
+
+    assert Cartridge.address_to_sram_offset(lorom, 0x700000) == {:ok, 0}
+    assert Cartridge.address_to_sram_offset(lorom, 0x702000) == {:ok, 0}
+    assert Cartridge.address_to_sram_offset(lorom, 0xF00001) == {:ok, 1}
+    assert Cartridge.address_to_sram_offset(lorom, 0x6F0000) == :unmapped
+
+    assert Cartridge.address_to_sram_offset(hirom, 0x206000) == {:ok, 0}
+    assert Cartridge.address_to_sram_offset(hirom, 0x216000) == {:ok, 0}
+    assert Cartridge.address_to_sram_offset(hirom, 0xA06001) == {:ok, 1}
+    assert Cartridge.address_to_sram_offset(hirom, 0x706000) == :unmapped
+  end
+
   test "reports media without a plausible mapped internal header" do
     assert {:error, :snes_header_not_found} = Cartridge.load(:binary.copy(<<0>>, 0x10000))
     assert {:error, :snes_header_not_found} = Cartridge.load(<<1, 2, 3>>)

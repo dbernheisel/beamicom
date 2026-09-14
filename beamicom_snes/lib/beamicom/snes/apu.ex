@@ -23,15 +23,14 @@ defmodule Beamicom.SNES.APU do
             ipl_address: 0,
             driver_entry: 0,
             driver_start_clocks: 0,
+            ipl_pending_port0: nil,
             ram: :array.new(0x10000, default: 0, fixed: true),
             spc: nil,
             sample_phase: 0,
             spc_phase: 0,
             pending_frames: 0,
-            pending_pcm: [],
             pending_spc_cycles: 0,
-            elapsed_master_clocks: 0,
-            port_history: []
+            elapsed_master_clocks: 0
 
   @type t :: %__MODULE__{}
 
@@ -48,12 +47,22 @@ defmodule Beamicom.SNES.APU do
   @spec cpu_write(t(), 0..3, byte()) :: t()
   def cpu_write(%__MODULE__{} = apu, port, value) when port in 0..3 do
     value = Bitwise.band(value, 0xFF)
-    history = [{port, value} | apu.port_history] |> Enum.take(64)
     cpu_to_apu = put_elem(apu.cpu_to_apu, port, value)
     spc = if apu.spc, do: SPC700.put_input_port(apu.spc, port, value), else: nil
-    apu = %{apu | cpu_to_apu: cpu_to_apu, spc: spc, port_history: history}
+    apu = %{apu | cpu_to_apu: cpu_to_apu, spc: spc}
 
-    handle_ipl_write(apu, port, value)
+    if port == 0 and is_nil(spc) and apu.ipl_state in [:ready, :upload] do
+      %{apu | ipl_pending_port0: value}
+    else
+      handle_ipl_write(apu, port, value)
+    end
+  end
+
+  @doc false
+  def sync_cpu_read(%__MODULE__{} = apu, port) when port in 0..3 do
+    apu = apply_pending_ipl_write(apu)
+    value = cpu_read(apu, port)
+    {value, start_driver_after_ipl_ack(apu)}
   end
 
   @doc "APU-side helpers reserved for the forthcoming SPC700 interpreter."
@@ -77,14 +86,6 @@ defmodule Beamicom.SNES.APU do
 
     spc = if apu.spc, do: SPC700.run(apu.spc, spc_cycles), else: nil
 
-    {spc, pcm} =
-      if spc do
-        {dsp, pcm} = DSP.render(spc.dsp, spc.ram, frames)
-        {%{spc | dsp: dsp}, pcm}
-      else
-        {spc, :binary.copy(<<0::signed-little-16, 0::signed-little-16>>, frames)}
-      end
-
     apu_to_cpu = if spc, do: spc.output_ports, else: apu.apu_to_cpu
     ram = if spc, do: spc.ram, else: apu.ram
 
@@ -93,7 +94,6 @@ defmodule Beamicom.SNES.APU do
       | sample_phase: rem(sample_phase, clock_numerator),
         spc_phase: rem(spc_phase, clock_numerator),
         pending_frames: apu.pending_frames + frames,
-        pending_pcm: if(pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]),
         pending_spc_cycles: apu.pending_spc_cycles + spc_cycles,
         elapsed_master_clocks: apu.elapsed_master_clocks + clocks,
         spc: spc,
@@ -109,10 +109,15 @@ defmodule Beamicom.SNES.APU do
 
   @doc "Drains `{frame_count, signed-16 little-endian stereo PCM, updated_apu}`."
   @spec take_pcm(t()) :: {non_neg_integer(), binary(), t()}
-  def take_pcm(%__MODULE__{pending_frames: frames} = apu) do
-    pcm = apu.pending_pcm |> Enum.reverse() |> IO.iodata_to_binary()
-    {frames, pcm, %{apu | pending_frames: 0, pending_pcm: []}}
+  def take_pcm(%__MODULE__{pending_frames: frames, spc: %SPC700{} = spc} = apu) do
+    {dsp, pcm} = DSP.render(spc.dsp, spc.ram, frames)
+    {frames, pcm, %{apu | pending_frames: 0, spc: %{spc | dsp: dsp}}}
   end
+
+  def take_pcm(%__MODULE__{pending_frames: frames} = apu),
+    do:
+      {frames, :binary.copy(<<0::signed-little-16, 0::signed-little-16>>, frames),
+       %{apu | pending_frames: 0}}
 
   # NTSC is exactly 945/44 MHz. PAL's supplied master clock is integral in Hz.
   defp master_clock_ratio(:ntsc), do: {945_000_000, 44}
@@ -158,7 +163,7 @@ defmodule Beamicom.SNES.APU do
           | apu_to_cpu: put_elem(apu.apu_to_cpu, 0, counter),
             ipl_state: :starting,
             driver_entry: entry,
-            driver_start_clocks: 2_048
+            driver_start_clocks: 0
         }
 
       true ->
@@ -187,6 +192,13 @@ defmodule Beamicom.SNES.APU do
 
   defp handle_ipl_write(apu, _port, _value), do: apu
 
+  defp apply_pending_ipl_write(%{ipl_pending_port0: nil} = apu), do: apu
+
+  defp apply_pending_ipl_write(%{ipl_pending_port0: value} = apu) do
+    apu = %{apu | ipl_pending_port0: nil}
+    handle_ipl_write(apu, 0, value)
+  end
+
   defp begin_upload(apu) do
     address = elem(apu.cpu_to_apu, 2) ||| elem(apu.cpu_to_apu, 3) <<< 8
 
@@ -195,12 +207,12 @@ defmodule Beamicom.SNES.APU do
       | apu_to_cpu: put_elem(apu.apu_to_cpu, 0, 0xCC),
         ipl_state: :upload,
         ipl_counter: nil,
-        ipl_address: address
+        ipl_address: address,
+        spc: nil
     }
   end
 
-  defp advance_driver_start(%{ipl_state: :starting, driver_start_clocks: remaining} = apu, clocks)
-       when clocks >= remaining do
+  defp start_driver_after_ipl_ack(%{ipl_state: :starting} = apu) do
     %{
       apu
       | apu_to_cpu: {0, 0, 0, 0},
@@ -210,6 +222,8 @@ defmodule Beamicom.SNES.APU do
         spc: SPC700.new(apu.ram, apu.driver_entry, apu.cpu_to_apu)
     }
   end
+
+  defp start_driver_after_ipl_ack(apu), do: apu
 
   defp advance_driver_start(
          %{ipl_state: :restarting, driver_start_clocks: remaining} = apu,
@@ -225,7 +239,7 @@ defmodule Beamicom.SNES.APU do
   end
 
   defp advance_driver_start(%{ipl_state: state} = apu, clocks)
-       when state in [:starting, :restarting],
+       when state == :restarting,
        do: %{apu | driver_start_clocks: apu.driver_start_clocks - clocks}
 
   defp advance_driver_start(apu, _clocks), do: apu

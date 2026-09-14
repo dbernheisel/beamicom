@@ -25,7 +25,7 @@ defmodule Beamicom.SNES.Bus do
     hdma_do_transfer?: false
   }
 
-  @enforce_keys [:cartridge, :wram, :timing, :ppu, :apu]
+  @enforce_keys [:cartridge, :wram, :sram, :sram_size, :timing, :ppu, :apu]
   defstruct @enforce_keys ++
               [
                 fast_rom?: false,
@@ -44,7 +44,6 @@ defmodule Beamicom.SNES.Bus do
                 wmadd: 0,
                 dma_channels: nil,
                 hdma_enable: 0,
-                hdma_write_history: [],
                 apu_pending_clocks: 0,
                 cpu_pending_clocks: 0
               ]
@@ -54,11 +53,16 @@ defmodule Beamicom.SNES.Bus do
   @spec new(Cartridge.t(), keyword()) :: t()
   def new(%Cartridge{} = cartridge, opts \\ []) do
     region = Keyword.get(opts, :region, cartridge.header.region)
+    sram_size = cartridge.header.declared_ram_size || 0
+
+    timing = Timing.new(region: region)
 
     %__MODULE__{
       cartridge: cartridge,
       wram: :array.new(@wram_size, default: 0, fixed: true),
-      timing: Timing.new(region: region),
+      sram: :array.new(sram_size, default: 0xFF, fixed: true),
+      sram_size: sram_size,
+      timing: timing,
       ppu: PPU.new(),
       apu: APU.new(),
       dma_channels: List.duplicate(@dma_channel, 8) |> List.to_tuple()
@@ -70,15 +74,15 @@ defmodule Beamicom.SNES.Bus do
   def peek(%__MODULE__{} = bus, address) do
     address = address &&& 0xFFFFFF
 
-    case region(address) do
+    case region(bus, address) do
       {:wram, offset} ->
         :array.get(offset, bus.wram)
 
+      {:sram, offset} ->
+        :array.get(offset, bus.sram)
+
       :rom ->
-        case Cartridge.read(bus.cartridge, address) do
-          {:ok, byte} -> byte
-          :unmapped -> bus.open_bus
-        end
+        Cartridge.read_or(bus.cartridge, address, bus.open_bus)
 
       {:apu_port, port} ->
         APU.cpu_read(bus.apu, port)
@@ -101,7 +105,7 @@ defmodule Beamicom.SNES.Bus do
   @spec read(t(), non_neg_integer()) :: {byte(), t(), pos_integer()}
   def read(%__MODULE__{} = bus, address) do
     address = address &&& 0xFFFFFF
-    mapped = region(address)
+    mapped = region(bus, address)
     clocks = access_clocks(bus, address, mapped)
     {value, bus} = read_region(bus, mapped, address)
     bus = bus |> Map.put(:open_bus, value) |> advance(clocks)
@@ -113,13 +117,16 @@ defmodule Beamicom.SNES.Bus do
   def write(%__MODULE__{} = bus, address, value) when is_integer(value) do
     address = address &&& 0xFFFFFF
     value = value &&& 0xFF
-    mapped = region(address)
+    mapped = region(bus, address)
     clocks = access_clocks(bus, address, mapped)
 
     bus =
       case mapped do
         {:wram, offset} ->
           %{bus | wram: :array.set(offset, value, bus.wram)}
+
+        {:sram, offset} ->
+          %{bus | sram: :array.set(offset, value, bus.sram)}
 
         {:ppu, register} ->
           write_ppu(bus, register, value)
@@ -167,6 +174,14 @@ defmodule Beamicom.SNES.Bus do
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         cpu_read_wram(bus, offset)
 
+      offset < 0x8000 and sram_address?(bus, bank, offset) ->
+        {:ok, sram_offset} = Cartridge.address_to_sram_offset(bus.cartridge, address)
+        value = :array.get(sram_offset, bus.sram)
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
+
+      offset >= 0x8000 or bank in 0x40..0x6F or bank in 0xC0..0xEF ->
+        cpu_read_rom(bus, address)
+
       bank in 0x40..0x7D or bank in 0xC0..0xFF or offset >= 0x6000 ->
         cpu_read_rom(bus, address)
 
@@ -189,6 +204,22 @@ defmodule Beamicom.SNES.Bus do
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         cpu_write_wram(bus, offset, value)
 
+      offset < 0x8000 and sram_address?(bus, bank, offset) ->
+        {:ok, sram_offset} = Cartridge.address_to_sram_offset(bus.cartridge, address)
+
+        bus = %{
+          bus
+          | sram: :array.set(sram_offset, value, bus.sram),
+            open_bus: value,
+            cpu_pending_clocks: bus.cpu_pending_clocks + 8
+        }
+
+        {bus, 8}
+
+      offset >= 0x8000 or bank in 0x40..0x6F or bank in 0xC0..0xEF ->
+        clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
+        {%{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks}, clocks}
+
       bank in 0x40..0x7D or bank in 0xC0..0xFF or offset >= 0x6000 ->
         clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
         {%{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks}, clocks}
@@ -206,17 +237,13 @@ defmodule Beamicom.SNES.Bus do
   defp cpu_read_rom(bus, address) do
     clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
 
-    value =
-      case Cartridge.read(bus.cartridge, address) do
-        {:ok, byte} -> byte
-        :unmapped -> bus.open_bus
-      end
+    value = Cartridge.read_or(bus.cartridge, address, bus.open_bus)
 
     {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks}, clocks}
   end
 
   defp cpu_read_mapped(bus, address) do
-    mapped = region(address)
+    mapped = region(bus, address)
     clocks = access_clocks(bus, address, mapped)
     bus = sync_before_cpu_io(bus, mapped)
     {value, bus} = read_region(bus, mapped, address)
@@ -235,7 +262,7 @@ defmodule Beamicom.SNES.Bus do
   end
 
   defp cpu_write_mapped(bus, address, value) do
-    mapped = region(address)
+    mapped = region(bus, address)
     clocks = access_clocks(bus, address, mapped)
     bus = sync_before_cpu_io(bus, mapped)
 
@@ -278,6 +305,7 @@ defmodule Beamicom.SNES.Bus do
 
   def flush_cpu_timing(%__MODULE__{} = bus) do
     clocks = bus.cpu_pending_clocks
+
     advance(%{bus | cpu_pending_clocks: 0}, clocks)
   end
 
@@ -330,7 +358,7 @@ defmodule Beamicom.SNES.Bus do
   @spec access_clocks(t(), non_neg_integer()) :: 6 | 8 | 12
   def access_clocks(%__MODULE__{} = bus, address) do
     address = address &&& 0xFFFFFF
-    access_clocks(bus, address, region(address))
+    access_clocks(bus, address, region(bus, address))
   end
 
   defp access_clocks(bus, address, mapped) do
@@ -341,15 +369,17 @@ defmodule Beamicom.SNES.Bus do
       bank in 0x00..0x3F and offset in [0x4016, 0x4017] -> 12
       bank in 0x80..0xBF and offset in [0x4016, 0x4017] -> 12
       match?({:wram, _}, mapped) -> 8
+      match?({:sram, _}, mapped) -> 8
       mapped == :rom and bus.fast_rom? and address >= 0x800000 -> 6
       mapped == :rom -> 8
       true -> 6
     end
   end
 
-  defp region(address) do
+  defp region(bus, address) do
     bank = address >>> 16
     offset = address &&& 0xFFFF
+    sram_offset = Cartridge.address_to_sram_offset(bus.cartridge, address)
 
     cond do
       bank in [0x7E, 0x7F] ->
@@ -357,6 +387,10 @@ defmodule Beamicom.SNES.Bus do
 
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         {:wram, offset}
+
+      match?({:ok, _offset}, sram_offset) ->
+        {:ok, offset} = sram_offset
+        {:sram, offset}
 
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset in 0x2100..0x213F ->
         {:ppu, offset}
@@ -393,10 +427,13 @@ defmodule Beamicom.SNES.Bus do
     do:
       (
         bus = flush_apu(bus)
-        {APU.cpu_read(bus.apu, port), bus}
+        {value, apu} = APU.sync_cpu_read(bus.apu, port)
+        {value, %{bus | apu: apu}}
       )
 
   defp read_region(bus, {:wram, offset}, _address), do: {:array.get(offset, bus.wram), bus}
+
+  defp read_region(bus, {:sram, offset}, _address), do: {:array.get(offset, bus.sram), bus}
 
   defp read_region(bus, {:wram_port, 0x2180}, _address) do
     value = :array.get(bus.wmadd, bus.wram)
@@ -404,10 +441,7 @@ defmodule Beamicom.SNES.Bus do
   end
 
   defp read_region(bus, :rom, address) do
-    case Cartridge.read(bus.cartridge, address) do
-      {:ok, byte} -> {byte, bus}
-      :unmapped -> {bus.open_bus, bus}
-    end
+    {Cartridge.read_or(bus.cartridge, address, bus.open_bus), bus}
   end
 
   defp read_region(bus, :memsel, _address), do: {if(bus.fast_rom?, do: 1, else: 0), bus}
@@ -541,13 +575,12 @@ defmodule Beamicom.SNES.Bus do
   defp write_cpu_io(bus, 0x420B, value), do: run_dma(bus, value)
 
   defp write_cpu_io(bus, 0x420C, value) do
-    event = {bus.timing.frame, bus.timing.vline, bus.timing.hclock, value}
+    ppu =
+      if value != 0 and not Timing.vblank?(bus.timing),
+        do: PPU.enable_scanline_capture(bus.ppu, bus.timing.vline),
+        else: bus.ppu
 
-    %{
-      bus
-      | hdma_enable: value,
-        hdma_write_history: [event | Enum.take(bus.hdma_write_history, 31)]
-    }
+    %{bus | hdma_enable: value, ppu: ppu}
   end
 
   defp write_cpu_io(bus, 0x420D, value), do: %{bus | fast_rom?: (value &&& 1) != 0}
@@ -642,7 +675,7 @@ defmodule Beamicom.SNES.Bus do
   defp dma_pattern(7), do: {0, 0, 1, 1}
 
   defp raw_read(bus, address) do
-    case region(address) do
+    case region(bus, address) do
       {:ppu, register} -> elem(PPU.read(bus.ppu, register, bus.open_bus), 0)
       {:apu_port, port} -> APU.cpu_read(bus.apu, port)
       _ -> peek(bus, address)
@@ -650,14 +683,24 @@ defmodule Beamicom.SNES.Bus do
   end
 
   defp raw_write(bus, address, value) do
-    case region(address) do
+    case region(bus, address) do
       {:wram, offset} -> %{bus | wram: :array.set(offset, value, bus.wram)}
+      {:sram, offset} -> %{bus | sram: :array.set(offset, value, bus.sram)}
       {:ppu, register} -> write_ppu(bus, register, value)
       {:apu_port, port} -> %{bus | apu: APU.cpu_write(bus.apu, port, value)}
       {:wram_port, register} -> write_wram_port(bus, register, value)
       _ -> bus
     end
   end
+
+  defp sram_address?(%{sram_size: 0}, _bank, _offset), do: false
+
+  defp sram_address?(%{cartridge: %{layout: :lorom}}, bank, offset),
+    do: offset < 0x8000 and (bank in 0x70..0x7D or bank in 0xF0..0xFF)
+
+  defp sram_address?(%{cartridge: %{layout: layout}}, bank, offset)
+       when layout in [:hirom, :exhirom],
+       do: offset in 0x6000..0x7FFF and (bank in 0x20..0x3F or bank in 0xA0..0xBF)
 
   defp initialize_hdma(bus) do
     channels =

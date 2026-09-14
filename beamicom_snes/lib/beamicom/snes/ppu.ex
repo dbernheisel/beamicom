@@ -14,7 +14,10 @@ defmodule Beamicom.SNES.PPU do
 
   import Bitwise
 
+  @compile {:no_warn_undefined, Beamicom.SNES.Nx.PPURenderer}
+
   @width 256
+  @render_workers 4
   @mode0_layers [
     {:obj, 3},
     {:bg, 0, 2, 1},
@@ -53,6 +56,13 @@ defmodule Beamicom.SNES.PPU do
     {:obj, 0},
     {:bg, 2, 2, 0}
   ]
+  @mode7_layers [
+    {:obj, 3},
+    {:obj, 2},
+    {:obj, 1},
+    {:bg, 0, 7, 0},
+    {:obj, 0}
+  ]
 
   defstruct vram: :array.new(0x10000, default: 0, fixed: true),
             cgram: :array.new(256, default: 0, fixed: true),
@@ -68,8 +78,15 @@ defmodule Beamicom.SNES.PPU do
             bg_vofs: {0, 0, 0, 0},
             scroll_latch: 0,
             m7_latch: 0,
+            m7sel: 0,
+            m7hofs: 0,
+            m7vofs: 0,
             m7a: 0,
             m7b: 0,
+            m7c: 0,
+            m7d: 0,
+            m7x: 0,
+            m7y: 0,
             m7_product: 0,
             obsel: 0,
             oamadd: 0,
@@ -175,34 +192,41 @@ defmodule Beamicom.SNES.PPU do
     bg = div(register - 0x210D, 2)
     vertical? = rem(register - 0x210D, 2) == 1
 
-    if vertical? do
-      scroll = (value <<< 8 ||| ppu.scroll_latch) &&& 0x03FF
-      bg_vofs = put_elem(ppu.bg_vofs, bg, scroll)
+    ppu =
+      if vertical? do
+        scroll = (value <<< 8 ||| ppu.scroll_latch) &&& 0x03FF
+        bg_vofs = put_elem(ppu.bg_vofs, bg, scroll)
 
-      %{
-        ppu
-        | bg_vofs: bg_vofs,
-          scroll_latch: value,
-          render_dirty?: ppu.render_dirty? or bg_vofs != ppu.bg_vofs
-      }
-    else
-      # Horizontal scroll preserves the old high byte's low three bits as
-      # fine scroll.  The SNES shares the other byte latch between all eight
-      # BG scroll registers, so HOFS cannot use the simpler VOFS formula.
-      old_scroll = elem(ppu.bg_hofs, bg)
+        %{
+          ppu
+          | bg_vofs: bg_vofs,
+            scroll_latch: value,
+            render_dirty?: ppu.render_dirty? or bg_vofs != ppu.bg_vofs
+        }
+      else
+        # Horizontal scroll preserves the old high byte's low three bits as
+        # fine scroll.  The SNES shares the other byte latch between all eight
+        # BG scroll registers, so HOFS cannot use the simpler VOFS formula.
+        old_scroll = elem(ppu.bg_hofs, bg)
 
-      scroll =
-        (value <<< 8 ||| (ppu.scroll_latch &&& 0xF8) ||| (old_scroll >>> 8 &&& 0x07)) &&&
-          0x03FF
+        scroll =
+          (value <<< 8 ||| (ppu.scroll_latch &&& 0xF8) ||| (old_scroll >>> 8 &&& 0x07)) &&&
+            0x03FF
 
-      bg_hofs = put_elem(ppu.bg_hofs, bg, scroll)
+        bg_hofs = put_elem(ppu.bg_hofs, bg, scroll)
 
-      %{
-        ppu
-        | bg_hofs: bg_hofs,
-          scroll_latch: value,
-          render_dirty?: ppu.render_dirty? or bg_hofs != ppu.bg_hofs
-      }
+        %{
+          ppu
+          | bg_hofs: bg_hofs,
+            scroll_latch: value,
+            render_dirty?: ppu.render_dirty? or bg_hofs != ppu.bg_hofs
+        }
+      end
+
+    case register do
+      0x210D -> write_m7_word(ppu, :m7hofs, value)
+      0x210E -> write_m7_word(ppu, :m7vofs, value)
+      _other -> ppu
     end
   end
 
@@ -212,15 +236,25 @@ defmodule Beamicom.SNES.PPU do
   def write(ppu, 0x2118, value), do: write_vram(ppu, :low, value)
   def write(ppu, 0x2119, value), do: write_vram(ppu, :high, value)
 
+  def write(ppu, 0x211A, value), do: update_visual(ppu, %{m7sel: value})
+
   def write(ppu, 0x211B, value) do
-    m7a = value <<< 8 ||| ppu.m7_latch
-    %{ppu | m7a: m7a, m7_latch: value, m7_product: m7_product(m7a, ppu.m7b)}
+    ppu = write_m7_word(ppu, :m7a, value)
+    %{ppu | m7_product: m7_product(ppu.m7a, ppu.m7b)}
   end
 
   def write(ppu, 0x211C, value) do
-    m7b = value <<< 8 ||| ppu.m7_latch
-    %{ppu | m7b: m7b, m7_latch: value, m7_product: m7_product(ppu.m7a, m7b)}
+    ppu = write_m7_word(ppu, :m7b, value)
+    %{ppu | m7_product: m7_product(ppu.m7a, ppu.m7b)}
   end
+
+  def write(ppu, register, value) when register in 0x211D..0x2120,
+    do:
+      write_m7_word(
+        ppu,
+        %{0x211D => :m7c, 0x211E => :m7d, 0x211F => :m7x, 0x2120 => :m7y}[register],
+        value
+      )
 
   def write(ppu, 0x2121, value), do: %{ppu | cgadd: value, cgram_latch: nil}
 
@@ -313,6 +347,14 @@ defmodule Beamicom.SNES.PPU do
     do: %{ppu | scanline_states: if(capture_scanlines?, do: [], else: nil)}
 
   @doc false
+  def enable_scanline_capture(%{scanline_states: nil} = ppu, completed_lines)
+      when is_integer(completed_lines) and completed_lines >= 0 do
+    %{ppu | scanline_states: List.duplicate(visual_state(ppu), completed_lines)}
+  end
+
+  def enable_scanline_capture(ppu, _completed_lines), do: ppu
+
+  @doc false
   def capture_scanline(%{scanline_states: states} = ppu, line)
       when is_list(states) and line >= 1 do
     if line < vblank_start(ppu),
@@ -331,51 +373,41 @@ defmodule Beamicom.SNES.PPU do
     height = if ppu.overscan?, do: 239, else: 224
 
     data =
-      if ppu.force_blank? or ppu.brightness == 0 or ppu.bg_mode not in [0, 1] do
-        :binary.copy(<<0, 0, 0>>, @width * height)
-      else
-        palette = palette(ppu)
-        color_data = color_data(palette, ppu.brightness)
+      cond do
+        ppu.force_blank? or ppu.brightness == 0 or ppu.bg_mode not in [0, 1, 7] ->
+          :binary.copy(<<0, 0, 0>>, @width * height)
 
-        render_ppu = %{
-          ppu
-          | vram: ppu.vram |> :array.to_list() |> :erlang.list_to_binary(),
-            oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()
-        }
+        nx_renderer?(ppu) ->
+          Beamicom.SNES.Nx.PPURenderer.render(ppu, nx_object_layer(ppu, height))
 
-        scanlines = scanline_states(ppu, height)
+        true ->
+          palette = palette(ppu)
+          color_data = color_data(palette, ppu.brightness)
 
-        0..(height - 1)
-        |> Enum.map_reduce({%{}, %{}, %{}}, fn y, {tile_cache, color_cache, obj_cache} ->
-          row_ppu =
-            if scanlines, do: apply_visual_state(render_ppu, elem(scanlines, y)), else: render_ppu
+          render_ppu = %{
+            ppu
+            | vram: ppu.vram |> :array.to_list() |> :erlang.list_to_binary(),
+              oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()
+          }
 
-          main_layers = render_layers(row_ppu, row_ppu.main_screen)
-          sub_layers = render_layers(row_ppu, row_ppu.sub_screen)
+          scanlines = scanline_states(ppu, height)
 
-          {row_palette, row_color_data, color_cache} =
-            if scanlines do
-              cached_color_data(row_ppu, color_cache)
-            else
-              {palette, color_data, color_cache}
-            end
+          workers =
+            :beamicom_snes
+            |> Application.get_env(:render_workers, @render_workers)
+            |> min(System.schedulers_online())
+            |> max(1)
 
-          {row, tile_cache, obj_cache} =
-            render_row(
-              row_ppu,
-              row_palette,
-              row_color_data,
-              main_layers,
-              sub_layers,
-              y,
-              tile_cache,
-              obj_cache
-            )
-
-          {row, {tile_cache, color_cache, obj_cache}}
-        end)
-        |> elem(0)
-        |> IO.iodata_to_binary()
+          height
+          |> row_ranges(workers)
+          |> Task.async_stream(
+            fn rows -> render_rows(rows, render_ppu, scanlines, palette, color_data) end,
+            ordered: true,
+            max_concurrency: workers,
+            timeout: :infinity
+          )
+          |> Enum.map(fn {:ok, rows} -> rows end)
+          |> IO.iodata_to_binary()
       end
 
     %{
@@ -385,6 +417,103 @@ defmodule Beamicom.SNES.PPU do
       pixel_format: :rgb24,
       data: data
     }
+  end
+
+  defp nx_renderer?(ppu) do
+    Application.get_env(:beamicom_snes, :ppu_renderer, :native) == :nx and
+      Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) and
+      Beamicom.SNES.Nx.PPURenderer.supported?(ppu)
+  end
+
+  defp nx_object_layer(ppu, height) do
+    scanlines = scanline_states(ppu, height)
+
+    obsel_key =
+      if scanlines,
+        do: 0..(height - 1) |> Enum.map(&elem(elem(scanlines, &1), 9)) |> List.to_tuple(),
+        else: ppu.obsel
+
+    cache_key = {ppu.oam_version, ppu.vram_version, obsel_key}
+    process_key = {__MODULE__, :nx_object_layer}
+
+    case Process.get(process_key) do
+      {^cache_key, layer} ->
+        layer
+
+      _other ->
+        layer = build_nx_object_layer(ppu, height, scanlines)
+        Process.put(process_key, {cache_key, layer})
+        layer
+    end
+  end
+
+  defp build_nx_object_layer(ppu, height, scanlines) do
+    object_ppu = %{ppu | oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()}
+
+    {rows, _cache} =
+      Enum.map_reduce(0..(height - 1), %{}, fn y, cache ->
+        row_ppu =
+          if scanlines, do: apply_visual_state(object_ppu, elem(scanlines, y)), else: object_ppu
+
+        {sprites, cache} = cached_obj_sprites(row_ppu, cache)
+        {pixels, _priorities} = render_obj_row(row_ppu, y, sprites)
+
+        row =
+          for x <- 0..(@width - 1), into: <<>> do
+            case Map.get(pixels, x) do
+              {priority, color} -> <<color, priority + 1>>
+              nil -> <<0, 0>>
+            end
+          end
+
+        {row, cache}
+      end)
+
+    rows |> IO.iodata_to_binary()
+  end
+
+  defp render_rows(rows, render_ppu, scanlines, palette, color_data) do
+    rows
+    |> Enum.map_reduce({%{}, %{}, %{}}, fn y, {tile_cache, color_cache, obj_cache} ->
+      row_ppu =
+        if scanlines, do: apply_visual_state(render_ppu, elem(scanlines, y)), else: render_ppu
+
+      main_layers = render_layers(row_ppu, row_ppu.main_screen)
+      sub_layers = render_layers(row_ppu, row_ppu.sub_screen)
+
+      {row_palette, row_color_data, color_cache} =
+        if scanlines do
+          cached_color_data(row_ppu, color_cache)
+        else
+          {palette, color_data, color_cache}
+        end
+
+      {row, tile_cache, obj_cache} =
+        render_row(
+          row_ppu,
+          row_palette,
+          row_color_data,
+          main_layers,
+          sub_layers,
+          y,
+          tile_cache,
+          obj_cache
+        )
+
+      {row, {tile_cache, color_cache, obj_cache}}
+    end)
+    |> elem(0)
+  end
+
+  defp row_ranges(height, workers) do
+    band_height = div(height + workers - 1, workers)
+
+    0..(workers - 1)
+    |> Enum.map(fn worker ->
+      first = worker * band_height
+      first..min(first + band_height - 1, height - 1)
+    end)
+    |> Enum.reject(fn first.._last//_step -> first >= height end)
   end
 
   defp render_row(
@@ -446,6 +575,8 @@ defmodule Beamicom.SNES.PPU do
     do: enabled_layers(@mode1_bg3_layers, screen)
 
   defp render_layers(%{bg_mode: 1}, screen), do: enabled_layers(@mode1_layers, screen)
+
+  defp render_layers(%{bg_mode: 7}, screen), do: enabled_layers(@mode7_layers, screen)
 
   defp enabled_layers(layers, screen),
     do:
@@ -511,15 +642,23 @@ defmodule Beamicom.SNES.PPU do
          rgb_palette,
          components,
          {layer, main_index},
-         {_sub_layer, sub_index},
+         {sub_layer, sub_index},
          _x
        )
        when (select &&& 0xF0) == 0 and (elem(window_select, 2) &&& 0xF0) == 0 do
+    main = palette_color(ppu, palette, layer, main_index)
+
     if color_math_enabled?(ppu.color_math, layer) do
-      second = if (select &&& 0x02) != 0, do: elem(palette, sub_index), else: ppu.fixed_color
-      color_to_rgb(blend_color(elem(palette, main_index), second, ppu.color_math), components)
+      second =
+        if (select &&& 0x02) != 0,
+          do: palette_color(ppu, palette, sub_layer, sub_index),
+          else: ppu.fixed_color
+
+      color_to_rgb(blend_color(main, second, ppu.color_math), components)
     else
-      elem(rgb_palette, main_index)
+      if direct_color?(ppu, layer),
+        do: color_to_rgb(main, components),
+        else: elem(rgb_palette, main_index)
     end
   end
 
@@ -529,7 +668,7 @@ defmodule Beamicom.SNES.PPU do
          rgb_palette,
          components,
          {layer, main_index},
-         {_sub_layer, sub_index},
+         {sub_layer, sub_index},
          x
        ) do
     clip_mode = ppu.color_window_select >>> 6 &&& 0x03
@@ -537,14 +676,16 @@ defmodule Beamicom.SNES.PPU do
     color_window? = window_masked?(ppu, :color, x)
 
     main =
-      if window_mode_applies?(clip_mode, color_window?), do: 0, else: elem(palette, main_index)
+      if window_mode_applies?(clip_mode, color_window?),
+        do: 0,
+        else: palette_color(ppu, palette, layer, main_index)
 
     color =
       if color_math_enabled?(ppu.color_math, layer) and
            not window_mode_applies?(prevent_mode, color_window?) do
         second =
           if (ppu.color_window_select &&& 0x02) != 0,
-            do: elem(palette, sub_index),
+            do: palette_color(ppu, palette, sub_layer, sub_index),
             else: ppu.fixed_color
 
         blend_color(main, second, ppu.color_math)
@@ -552,10 +693,22 @@ defmodule Beamicom.SNES.PPU do
         main
       end
 
-    if color == main and not color_math_enabled?(ppu.color_math, layer),
-      do: elem(rgb_palette, main_index),
-      else: color_to_rgb(color, components)
+    if color == main and not color_math_enabled?(ppu.color_math, layer) and
+         not direct_color?(ppu, layer),
+       do: elem(rgb_palette, main_index),
+       else: color_to_rgb(color, components)
   end
+
+  defp palette_color(ppu, palette, layer, index) when ppu.bg_mode == 7 and layer == 0 do
+    if direct_color?(ppu, layer),
+      do: (index &&& 0x07) <<< 2 ||| (index &&& 0x38) <<< 4 ||| (index &&& 0xC0) <<< 7,
+      else: elem(palette, index)
+  end
+
+  defp palette_color(_ppu, palette, _layer, index), do: elem(palette, index)
+
+  defp direct_color?(%{bg_mode: 7, color_window_select: select}, 0), do: (select &&& 1) != 0
+  defp direct_color?(_ppu, _layer), do: false
 
   defp window_mode_applies?(0, _inside?), do: false
   defp window_mode_applies?(1, inside?), do: not inside?
@@ -604,8 +757,8 @@ defmodule Beamicom.SNES.PPU do
   defp color_math_enabled?(math, bg), do: (math &&& 1 <<< bg) != 0
 
   defp blend_color(first, second, math) do
-    subtract? = (math &&& 0x40) != 0
-    half? = (math &&& 0x80) != 0
+    subtract? = (math &&& 0x80) != 0
+    half? = (math &&& 0x40) != 0
 
     blend = fn shift ->
       a = first >>> shift &&& 0x1F
@@ -751,7 +904,7 @@ defmodule Beamicom.SNES.PPU do
   defp obj_sizes(5), do: {32, 64}
   defp obj_sizes(_), do: {16, 32}
 
-  defp render_bg_row(ppu, bg, bpp, screen_y, tile_cache) do
+  defp render_bg_row(ppu, bg, bpp, screen_y, tile_cache) when bpp in [2, 4] do
     x = elem(ppu.bg_hofs, bg) &&& 0x03FF
     y = screen_y + elem(ppu.bg_vofs, bg) &&& 0x03FF
     large_tiles? = (ppu.bg_tile_size &&& 1 <<< bg) != 0
@@ -778,6 +931,76 @@ defmodule Beamicom.SNES.PPU do
     {List.to_tuple(pixels), priorities, tile_cache}
   end
 
+  defp render_bg_row(%{bg_mode: 7} = ppu, 0, 7, screen_y, tile_cache) do
+    a = signed16(ppu.m7a)
+    b = signed16(ppu.m7b)
+    c = signed16(ppu.m7c)
+    d = signed16(ppu.m7d)
+    center_x = signed13(ppu.m7x)
+    center_y = signed13(ppu.m7y)
+    hofs = signed13(ppu.m7hofs)
+    vofs = signed13(ppu.m7vofs)
+    screen_y = if((ppu.m7sel &&& 0x02) != 0, do: 255 - (screen_y + 1), else: screen_y + 1)
+    xx = clip_m7_offset(hofs - center_x)
+    yy = clip_m7_offset(vofs - center_y)
+    row_x = band64(b * screen_y) + band64(b * yy) + (center_x <<< 8)
+    row_y = band64(d * screen_y) + band64(d * yy) + (center_y <<< 8)
+
+    pixels =
+      for output_x <- 0..(@width - 1) do
+        screen_x = if((ppu.m7sel &&& 0x01) != 0, do: 255 - output_x, else: output_x)
+        texture_x = (a * screen_x + band64(a * xx) + row_x) >>> 8
+        texture_y = (c * screen_x + band64(c * xx) + row_y) >>> 8
+        color = mode7_color(ppu, texture_x, texture_y)
+        {0, color}
+      end
+
+    priorities = if Enum.any?(pixels, fn {_priority, color} -> color != 0 end), do: 1, else: 0
+    {List.to_tuple(pixels), priorities, tile_cache}
+  end
+
+  defp mode7_color(ppu, texture_x, texture_y) do
+    repeat = ppu.m7sel >>> 6
+
+    cond do
+      repeat in [0, 1] ->
+        fetch_mode7_color(ppu.vram, texture_x &&& 0x3FF, texture_y &&& 0x3FF)
+
+      texture_x in 0..0x3FF and texture_y in 0..0x3FF ->
+        fetch_mode7_color(ppu.vram, texture_x, texture_y)
+
+      repeat == 3 ->
+        mode7_tile_pixel(ppu.vram, 0, texture_x, texture_y)
+
+      true ->
+        0
+    end
+  end
+
+  defp fetch_mode7_color(vram, x, y) do
+    tilemap_address = (y &&& bnot(7)) <<< 5 ||| (x >>> 2 &&& bnot(1))
+    tile = vram_byte(vram, tilemap_address)
+    mode7_tile_pixel(vram, tile, x, y)
+  end
+
+  defp mode7_tile_pixel(vram, tile, x, y),
+    do: vram_byte(vram, 1 + tile * 128 + (y &&& 7) * 16 + (x &&& 7) * 2)
+
+  defp band64(value), do: value &&& bnot(63)
+
+  defp clip_m7_offset(value),
+    do: if((value &&& 0x2000) != 0, do: value ||| bnot(0x3FF), else: value &&& 0x3FF)
+
+  defp signed13(value) do
+    value = value &&& 0x1FFF
+    if (value &&& 0x1000) != 0, do: value - 0x2000, else: value
+  end
+
+  defp signed16(value) do
+    value = value &&& 0xFFFF
+    if (value &&& 0x8000) != 0, do: value - 0x10000, else: value
+  end
+
   defp bg_tile_pixels(ppu, bg, bpp, tile_x, tile_y, y, tile_width, tile_cache) do
     entry = tilemap_entry(ppu, bg, tile_x, tile_y)
     tile = entry &&& 0x03FF
@@ -802,8 +1025,13 @@ defmodule Beamicom.SNES.PPU do
       for output_x <- 0..(tile_width - 1) do
         source_x = if hflip?, do: tile_width - 1 - output_x, else: output_x
         row = if source_x < 8, do: left, else: right
-        color = elem(row, source_x &&& 7)
-        {priority, color_base + color}
+        tile_color = elem(row, source_x &&& 7)
+
+        # Tile color zero is transparent before the palette base is applied.
+        # Treating palette N's color zero as index N*16 makes stencil layers
+        # opaque (notably the Final Fantasy III title-logo mask).
+        color = if tile_color == 0, do: 0, else: color_base + tile_color
+        {priority, color}
       end
 
     {pixels, tile_cache}
@@ -957,6 +1185,15 @@ defmodule Beamicom.SNES.PPU do
       ppu.bg_name_base,
       ppu.bg_hofs,
       ppu.bg_vofs,
+      ppu.m7sel,
+      ppu.m7hofs,
+      ppu.m7vofs,
+      ppu.m7a,
+      ppu.m7b,
+      ppu.m7c,
+      ppu.m7d,
+      ppu.m7x,
+      ppu.m7y,
       ppu.window_select,
       ppu.window_positions,
       ppu.window_logic,
@@ -976,6 +1213,12 @@ defmodule Beamicom.SNES.PPU do
       ),
       ppu.cgram_version
     }
+  end
+
+  defp render_vram_key(%{bg_mode: 7} = ppu) do
+    if (ppu.main_screen &&& 0x01) != 0 or (ppu.sub_screen &&& 0x01) != 0,
+      do: Enum.map(0..255, fn page -> {page, elem(ppu.vram_page_versions, page)} end),
+      else: render_obj_vram_key(ppu)
   end
 
   defp render_vram_key(ppu) do
@@ -1001,19 +1244,30 @@ defmodule Beamicom.SNES.PPU do
         vram_pages(tilemap_base, tilemap_bytes) ++ vram_pages(tile_base, tile_bytes)
       end)
 
-    obj_pages =
-      if Enum.any?(layers, &match?({:obj, _}, &1)) do
-        base = (ppu.obsel &&& 0x07) * 0x4000
-        second = base + ((ppu.obsel >>> 3 &&& 3) + 1) * 0x2000
-        vram_pages(base, 0x2000) ++ vram_pages(second, 0x2000)
-      else
-        []
-      end
+    obj_pages = object_vram_pages(ppu, layers)
 
     (bg_pages ++ obj_pages)
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.map(fn page -> {page, elem(ppu.vram_page_versions, page)} end)
+  end
+
+  defp render_obj_vram_key(ppu) do
+    ppu
+    |> object_vram_pages(render_layers(ppu))
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(fn page -> {page, elem(ppu.vram_page_versions, page)} end)
+  end
+
+  defp object_vram_pages(ppu, layers) do
+    if Enum.any?(layers, &match?({:obj, _}, &1)) do
+      base = (ppu.obsel &&& 0x07) * 0x4000
+      second = base + ((ppu.obsel >>> 3 &&& 3) + 1) * 0x2000
+      vram_pages(base, 0x2000) ++ vram_pages(second, 0x2000)
+    else
+      []
+    end
   end
 
   defp vram_pages(base, bytes) do
@@ -1029,12 +1283,22 @@ defmodule Beamicom.SNES.PPU do
   defp mark_dirty_if(ppu, true), do: %{ppu | render_dirty?: true}
   defp mark_dirty_if(ppu, false), do: ppu
 
+  defp write_m7_word(ppu, key, value) do
+    word = value <<< 8 ||| ppu.m7_latch
+
+    ppu
+    |> mark_dirty_if(Map.fetch!(ppu, key) != word)
+    |> Map.put(key, word)
+    |> Map.put(:m7_latch, value)
+  end
+
   defp set_color_component(color, mask, shift, value, true),
     do: (color &&& bnot(mask)) ||| value <<< shift
 
   defp set_color_component(color, _mask, _shift, _value, false), do: color
 
-  defp visual_state(ppu) do
+  @doc false
+  def visual_state(ppu) do
     {
       ppu.force_blank?,
       ppu.brightness,
@@ -1057,7 +1321,16 @@ defmodule Beamicom.SNES.PPU do
       ppu.color_math,
       ppu.fixed_color,
       ppu.cgram_version,
-      ppu.cgram
+      ppu.cgram,
+      ppu.m7sel,
+      ppu.m7hofs,
+      ppu.m7vofs,
+      ppu.m7a,
+      ppu.m7b,
+      ppu.m7c,
+      ppu.m7d,
+      ppu.m7x,
+      ppu.m7y
     }
   end
 
@@ -1066,7 +1339,7 @@ defmodule Beamicom.SNES.PPU do
          {force_blank?, brightness, bg_mode, bg3_priority?, bg_tile_size, bg_sc, bg_name_base,
           bg_hofs, bg_vofs, obsel, window_select, window_positions, window_logic, main_screen,
           sub_screen, main_window, sub_window, color_window_select, color_math, fixed_color,
-          cgram_version, cgram}
+          cgram_version, cgram, m7sel, m7hofs, m7vofs, m7a, m7b, m7c, m7d, m7x, m7y}
        ) do
     %{
       ppu
@@ -1091,7 +1364,16 @@ defmodule Beamicom.SNES.PPU do
         color_math: color_math,
         fixed_color: fixed_color,
         cgram_version: cgram_version,
-        cgram: cgram
+        cgram: cgram,
+        m7sel: m7sel,
+        m7hofs: m7hofs,
+        m7vofs: m7vofs,
+        m7a: m7a,
+        m7b: m7b,
+        m7c: m7c,
+        m7d: m7d,
+        m7x: m7x,
+        m7y: m7y
     }
   end
 

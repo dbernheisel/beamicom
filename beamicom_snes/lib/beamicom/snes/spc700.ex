@@ -7,10 +7,16 @@ defmodule Beamicom.SNES.SPC700 do
   @n 0x80
   @v 0x40
   @p 0x20
+  @b 0x10
   @h 0x08
   @i 0x04
   @z 0x02
   @c 0x01
+  @ipl <<0xCD, 0xEF, 0xBD, 0xE8, 0x00, 0xC6, 0x1D, 0xD0, 0xFC, 0x8F, 0xAA, 0xF4, 0x8F, 0xBB, 0xF5,
+         0x78, 0xCC, 0xF4, 0xD0, 0xFB, 0x2F, 0x19, 0xEB, 0xF4, 0xD0, 0xFC, 0x7E, 0xF4, 0xD0, 0x0B,
+         0xE4, 0xF5, 0xCB, 0xF4, 0xD7, 0x00, 0xFC, 0xD0, 0xF3, 0xAB, 0x01, 0x10, 0xEF, 0x7E, 0xF4,
+         0x10, 0xEB, 0xBA, 0xF6, 0xDA, 0x00, 0xBA, 0xF4, 0xC4, 0xF4, 0xDD, 0x5D, 0xD0, 0xDB, 0x1F,
+         0x00, 0x00, 0xC0, 0xFF>>
 
   defstruct ram: nil,
             a: 0,
@@ -21,9 +27,8 @@ defmodule Beamicom.SNES.SPC700 do
             psw: 0,
             input_ports: {0, 0, 0, 0},
             output_ports: {0, 0, 0, 0},
-            control: 0,
+            control: 0x80,
             dsp_addr: 0,
-            dsp_regs: :array.new(128, default: 0, fixed: true),
             dsp: nil,
             aux: {0, 0},
             timer_targets: {0, 0, 0},
@@ -44,18 +49,20 @@ defmodule Beamicom.SNES.SPC700 do
   def put_input_port(%__MODULE__{} = spc, port, value),
     do: %{spc | input_ports: put_elem(spc.input_ports, port, value &&& 0xFF)}
 
-  def run(%__MODULE__{error: error} = spc, _cycles) when not is_nil(error), do: spc
-  def run(%__MODULE__{stopped?: true} = spc, _cycles), do: spc
-  def run(spc, cycles) when cycles <= 0, do: spc
+  def run(%__MODULE__{} = spc, cycles) when is_integer(cycles), do: run_cycles(spc, cycles)
 
-  def run(spc, cycles) do
+  defp run_cycles(%__MODULE__{error: error} = spc, _cycles) when not is_nil(error), do: spc
+  defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles), do: spc
+  defp run_cycles(spc, cycles) when cycles <= 0, do: spc
+
+  defp run_cycles(spc, cycles) do
     {opcode, spc} = fetch(spc)
 
     case execute(opcode, spc) do
       {:ok, next_spc, used} ->
-        spc = Map.update!(next_spc, :cycles, &(&1 + used))
+        spc = %{next_spc | cycles: next_spc.cycles + used}
 
-        run(spc, cycles - used)
+        run_cycles(spc, cycles - used)
 
       {:error, reason, spc} ->
         %{spc | error: {reason, spc.pc - 1 &&& 0xFFFF}}
@@ -99,10 +106,17 @@ defmodule Beamicom.SNES.SPC700 do
         0xED -> bxor(spc.psw, @c)
       end
 
-    {:ok, %{spc | psw: psw}, 2}
+    {:ok, %{spc | psw: psw}, if(op in [0xA0, 0xC0, 0xED], do: 3, else: 2)}
   end
 
   defp execute(0x00, spc), do: {:ok, spc, 2}
+
+  defp execute(0x0F, spc) do
+    spc = spc |> push(spc.pc >>> 8) |> push(spc.pc) |> push(spc.psw)
+    {target, spc} = read_word(spc, 0xFFDE)
+    psw = spc.psw |> bor(@b) |> band(bnot(@i))
+    {:ok, %{spc | pc: target, psw: psw}, 8}
+  end
 
   # MOV register immediates and register transfers.
   defp execute(op, spc) when op in [0xE8, 0xCD, 0x8D] do
@@ -137,13 +151,13 @@ defmodule Beamicom.SNES.SPC700 do
   defp execute(op, spc) when op in [0xF8, 0xF9, 0xE9] do
     {address, spc} = address_for(op, spc)
     {value, spc} = read(spc, address)
-    {:ok, %{spc | x: value} |> set_nz(value), if(op == 0xE9, do: 4, else: 3)}
+    {:ok, %{spc | x: value} |> set_nz(value), if(op == 0xF8, do: 3, else: 4)}
   end
 
   defp execute(op, spc) when op in [0xEB, 0xFB, 0xEC] do
     {address, spc} = address_for(op, spc)
     {value, spc} = read(spc, address)
-    {:ok, %{spc | y: value} |> set_nz(value), if(op == 0xEC, do: 4, else: 3)}
+    {:ok, %{spc | y: value} |> set_nz(value), if(op == 0xEB, do: 3, else: 4)}
   end
 
   # MOV stores.
@@ -155,12 +169,12 @@ defmodule Beamicom.SNES.SPC700 do
 
   defp execute(op, spc) when op in [0xD8, 0xD9, 0xC9] do
     {address, spc} = address_for(op, spc)
-    {:ok, write(spc, address, spc.x), if(op == 0xC9, do: 5, else: 4)}
+    {:ok, write(spc, address, spc.x), if(op == 0xD8, do: 4, else: 5)}
   end
 
   defp execute(op, spc) when op in [0xCB, 0xDB, 0xCC] do
     {address, spc} = address_for(op, spc)
-    {:ok, write(spc, address, spc.y), if(op == 0xCC, do: 5, else: 4)}
+    {:ok, write(spc, address, spc.y), if(op == 0xCB, do: 4, else: 5)}
   end
 
   defp execute(0x8F, spc) do
@@ -268,7 +282,8 @@ defmodule Beamicom.SNES.SPC700 do
       end
 
     {value, spc} = fetch_operand(spc, mode)
-    {:ok, compare(spc, Map.fetch!(spc, register), value), if(mode == :absolute, do: 4, else: 3)}
+    cycles = %{immediate: 2, direct: 3, absolute: 4}[mode]
+    {:ok, compare(spc, Map.fetch!(spc, register), value), cycles}
   end
 
   # INC/DEC registers.
@@ -312,7 +327,8 @@ defmodule Beamicom.SNES.SPC700 do
     {address, spc} = rmw_address(op, spc)
     {value, spc} = read(spc, address)
     {value, spc} = rmw_value(spc, op, value)
-    {:ok, write(spc, address, value), if((op &&& 0x0F) == 0x0C, do: 6, else: 4)}
+    cycles = if (op &&& 0x0F) == 0x0C or (op &&& 0x1F) == 0x1B, do: 5, else: 4
+    {:ok, write(spc, address, value), cycles}
   end
 
   defp execute(op, spc) when op in [0x1C, 0x3C, 0x5C, 0x7C] do
@@ -405,8 +421,7 @@ defmodule Beamicom.SNES.SPC700 do
   defp execute(op, spc) when op in [0x8E, 0xAE, 0xCE, 0xEE] do
     {value, spc} = pop(spc)
     register = %{0x8E => :psw, 0xAE => :a, 0xCE => :x, 0xEE => :y}[op]
-    spc = Map.put(spc, register, value)
-    {:ok, if(register == :psw, do: spc, else: set_nz(spc, value)), 4}
+    {:ok, Map.put(spc, register, value), 4}
   end
 
   # DBNZ and CBNE.
@@ -433,7 +448,10 @@ defmodule Beamicom.SNES.SPC700 do
     address = direct(spc, dp + if(op == 0xDE, do: spc.x, else: 0) &&& 0xFF)
     {value, spc} = read(spc, address)
     taken? = spc.a != value
-    {:ok, if(taken?, do: branch(spc, offset), else: spc), if(taken?, do: 7, else: 5)}
+    base_cycles = if op == 0xDE, do: 6, else: 5
+
+    {:ok, if(taken?, do: branch(spc, offset), else: spc),
+     base_cycles + if(taken?, do: 2, else: 0)}
   end
 
   # SET1/CLR1 and BBS/BBC.
@@ -509,16 +527,24 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(0x9E, spc) do
-    ya = spc.a ||| spc.y <<< 8
+    divisor = spc.x <<< 9
 
-    {quotient, remainder} =
-      if spc.x == 0 do
-        {0xFF, spc.y}
-      else
-        {div(ya, spc.x) &&& 0xFF, rem(ya, spc.x)}
-      end
+    result =
+      Enum.reduce(1..9, spc.a ||| spc.y <<< 8, fn _, value ->
+        value = value <<< 1
+        value = if (value &&& 0x20000) != 0, do: (value &&& 0x1FFFF) ||| 1, else: value
+        value = if value >= divisor, do: bxor(value, 1), else: value
+        if (value &&& 1) != 0, do: value - divisor &&& 0x1FFFF, else: value
+      end)
 
-    psw = flag(spc.psw, @v, quotient > 0xFF) |> flag(@h, (spc.y &&& 0x0F) >= (spc.x &&& 0x0F))
+    quotient = result &&& 0xFF
+    remainder = result >>> 9 &&& 0xFF
+
+    psw =
+      spc.psw
+      |> flag(@v, (result &&& 0x100) != 0)
+      |> flag(@h, (spc.y &&& 0x0F) >= (spc.x &&& 0x0F))
+
     {:ok, %{spc | a: quotient, y: remainder, psw: psw} |> set_nz(quotient), 12}
   end
 
@@ -532,7 +558,7 @@ defmodule Beamicom.SNES.SPC700 do
     {:ok, %{spc | a: value, psw: psw} |> set_nz(value), 3}
   end
 
-  defp execute(op, spc) when op in [0xEF, 0xFF], do: {:ok, %{spc | stopped?: true}, 3}
+  defp execute(op, spc) when op in [0xEF, 0xFF], do: {:ok, %{spc | stopped?: true}, 7}
 
   defp execute(op, spc), do: {:error, {:unsupported_opcode, op}, spc}
 
@@ -783,7 +809,7 @@ defmodule Beamicom.SNES.SPC700 do
   defp direct(spc, byte), do: if((spc.psw &&& @p) != 0, do: 0x100, else: 0) ||| (byte &&& 0xFF)
 
   defp fetch(spc) do
-    value = ram_get(spc.ram, spc.pc)
+    value = memory_get(spc, spc.pc)
     {value, %{spc | pc: spc.pc + 1 &&& 0xFFFF}}
   end
 
@@ -834,7 +860,7 @@ defmodule Beamicom.SNES.SPC700 do
         {value, %{spc | timer_outputs: put_elem(spc.timer_outputs, index, 0)}}
 
       _ ->
-        {ram_get(spc.ram, address), spc}
+        {memory_get(spc, address), spc}
     end
   end
 
@@ -856,8 +882,7 @@ defmodule Beamicom.SNES.SPC700 do
 
         %{
           spc
-          | dsp_regs: :array.set(address, value, spc.dsp_regs),
-            dsp: DSP.write(spc.dsp, address, value)
+          | dsp: DSP.write(spc.dsp, address, value)
         }
 
       x when x in 0xF4..0xF7 ->
@@ -950,6 +975,14 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp ram_get(ram, address), do: :array.get(address &&& 0xFFFF, ram)
+
+  defp memory_get(spc, address) do
+    address = address &&& 0xFFFF
+
+    if address >= 0xFFC0 and (spc.control &&& 0x80) != 0,
+      do: :binary.at(@ipl, address - 0xFFC0),
+      else: ram_get(spc.ram, address)
+  end
 
   defp push(spc, value) do
     ram = :array.set(0x100 ||| spc.sp, value &&& 0xFF, spc.ram)

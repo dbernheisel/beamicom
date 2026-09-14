@@ -8,6 +8,7 @@ defmodule Beamicom.SNES.DSP do
     block_address: 0,
     loop_address: 0,
     block_end?: false,
+    block_loop?: false,
     samples: List.duplicate(0, 16) |> List.to_tuple(),
     sample_index: 0,
     phase: 0,
@@ -63,10 +64,11 @@ defmodule Beamicom.SNES.DSP do
 
   def render(%__MODULE__{} = dsp, ram, frames) when frames > 0 do
     dsp = apply_keys(dsp, ram)
+    mixer = mixer_state(dsp)
 
     {dsp, pcm} =
       Enum.reduce(1..frames, {dsp, []}, fn _, {dsp, pcm} ->
-        {left, right, dsp} = mix_sample(dsp, ram)
+        {left, right, dsp} = mix_sample(dsp, ram, mixer)
         {dsp, [<<left::signed-little-16, right::signed-little-16>> | pcm]}
       end)
 
@@ -80,15 +82,18 @@ defmodule Beamicom.SNES.DSP do
 
         voice =
           cond do
-            (dsp.key_off &&& 1 <<< index) != 0 -> %{voice | active?: false}
             (dsp.key_on &&& 1 <<< index) != 0 -> start_voice(dsp, ram, index)
+            (dsp.key_off &&& 1 <<< index) != 0 -> %{voice | active?: false}
             true -> voice
           end
 
         put_elem(voices, index, voice)
       end)
 
-    %{dsp | voices: voices, key_on: 0}
+    # The mixer advances in frame-sized blocks, so consume both key latches
+    # once here. Keeping KOFF asserted for the whole next block would erase a
+    # later KON written during the same SPC execution span.
+    %{dsp | voices: voices, key_on: 0, key_off: 0}
   end
 
   defp start_voice(dsp, ram, index) do
@@ -103,17 +108,36 @@ defmodule Beamicom.SNES.DSP do
     |> decode_block(ram)
   end
 
-  defp mix_sample(dsp, ram) do
+  defp mixer_state(dsp) do
+    voices =
+      0..7
+      |> Enum.map(fn index ->
+        {
+          pitch(dsp, index),
+          signed8(reg(dsp, index * 0x10)),
+          signed8(reg(dsp, index * 0x10 + 1))
+        }
+      end)
+      |> List.to_tuple()
+
+    {
+      voices,
+      (reg(dsp, 0x6C) &&& 0x40) != 0,
+      signed8(reg(dsp, 0x0C)),
+      signed8(reg(dsp, 0x1C))
+    }
+  end
+
+  defp mix_sample(dsp, ram, {mixer_voices, muted?, master_left, master_right}) do
     {left, right, voices, end_flags} =
       Enum.reduce(0..7, {0, 0, dsp.voices, dsp.end_flags}, fn index,
                                                               {left, right, voices, end_flags} ->
         voice = elem(voices, index)
 
         if voice.active? do
+          {pitch, volume_left, volume_right} = elem(mixer_voices, index)
           sample = elem(voice.samples, voice.sample_index)
-          voice = advance_voice(voice, pitch(dsp, index), ram)
-          volume_left = signed8(reg(dsp, index * 0x10))
-          volume_right = signed8(reg(dsp, index * 0x10 + 1))
+          voice = advance_voice(voice, pitch, ram)
           left = left + div(sample * volume_left, 128)
           right = right + div(sample * volume_right, 128)
           end_flags = if voice.active?, do: end_flags, else: end_flags ||| 1 <<< index
@@ -123,9 +147,6 @@ defmodule Beamicom.SNES.DSP do
         end
       end)
 
-    muted? = (reg(dsp, 0x6C) &&& 0x40) != 0
-    master_left = signed8(reg(dsp, 0x0C))
-    master_right = signed8(reg(dsp, 0x1C))
     left = if muted?, do: 0, else: clip16(div(left * master_left, 128))
     right = if muted?, do: 0, else: clip16(div(right * master_right, 128))
     {left, right, %{dsp | voices: voices, end_flags: end_flags}}
@@ -147,7 +168,7 @@ defmodule Beamicom.SNES.DSP do
     voice =
       if voice.sample_index >= 16 do
         cond do
-          voice.block_end? and voice.loop_address != 0 ->
+          voice.block_end? and voice.block_loop? ->
             %{voice | block_address: voice.loop_address, sample_index: 0} |> decode_block(ram)
 
           voice.block_end? ->
@@ -189,7 +210,8 @@ defmodule Beamicom.SNES.DSP do
       | samples: samples |> Enum.reverse() |> List.to_tuple(),
         previous1: previous1,
         previous2: previous2,
-        block_end?: (header &&& 1) != 0
+        block_end?: (header &&& 1) != 0,
+        block_loop?: (header &&& 2) != 0
     }
   end
 

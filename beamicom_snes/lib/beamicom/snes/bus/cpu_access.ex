@@ -1,17 +1,36 @@
 defmodule Beamicom.SNES.Bus.CPUAccess do
   @moduledoc false
 
-  alias Beamicom.SNES.Bus
+  # These are macros because every emulated instruction performs several bus
+  # operations. Keeping this naming shim out of the runtime call chain saves a
+  # full BEAM dispatch on each fetch, data access, and internal cycle.
+  defmacro peek(bus, address),
+    do: quote(do: Beamicom.SNES.Bus.peek(unquote(bus), unquote(address)))
 
-  defdelegate peek(bus, address), to: Bus
-  defdelegate take_nmi(bus), to: Bus
-  defdelegate irq_pending?(bus), to: Bus
+  defmacro take_nmi(bus),
+    do: quote(do: Beamicom.SNES.Bus.take_nmi(unquote(bus)))
 
-  def read(bus, address), do: Bus.cpu_read(bus, address)
-  def write(bus, address, value), do: Bus.cpu_write(bus, address, value)
-  def idle(bus), do: Bus.cpu_idle(bus)
-  def idle(bus, cycles), do: Bus.cpu_idle(bus, cycles)
-  def flush(bus), do: Bus.flush_cpu_timing(bus)
-  def flush_events(bus), do: Bus.flush_cpu_events(bus)
-  def master_clocks(bus), do: Bus.cpu_master_clocks(bus)
+  defmacro irq_pending?(bus),
+    do: quote(do: Beamicom.SNES.Bus.irq_pending?(unquote(bus)))
+
+  defmacro read(bus, address),
+    do: quote(do: Beamicom.SNES.Bus.cpu_read(unquote(bus), unquote(address)))
+
+  defmacro write(bus, address, value),
+    do: quote(do: Beamicom.SNES.Bus.cpu_write(unquote(bus), unquote(address), unquote(value)))
+
+  defmacro idle(bus),
+    do: quote(do: Beamicom.SNES.Bus.cpu_idle(unquote(bus)))
+
+  defmacro idle(bus, cycles),
+    do: quote(do: Beamicom.SNES.Bus.cpu_idle(unquote(bus), unquote(cycles)))
+
+  defmacro flush(bus),
+    do: quote(do: Beamicom.SNES.Bus.flush_cpu_timing(unquote(bus)))
+
+  defmacro flush_events(bus),
+    do: quote(do: Beamicom.SNES.Bus.flush_cpu_events(unquote(bus)))
+
+  defmacro master_clocks(bus),
+    do: quote(do: Beamicom.SNES.Bus.cpu_master_clocks(unquote(bus)))
 end
