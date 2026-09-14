@@ -8,7 +8,10 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   @discard_command ["sh", "-c", "cat >/dev/null"]
 
   test "streams the first PCM chunk without a startup delay" do
-    pid = start_supervised!({AudioSink, command: @discard_command, name: :test_audio_sink})
+    pid =
+      start_supervised!(
+        {AudioSink, command: @discard_command, name: :test_audio_sink, prebuffer_ms: 0}
+      )
 
     pcm = <<100::signed-little-16, -100::signed-little-16, 200::signed-little-16>>
     send(pid, {:audio, 3, pcm})
@@ -17,6 +20,12 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert %{ready?: true, pending: []} = :sys.get_state(pid)
     assert {:priority, :high} = Process.info(pid, :priority)
     assert Process.alive?(pid)
+  end
+
+  test "defaults to a short prebuffer for stable realtime playback" do
+    pid = start_supervised!({AudioSink, command: @discard_command, name: :buffered_audio_sink})
+
+    assert %{ready?: false, prebuffer_frames: 4_410} = :sys.get_state(pid)
   end
 
   test "scales signed 16-bit PCM independently of channel layout" do
@@ -44,7 +53,11 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   end
 
   test "restarts the external player after emulation is paused" do
-    pid = start_supervised!({AudioSink, command: @discard_command, name: :pausable_audio_sink})
+    pid =
+      start_supervised!(
+        {AudioSink, command: @discard_command, name: :pausable_audio_sink, prebuffer_ms: 0}
+      )
+
     first_port = :sys.get_state(pid).port
 
     assert :ok = AudioSink.pause(pid)
@@ -161,7 +174,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
              )
 
     assert "audiotoolbox" in command
-    assert "direct" in command
+    refute "direct" in command
     refute Enum.any?(command, &String.contains?(&1, "asetnsamples"))
 
     assert ["ffplay" | slow_command] =

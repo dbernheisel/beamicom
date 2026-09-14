@@ -4,8 +4,8 @@ defmodule Beamicom.Scenic.AudioSink do
   compatibility output or a core-owned `Beamicom.Host.Output`, validates typed
   PCM chunks, and writes raw signed-16-bit little-endian audio to an external
   player. This supports NES mono plus Game Boy and SNES stereo without changing
-  any emulator core. PCM playback starts with the first audio chunk, without a
-  platform-specific startup delay.
+  any emulator core. Initial PCM is prebuffered briefly so renderer compilation
+  and ordinary frame-time jitter do not starve the external player.
 
   On macOS the existing low-latency CoreAudio path is retained through ffmpeg;
   other platforms use ffplay. If the selected executable is unavailable, the
@@ -40,7 +40,7 @@ defmodule Beamicom.Scenic.AudioSink do
     audio = Keyword.get(opts, :audio, @default_audio)
     volume = Keyword.get(opts, :volume, 100)
     command = Keyword.get(opts, :command, default_command(Keyword.get(opts, :speed, 1.0), audio))
-    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, 0)
+    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, 100)
     prebuffer_frames = max(0, div(audio.sample_rate * prebuffer_ms + 999, 1_000))
 
     case {command, volume} do
@@ -87,11 +87,11 @@ defmodule Beamicom.Scenic.AudioSink do
 
     case os do
       {:unix, :darwin} ->
-        ~w(ffmpeg -loglevel quiet -avioflags direct -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
+        ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
           audio_filters(speed) ++ ~w(-f audiotoolbox -)
 
       _other ->
-        ~w(ffplay -nodisp -autoexit -loglevel error -avioflags direct -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
+        ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
           audio_filters(speed)
     end
   end
