@@ -1061,7 +1061,7 @@ defmodule Beamicom.Scenic.Shell do
   defp setting_value(:pixel_transparency), do: "pixel transparency"
   defp setting_value(true), do: "on"
   defp setting_value(false), do: "off"
-  defp setting_value(value) when is_integer(value), do: "#{value}%"
+  defp setting_value(value) when is_integer(value), do: "#{value} percent"
   defp setting_value(value) when is_binary(value), do: Path.basename(value)
 
   defp filter_option(:none), do: nil

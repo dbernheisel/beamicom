@@ -90,7 +90,7 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
              "  Integer scaling  OFF"
 
     assert MenuItem.display_label(item(config, :audio)) == "  Audio  OFF"
-    assert MenuItem.display_label(item(config, :volume)) == "  Volume  35 pct"
+    assert MenuItem.display_label(item(config, :volume)) == "  Volume  35"
     assert MenuItem.slider_value(item(config, :volume), PopupMenu.width(config.items), 0) == 0
 
     assert MenuItem.slider_value(

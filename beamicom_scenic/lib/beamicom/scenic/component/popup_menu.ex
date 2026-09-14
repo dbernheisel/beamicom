@@ -15,7 +15,7 @@ defmodule Beamicom.Scenic.Component.PopupMenu do
     label_width =
       items
       |> Enum.reject(&(&1 == :separator))
-      |> Enum.map(&text_width(MenuItem.display_label(&1)))
+      |> Enum.map(&text_width(MenuItem.layout_label(&1)))
       |> Enum.max(fn -> 0 end)
       |> Kernel.+(@horizontal_padding)
       |> ceil()
