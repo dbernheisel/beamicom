@@ -69,6 +69,45 @@ defmodule Beamicom.SNES.BusTest do
     assert bus.coprocessor.load_count == 1
   end
 
+  test "Cx4 trapezoid command generates clipped left and right scanline bounds" do
+    {:ok, cartridge} =
+      :lorom |> SNESTestROM.build(cartridge_type: 0xF3) |> Cartridge.load()
+
+    bus = Bus.new(cartridge)
+
+    registers = [
+      {0x007F80, 10},
+      {0x007F81, 0},
+      {0x007F83, 10},
+      {0x007F84, 0},
+      {0x007F86, 100},
+      {0x007F87, 0},
+      {0x007F89, 12},
+      {0x007F8A, 0},
+      {0x007F8C, 0},
+      {0x007F8D, 0},
+      {0x007F8F, 0},
+      {0x007F90, 0},
+      {0x007F93, 20},
+      {0x007F94, 0},
+      {0x007F4D, 2}
+    ]
+
+    bus =
+      Enum.reduce(registers, bus, fn {address, value}, bus ->
+        {bus, 8} = Bus.write(bus, address, value)
+        bus
+      end)
+
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x22)
+
+    assert {Bus.peek(bus, 0x006800), Bus.peek(bus, 0x006900)} == {1, 0}
+    assert {Bus.peek(bus, 0x006801), Bus.peek(bus, 0x006901)} == {1, 0}
+    assert {Bus.peek(bus, 0x006802), Bus.peek(bus, 0x006902)} == {90, 110}
+    assert {Bus.peek(bus, 0x0068E0), Bus.peek(bus, 0x0069E0)} == {90, 110}
+    assert bus.coprocessor.unknown_commands == MapSet.new()
+  end
+
   test "prices WRAM, MMIO, JOYSER, slow ROM, and fast ROM accesses", %{bus: bus} do
     assert Bus.access_clocks(bus, 0x7E0000) == 8
     assert Bus.access_clocks(bus, 0x002100) == 6

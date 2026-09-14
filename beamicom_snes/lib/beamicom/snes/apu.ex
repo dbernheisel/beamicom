@@ -63,10 +63,15 @@ defmodule Beamicom.SNES.APU do
     spc = if apu.spc, do: SPC700.put_input_port(apu.spc, port, value), else: nil
     apu = %{apu | cpu_to_apu: cpu_to_apu, spc: spc}
 
-    if port == 0 and is_nil(spc) and apu.ipl_state in [:ready, :upload] do
-      %{apu | ipl_pending_port0: value}
-    else
-      handle_ipl_write(apu, port, value)
+    cond do
+      spc ->
+        apu
+
+      port == 0 and apu.ipl_state in [:ready, :upload] ->
+        %{apu | ipl_pending_port0: value}
+
+      true ->
+        handle_ipl_write(apu, port, value)
     end
   end
 

@@ -37,7 +37,7 @@ defmodule Beamicom.SNES.DSP do
         %{
           dsp
           | registers: :array.set(address, value, dsp.registers),
-            key_on: dsp.key_on ||| value
+            key_on: value
         }
 
       0x5C ->
@@ -106,10 +106,15 @@ defmodule Beamicom.SNES.DSP do
         put_elem(voices, index, voice)
       end)
 
-    # The mixer advances in frame-sized blocks, so consume both key latches
-    # once here. Keeping KOFF asserted for the whole next block would erase a
-    # later KON written during the same SPC execution span.
-    %{dsp | voices: voices, key_on: 0, key_off: 0}
+    # KON is a self-clearing latch, while KOFF remains asserted until software
+    # writes it again. KON wins on the boundary where both are sampled, but an
+    # asserted KOFF must still stop that voice on the following boundary.
+    %{
+      dsp
+      | voices: voices,
+        key_on: 0,
+        end_flags: dsp.end_flags &&& bnot(dsp.key_on)
+    }
   end
 
   defp start_voice(dsp, ram, index) do
@@ -182,10 +187,10 @@ defmodule Beamicom.SNES.DSP do
          end_flags
        ) do
     sample = elem(samples, sample_index)
-    voice = advance_render_voice(voice, pitch, ram)
+    {voice, ended?} = advance_render_voice(voice, pitch, ram)
     left = left + div(sample * volume_left, 128)
     right = right + div(sample * volume_right, 128)
-    end_flags = if elem(voice, 0), do: end_flags, else: end_flags ||| 1 <<< index
+    end_flags = if ended?, do: end_flags ||| 1 <<< index, else: end_flags
     {left, right, voice, end_flags}
   end
 
@@ -193,21 +198,28 @@ defmodule Beamicom.SNES.DSP do
     phase = phase + pitch
     steps = phase >>> 12
     voice = put_elem(voice, 7, phase &&& 0x0FFF)
-    advance_render_samples(voice, steps, ram)
+    advance_render_samples(voice, steps, ram, false)
   end
 
-  defp advance_render_samples(voice, 0, _ram), do: voice
+  defp advance_render_samples(voice, 0, _ram, ended?), do: {voice, ended?}
 
-  defp advance_render_samples({false, _, _, _, _, _, _, _, _, _} = voice, _steps, _ram),
-    do: voice
+  defp advance_render_samples(
+         {false, _, _, _, _, _, _, _, _, _} = voice,
+         _steps,
+         _ram,
+         ended?
+       ),
+       do: {voice, ended?}
 
   defp advance_render_samples(
          {true, block_address, loop_address, block_end?, block_loop?, samples, sample_index,
           phase, previous1, previous2},
          steps,
-         ram
+         ram,
+         ended?
        ) do
     sample_index = sample_index + 1
+    ended? = ended? or (sample_index >= 16 and block_end?)
 
     voice =
       if sample_index >= 16 do
@@ -231,7 +243,7 @@ defmodule Beamicom.SNES.DSP do
          previous1, previous2}
       end
 
-    advance_render_samples(voice, steps - 1, ram)
+    advance_render_samples(voice, steps - 1, ram, ended?)
   end
 
   defp render_voices({v0, v1, v2, v3, v4, v5, v6, v7}),

@@ -188,6 +188,36 @@ defmodule Beamicom.SNES.Cx4 do
     put_unsigned(cx4, 0x1F86, angle &&& 0x1FF, 2)
   end
 
+  defp execute_command(cx4, 0x22) do
+    tangent_left = fixed_tangent(unsigned(cx4, 0x1F8C, 2) &&& 0x1FF)
+    tangent_right = fixed_tangent(unsigned(cx4, 0x1F8F, 2) &&& 0x1FF)
+    origin_x = unsigned(cx4, 0x1F80, 2)
+    origin_y = unsigned(cx4, 0x1F83, 2)
+    screen_x = unsigned(cx4, 0x1F86, 2)
+    screen_y = unsigned(cx4, 0x1F89, 2)
+    width = unsigned(cx4, 0x1F93, 2)
+    initial_y = signed_width(origin_y - screen_y, 16)
+
+    ram =
+      Enum.reduce(0..224, cx4.ram, fn row, ram ->
+        y = initial_y + row
+
+        {left, right} =
+          if y < 0 do
+            {1, 0}
+          else
+            left = signed_width(((tangent_left * y) >>> 16) - origin_x + screen_x, 16)
+            right = signed_width(((tangent_right * y) >>> 16) - origin_x + screen_x + width, 16)
+            clamp_trapezoid(left, right)
+          end
+
+        ram = :array.set(0x800 + row, left, ram)
+        :array.set(0x900 + row, right, ram)
+      end)
+
+    %{cx4 | ram: ram}
+  end
+
   defp execute_command(cx4, 0x25) do
     result = unsigned(cx4, 0x1F80, 3) * unsigned(cx4, 0x1F83, 3)
     put_unsigned(cx4, 0x1F80, result, 3)
@@ -218,6 +248,37 @@ defmodule Beamicom.SNES.Cx4 do
     value = unsigned(cx4, offset, bytes)
     sign = 1 <<< (bytes * 8 - 1)
     if (value &&& sign) == 0, do: value, else: value - (1 <<< (bytes * 8))
+  end
+
+  defp fixed_tangent(angle) do
+    radians = angle * :math.pi() / 256
+    sine = round(:math.sin(radians) * 32_767)
+    cosine = round(:math.cos(radians) * 32_767)
+    if cosine == 0, do: -0x80000000, else: div(sine <<< 16, cosine)
+  end
+
+  defp signed_width(value, bits) do
+    mask = (1 <<< bits) - 1
+    value = value &&& mask
+    sign = 1 <<< (bits - 1)
+    if (value &&& sign) == 0, do: value, else: value - (1 <<< bits)
+  end
+
+  defp clamp_trapezoid(left, right) do
+    {left, right} =
+      cond do
+        left < 0 and right < 0 -> {1, 0}
+        left < 0 -> {0, right}
+        right < 0 -> {left, 0}
+        true -> {left, right}
+      end
+
+    cond do
+      left > 255 and right > 255 -> {255, 254}
+      left > 255 -> {255, right}
+      right > 255 -> {left, 255}
+      true -> {left, right}
+    end
   end
 
   defp put_unsigned(cx4, offset, value, bytes) do

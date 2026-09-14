@@ -72,7 +72,7 @@ defmodule Beamicom.SNES.Bus do
       sram: :array.new(sram_size, default: 0xFF, fixed: true),
       timing: timing,
       ppu: PPU.new(),
-      apu: APU.new(),
+      apu: APU.new(native_ipl: true),
       coprocessor: if(Cx4.cartridge?(cartridge), do: Cx4.new()),
       dma_channels: List.duplicate(@dma_channel, 8) |> List.to_tuple()
     }

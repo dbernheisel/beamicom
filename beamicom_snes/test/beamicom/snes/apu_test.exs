@@ -60,6 +60,45 @@ defmodule Beamicom.SNES.APUTest do
     assert apu.spc.error == nil
   end
 
+  test "native IPL uploads and launches a program through the CPU ports" do
+    apu =
+      APU.new(native_ipl: true)
+      |> advance_until_port(0, 0xAA)
+      |> advance_until_port(1, 0xBB)
+
+    apu =
+      apu
+      |> APU.cpu_write(2, 0x00)
+      |> APU.cpu_write(3, 0x02)
+      |> APU.cpu_write(1, 0x01)
+      |> APU.cpu_write(0, 0xCC)
+      |> advance_until_port(0, 0xCC)
+
+    # MOV $F4,#$42; BRA -2. The uploaded program makes its launch observable
+    # without relying on DSP state.
+    apu =
+      [0x8F, 0x42, 0xF4, 0x2F, 0xFE]
+      |> Enum.with_index()
+      |> Enum.reduce(apu, fn {byte, index}, apu ->
+        apu
+        |> APU.cpu_write(1, byte)
+        |> APU.cpu_write(0, index)
+        |> advance_until_port(0, index)
+      end)
+
+    apu =
+      apu
+      |> APU.cpu_write(2, 0x00)
+      |> APU.cpu_write(3, 0x02)
+      |> APU.cpu_write(1, 0x00)
+      |> APU.cpu_write(0, 0x06)
+      |> advance_until_port(0, 0x42)
+
+    assert apu.spc.pc in [0x0203, 0x0205]
+    assert apu.spc.error == nil
+    assert :array.get(0x0200, apu.spc.ram) == 0x8F
+  end
+
   test "accumulates the independent NTSC audio timeline without per-clock stepping" do
     # 945,000 master clocks are exactly 44 ms at the NTSC 945/44 MHz clock.
     apu = APU.advance(APU.new(), 945_000, :ntsc)
@@ -171,6 +210,32 @@ defmodule Beamicom.SNES.APUTest do
     end
   end
 
+  defp advance_until_port(apu, port, expected, attempts \\ 2_000)
+
+  defp advance_until_port(apu, port, expected, 0) do
+    flunk(
+      "APU port #{port} did not become #{expected}: " <>
+        inspect(%{
+          pc: apu.spc.pc,
+          input: apu.spc.input_ports,
+          output: apu.spc.output_ports,
+          x: apu.spc.x,
+          y: apu.spc.y,
+          error: apu.spc.error
+        })
+    )
+  end
+
+  defp advance_until_port(apu, port, expected, attempts) do
+    if APU.cpu_read(apu, port) == expected do
+      apu
+    else
+      apu
+      |> APU.advance(128, :ntsc)
+      |> advance_until_port(port, expected, attempts - 1)
+    end
+  end
+
   test "SPC DIV reproduces the overflow path and flags" do
     spc =
       %{SPC700.new(spc_ram([{0, 0x9E}]), 0) | a: 225, x: 83, y: 128, psw: 97}
@@ -257,6 +322,48 @@ defmodule Beamicom.SNES.APUTest do
     {looping, ram} = configure.(0x13)
     {looping, _pcm} = DSP.render(looping, ram, 20)
     assert elem(looping.voices, 0).active?
+    assert DSP.read(looping, 0x7C) == 1
+
+    {restarted, _pcm} = looping |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 1)
+    assert DSP.read(restarted, 0x7C) == 0
+  end
+
+  test "DSP keeps KOFF asserted and replaces pending KON writes" do
+    ram =
+      Enum.reduce(
+        [{0x100, 0x00}, {0x101, 0x02}, {0x102, 0x00}, {0x103, 0x02}, {0x200, 0x13}],
+        :array.new(0x10000, default: 0, fixed: true),
+        fn {address, value}, ram -> :array.set(address, value, ram) end
+      )
+
+    dsp =
+      DSP.new()
+      |> DSP.write(0x02, 0x00)
+      |> DSP.write(0x03, 0x10)
+      |> DSP.write(0x04, 0x00)
+      |> DSP.write(0x5D, 0x01)
+      |> DSP.write(0x4C, 0x01)
+      |> DSP.write(0x4C, 0x00)
+
+    {not_started, _pcm} = DSP.render(dsp, ram, 1)
+    refute elem(not_started.voices, 0).active?
+
+    {started, _pcm} = dsp |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 1)
+    assert elem(started.voices, 0).active?
+
+    # If KON and KOFF are sampled together, KON wins for that boundary. KOFF
+    # remains set, though, and stops the voice at the following boundary.
+    {keyed_again, _pcm} =
+      started
+      |> DSP.write(0x5C, 0x01)
+      |> DSP.write(0x4C, 0x01)
+      |> DSP.render(ram, 1)
+
+    assert elem(keyed_again.voices, 0).active?
+
+    {stopped, _pcm} = DSP.render(keyed_again, ram, 1)
+    refute elem(stopped.voices, 0).active?
+    assert DSP.read(stopped, 0x5C) == 0x01
   end
 
   test "audio already produced is not erased by a later DSP mute" do

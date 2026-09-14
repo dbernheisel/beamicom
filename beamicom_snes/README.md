@@ -11,10 +11,10 @@ Nx/EXLA PPU acceleration. The implementation currently includes:
 - native rendering paths for modes 0-7, with modes 2-6 still approximate, plus
   OBJ, windows, color math, brightness, and scanline-varying state;
 - general DMA, HDMA, the WRAM data port, and fast-ROM selection;
-- directional CPU/APU ports, IPL upload, an SPC700 interpreter, S-DSP mixing,
+- directional CPU/APU ports, native SPC700 IPL upload/launch, S-DSP mixing,
   and synchronized 32 kHz stereo PCM output;
 - partial Capcom Cx4 support with its cartridge RAM/register window,
-  ROM-to-RAM transfers, self-test responses, and scalar math commands;
+  ROM-to-RAM transfers, self-test responses, scalar math, and trapezoid clipping;
 - an emulation/native-mode 65C816 interpreter with interrupt entry/RTI; and
 - optional frame-wide Nx/EXLA renderers for the supported Mode 1 and Mode 7
   paths, with automatic native fallback.
@@ -22,7 +22,7 @@ Nx/EXLA PPU acceleration. The implementation currently includes:
 It boots and renders the tested Final Fantasy II, Final Fantasy III, Super Mario
 World, and Super Metroid scenes with active audio. It is not yet a complete or
 cycle-perfect core: all 256 CPU opcode bytes dispatch, but addressing/timing
-edge cases, modes 2-6, Cx4 graphics commands, other cartridge coprocessors, and
+edge cases, modes 2-6, remaining Cx4 graphics commands, other cartridge coprocessors, and
 further PPU/DSP accuracy remain future work. See the detailed
 [implementation status matrix](IMPLEMENTATION_STATUS.md).
 

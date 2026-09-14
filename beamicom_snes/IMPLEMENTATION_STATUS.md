@@ -28,7 +28,7 @@ The audit describes the current source, not a cycle-accuracy claim.
 | PPU MMIO | Most write paths from `$2100-$2133`; selected reads | OAM/VRAM read semantics, counters/status, hires/interlace, raster timing |
 | PPU modes | Native paths for modes 0-7; modes 2-6 are partial | OPT, true/pseudo-hires, interlace pixels, OBJ edge cases |
 | SPC700 | **256/256 opcode bytes**, lightly validated | Exact instruction/MMIO timing and conformance tests; fragmented-cycle debt is handled |
-| S-SMP | Ports, IPL overlay, timers, DSP address/data mostly present | TEST semantics, timer phase, DSPDATA write behavior, real IPL execution |
+| S-SMP | Ports, native IPL execution, timers, DSP address/data mostly present | TEST semantics, timer phase, DSPDATA write behavior, port collision timing |
 | S-DSP | Basic eight-voice BRR playback, stereo mixing, and register-event-ordered output | ADSR/GAIN, interpolation, PMON/noise, echo/FIR |
 | Cartridge coprocessors | **Partial Cx4** | Cx4 sprite/transform/wireframe commands; common interface and SuperFX |
 | Nx/EXLA | Optimized subsets of Mode 1 and Mode 7 | Broader fused PPU kernels; later block-based DSP mixing |
@@ -207,7 +207,7 @@ executes. Fragmented-versus-batched SPC and APU tests now cover this behavior.
 | `$F8-$F9` AUX | Implemented | Auxiliary RAM values. |
 | `$FA-$FC` timer targets | Partial | Zero-as-256 works; write-only read behavior is inaccurate. |
 | `$FD-$FF` timer outputs | Partial | Four-bit wrap and clear-on-read work; edge timing is approximate. |
-| `$FFC0-$FFFF` IPL overlay | Partial | Correct 64-byte image exists, but normal boot uses a high-level upload state machine and jumps directly to the upload entry point. |
+| `$FFC0-$FFFF` IPL overlay | Implemented | Normal boot executes the 64-byte IPL, including CPU-port upload and indirect launch; focused tests cover a complete native transfer. |
 
 ### S-DSP registers and synthesis
 
@@ -224,10 +224,10 @@ Per-voice register groups `$x0-$x9` apply to voices 0-7.
 | `ENVX $x8`, `OUTX $x9` | Missing; generic storage only |
 | `MVOLL/MVOLR $0C/$1C` | Implemented |
 | `EVOLL/EVOLR $2C/$3C` | Missing |
-| `KON $4C` | Partial: block-latched without DSP pipeline/start delay |
-| `KOFF $5C` | Partial: kills voices instead of entering release |
+| `KON $4C` | Partial: self-clearing/latest-write latch without DSP pipeline/start delay |
+| `KOFF $5C` | Partial: persistent level and KON priority implemented; kills voices instead of entering release |
 | `FLG $6C` | Partial mute/reset; noise clock missing |
-| `ENDX $7C` | Partial: looping end blocks do not set ENDX correctly |
+| `ENDX $7C` | Partial: end/loop flags and KON clearing implemented without exact pipeline timing |
 | `EFB $0D` | Missing |
 | `PMON $2D` | Missing |
 | `NON $3D` | Missing |
@@ -257,7 +257,7 @@ timing and arbitration requirements become concrete.
 
 | Chip | Command/instruction surface | Status |
 |---|---|---|
-| Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` triangle; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$05/$15/$1F/$25/$40/$54/$5C/$89`. X3 passes its Cx4 self-test; graphics commands remain. |
+| Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` triangle; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$05/$15/$1F/$22/$25/$40/$54/$5C/$89`. X3 passes its Cx4 self-test and its attract sequence exercises trapezoid clipping; sprite, wireframe, and transform commands remain. |
 | SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | Missing. Required by Star Fox and Yoshi's Island. |
 
 ### Remaining commercial enhancement chips
