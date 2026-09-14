@@ -6,6 +6,31 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     @width 256
     @height 224
+    @control_columns 40
+
+    @doc "Compiles every supported control-shape variant before realtime playback starts."
+    def warmup do
+      common = [
+        Nx.template({0x10000}, :u8),
+        Nx.template({256}, :u16),
+        Nx.template({@height, @width, 2}, :u8)
+      ]
+
+      for {variant, rows} <- [
+            mode1_constant: 1,
+            mode1: @height,
+            mode1_windowed_constant: 1,
+            mode1_windowed: @height,
+            mode7_constant: 1,
+            mode7: @height
+          ] do
+        args = [Nx.template({rows, @control_columns}, :s32) | common]
+        compiled(args, variant)
+      end
+
+      :ok
+    end
+
     def supported?(ppu) do
       states = states(ppu)
 
@@ -63,7 +88,8 @@ if Code.ensure_loaded?(Nx.Defn) do
             elem(state, 27),
             elem(state, 28),
             elem(state, 29),
-            elem(state, 30)
+            elem(state, 30),
+            if(elem(state, 31), do: 1, else: 0)
           ]
         end)
 
@@ -282,26 +308,26 @@ if Code.ensure_loaded?(Nx.Defn) do
     end
 
     defn render_mode7(controls, vram, palettes, objects) do
-      {bg_index, bg_opaque} = mode7_background(vram, controls)
+      pixel = mode7_background(vram, controls)
       object_index = objects[[.., .., 0]] |> Nx.as_type(:s32)
       object_priority = objects[[.., .., 1]] |> Nx.as_type(:s32)
 
       {main_index, main_layer} =
         compose_mode7(
-          bg_index,
-          bg_opaque,
+          pixel,
           object_index,
           object_priority,
-          full_column(controls, 14)
+          full_column(controls, 14),
+          full_column(controls, 39)
         )
 
       {sub_index, sub_layer} =
         compose_mode7(
-          bg_index,
-          bg_opaque,
+          pixel,
           object_index,
           object_priority,
-          full_column(controls, 15)
+          full_column(controls, 15),
+          full_column(controls, 39)
         )
 
       select = full_column(controls, 16)
@@ -377,20 +403,29 @@ if Code.ensure_loaded?(Nx.Defn) do
       repeat = band(shr(full_column(controls, 30), 6), 3)
       wrapped = repeat == 0 or repeat == 1
       color = Nx.select(wrapped or in_bounds, color, Nx.select(repeat == 3, tile_zero_color, 0))
-      {color, color != 0}
+      color
     end
 
-    defnp compose_mode7(bg_index, bg_opaque, object_index, object_priority, screen) do
-      bg_score = Nx.select(bg_opaque and band(screen, 1) != 0, 2, 0)
+    defnp compose_mode7(pixel, object_index, object_priority, screen, extbg) do
+      bg1_opaque = pixel != 0 and band(screen, 1) != 0
+      bg1_score = Nx.select(bg1_opaque, 3, 0)
+      bg2_index = band(pixel, 0x7F)
+      bg2_opaque = extbg != 0 and bg2_index != 0 and band(screen, 2) != 0
+      bg2_score = Nx.select(band(pixel, 0x80) != 0, 5, 1)
+      bg2_score = Nx.select(bg2_opaque, bg2_score, 0)
+      bg2_wins = bg2_score > bg1_score
+      bg_score = Nx.select(bg2_wins, bg2_score, bg1_score)
+      bg_index = Nx.select(bg2_wins, bg2_index, pixel)
+      bg_layer = Nx.select(bg2_wins, 1, 0)
 
       object_score =
         Nx.select(
           object_priority == 4,
-          5,
+          7,
           Nx.select(
             object_priority == 3,
-            4,
-            Nx.select(object_priority == 2, 3, Nx.select(object_priority == 1, 1, 0))
+            6,
+            Nx.select(object_priority == 2, 4, Nx.select(object_priority == 1, 2, 0))
           )
         )
 
@@ -399,7 +434,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
       object_wins = object_score > bg_score
       index = Nx.select(object_wins, object_index, Nx.select(bg_score > 0, bg_index, 0))
-      layer = Nx.select(object_wins, 4, Nx.select(bg_score > 0, 0, 5))
+      layer = Nx.select(object_wins, 4, Nx.select(bg_score > 0, bg_layer, 5))
       {index, layer}
     end
 
@@ -725,7 +760,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp compiled(args, variant) do
       key =
-        {__MODULE__, :background_obj_v4, variant, Beamicom.SNES.Nx.compiler_options()}
+        {__MODULE__, :background_obj_v5, variant, Beamicom.SNES.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->

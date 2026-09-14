@@ -67,4 +67,39 @@ defmodule Beamicom.SNES.InterruptTest do
     assert machine.cpu.pc == 0x8000
     assert machine.cpu.s == 0x01FF
   end
+
+  test "NMI releases WAI and vectors before the following instruction" do
+    rom =
+      :lorom
+      |> SNESTestROM.build(program: <<0xCB, 0xEA>>)
+      |> SNESTestROM.put_bytes(0x7FFA, <<0x00, 0x90>>)
+
+    {:ok, machine} = Machine.load(rom)
+    assert {:ok, machine, 20} = Machine.step(machine)
+    assert machine.cpu.waiting?
+
+    machine = put_in(machine.bus.nmi_pending?, true)
+    assert {:ok, machine, 52} = Machine.step(machine)
+    refute machine.cpu.waiting?
+    assert machine.cpu.pc == 0x9000
+    assert :array.get(0x01FF, machine.bus.wram) == 0x80
+    assert :array.get(0x01FE, machine.bus.wram) == 0x01
+  end
+
+  test "BRK and COP consume their signatures and use emulation vectors" do
+    for {opcode, vector_offset, target} <- [{0x00, 0x7FFE, 0x9000}, {0x02, 0x7FF4, 0x9100}] do
+      rom =
+        :lorom
+        |> SNESTestROM.build(program: <<opcode, 0xA5>>)
+        |> SNESTestROM.put_bytes(vector_offset, <<target::little-16>>)
+
+      {:ok, machine} = Machine.load(rom)
+      assert {:ok, machine, 56} = Machine.step(machine)
+      assert machine.cpu.pc == target
+      assert machine.cpu.s == 0x01FC
+      assert :array.get(0x01FF, machine.bus.wram) == 0x80
+      assert :array.get(0x01FE, machine.bus.wram) == 0x02
+      assert (:array.get(0x01FD, machine.bus.wram) &&& 0x10) != 0
+    end
+  end
 end

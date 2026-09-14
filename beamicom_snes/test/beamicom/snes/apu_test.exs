@@ -51,6 +51,15 @@ defmodule Beamicom.SNES.APUTest do
     assert apu.spc.pc == 0x0200
   end
 
+  test "native IPL publishes its hardware ready signature" do
+    apu = APU.new(native_ipl: true) |> APU.advance(60_000, :ntsc)
+
+    assert APU.cpu_read(apu, 0) == 0xAA
+    assert APU.cpu_read(apu, 1) == 0xBB
+    assert apu.spc.pc in 0xFFCF..0xFFD2
+    assert apu.spc.error == nil
+  end
+
   test "accumulates the independent NTSC audio timeline without per-clock stepping" do
     # 945,000 master clocks are exactly 44 ms at the NTSC 945/44 MHz clock.
     apu = APU.advance(APU.new(), 945_000, :ntsc)
@@ -79,6 +88,47 @@ defmodule Beamicom.SNES.APUTest do
     assert chunked.sample_phase == once.sample_phase
     assert chunked.pending_spc_cycles == once.pending_spc_cycles
     assert chunked.spc_phase == once.spc_phase
+  end
+
+  test "SPC instruction overruns become debt across fragmented cycle grants" do
+    ram = :array.new(0x10000, default: 0, fixed: true)
+    initial = SPC700.new(ram, 0)
+    overdrawn = SPC700.run(initial, 1)
+    settled = SPC700.run(overdrawn, 1)
+
+    assert {overdrawn.pc, overdrawn.cycles, overdrawn.cycle_credit} == {1, 2, -1}
+    assert {settled.pc, settled.cycles, settled.cycle_credit} == {1, 2, 0}
+
+    batched = SPC700.run(initial, 100)
+
+    fragmented =
+      Enum.reduce(1..100, initial, fn _, spc ->
+        SPC700.run(spc, 1)
+      end)
+
+    assert fragmented.pc == batched.pc
+    assert fragmented.cycles == batched.cycles
+    assert fragmented.cycle_credit == batched.cycle_credit
+    assert {fragmented.pc, fragmented.cycles, fragmented.cycle_credit} == {50, 100, 0}
+  end
+
+  test "APU clock fragmentation does not overclock its running SPC" do
+    ram = :array.new(0x10000, default: 0, fixed: true)
+    spc = SPC700.new(ram, 0)
+    initial = %{APU.new() | ram: ram, spc: spc, ipl_state: :running}
+
+    batched = APU.advance(initial, 2_000, :pal)
+
+    fragmented =
+      Enum.reduce(1..2_000, initial, fn _, apu ->
+        APU.advance(apu, 1, :pal)
+      end)
+
+    assert fragmented.spc.pc == batched.spc.pc
+    assert fragmented.spc.cycles == batched.spc.cycles
+    assert fragmented.spc.cycle_credit == batched.spc.cycle_credit
+    assert fragmented.spc_phase == batched.spc_phase
+    assert fragmented.pending_spc_cycles == batched.pending_spc_cycles
   end
 
   test "lazy SPC timers synchronize and clear when their output register is read" do
@@ -153,6 +203,22 @@ defmodule Beamicom.SNES.APUTest do
     end
   end
 
+  test "SPC ignores DSPDATA writes when DSPADDR bit 7 is set" do
+    ram =
+      spc_ram([
+        {0, 0x8F},
+        {1, 0xDC},
+        {2, 0xF2},
+        {3, 0x8F},
+        {4, 0xFF},
+        {5, 0xF3}
+      ])
+
+    spc = SPC700.new(ram, 0) |> SPC700.run(10)
+    assert spc.dsp_addr == 0xDC
+    assert DSP.read(spc.dsp, 0x5C) == 0
+  end
+
   test "DSP decodes BRR into PCM and honors the end and loop flags" do
     base_ram =
       Enum.reduce(
@@ -191,6 +257,44 @@ defmodule Beamicom.SNES.APUTest do
     {looping, ram} = configure.(0x13)
     {looping, _pcm} = DSP.render(looping, ram, 20)
     assert elem(looping.voices, 0).active?
+  end
+
+  test "audio already produced is not erased by a later DSP mute" do
+    ram =
+      Enum.reduce(
+        [{0x100, 0x00}, {0x101, 0x02}, {0x102, 0x00}, {0x103, 0x02}, {0x200, 0x13}],
+        :array.new(0x10000, default: 0, fixed: true),
+        fn {address, value}, ram -> :array.set(address, value, ram) end
+      )
+
+    ram =
+      Enum.reduce(0x201..0x208, ram, fn address, ram ->
+        :array.set(address, 0x77, ram)
+      end)
+
+    dsp =
+      DSP.new()
+      |> DSP.write(0x00, 0x7F)
+      |> DSP.write(0x01, 0x7F)
+      |> DSP.write(0x02, 0x00)
+      |> DSP.write(0x03, 0x10)
+      |> DSP.write(0x04, 0x00)
+      |> DSP.write(0x0C, 0x7F)
+      |> DSP.write(0x1C, 0x7F)
+      |> DSP.write(0x5D, 0x01)
+      |> DSP.write(0x4C, 0x01)
+
+    spc = %{SPC700.new(ram, 0) | dsp: dsp}
+    apu = %{APU.new() | ram: ram, spc: spc, ipl_state: :running}
+
+    # PAL needs 666 master clocks to cross one 32 kHz sample boundary.
+    apu = APU.advance(apu, 666, :pal)
+    apu = put_in(apu.spc.dsp, DSP.write(apu.spc.dsp, 0x6C, 0x40))
+    apu = APU.advance(apu, 666, :pal)
+
+    assert {2, <<first::binary-size(4), second::binary-size(4)>>, _apu} = APU.take_pcm(apu)
+    refute first == <<0, 0, 0, 0>>
+    assert second == <<0, 0, 0, 0>>
   end
 
   defp spc_ram(bytes) do

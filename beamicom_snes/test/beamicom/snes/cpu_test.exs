@@ -3,7 +3,7 @@ defmodule Beamicom.SNES.CPUTest do
 
   import Bitwise
 
-  alias Beamicom.SNES.Machine
+  alias Beamicom.SNES.{CPU, Machine}
   alias Beamicom.SNESTestROM
 
   test "resets in emulation mode through the mapped reset vector" do
@@ -47,14 +47,60 @@ defmodule Beamicom.SNES.CPUTest do
     assert Beamicom.SNES.Bus.peek(machine.bus, 0x001234) == 0x7F
   end
 
-  test "fails explicitly at an unsupported opcode" do
-    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x02>>))
+  test "WDM consumes its signature byte" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x42, 0xDB, 0xEA>>))
 
-    assert {:error, {{:unsupported_opcode, 0x02}, 0x008000}, machine} =
-             Machine.step(machine)
+    assert {:ok, machine, 16} = Machine.step(machine)
+    assert machine.cpu.pc == 0x8002
 
+    assert {:ok, machine, 14} = Machine.step(machine)
+    assert machine.cpu.pc == 0x8003
+  end
+
+  test "WAI idles until an interrupt and a masked IRQ still wakes it" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0xCB, 0xEA>>))
+
+    assert {:ok, machine, 20} = Machine.step(machine)
+    assert machine.cpu.waiting?
     assert machine.cpu.pc == 0x8001
-    assert machine.bus.timing.master_clocks == 8
+
+    assert {:ok, machine, 6} = Machine.step(machine)
+    assert machine.cpu.waiting?
+    assert machine.cpu.pc == 0x8001
+
+    machine = put_in(machine.bus.irq_flag?, true)
+    assert {:ok, machine, 14} = Machine.step(machine)
+    refute machine.cpu.waiting?
+    assert machine.cpu.pc == 0x8002
+    assert machine.bus.irq_flag?
+  end
+
+  test "STP enters an explicit stopped state" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0xDB>>))
+
+    assert {:ok, machine, 20} = Machine.step(machine)
+    assert machine.cpu.stopped?
+    assert {:error, :cpu_stopped, machine} = Machine.step(machine)
+    assert machine.cpu.pc == 0x8001
+  end
+
+  test "deferred execution batches a stable direct-page NMI polling loop" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0xA5, 0x10, 0xF0, 0xFC>>))
+
+    assert {:ok, cpu, bus} = CPU.step_deferred(machine.cpu, machine.bus)
+    assert {:ok, cpu, bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8000
+    assert cpu.instructions == 2
+
+    assert {:ok, cpu, bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8000
+    assert cpu.instructions > 2
+    assert Beamicom.SNES.Bus.cpu_master_clocks(bus) <= 1364
+
+    bus = %{bus | wram: :array.set(0x10, 1, bus.wram)}
+    assert {:ok, cpu, _bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8002
+    assert (cpu.a &&& 0xFF) == 1
   end
 
   test "runs a tight loop to a PPU frame and drains synchronized audio" do
@@ -91,4 +137,104 @@ defmodule Beamicom.SNES.CPUTest do
     assert Beamicom.SNES.Bus.peek(machine.bus, 0x7E0020) == 0xAA
     assert Beamicom.SNES.Bus.peek(machine.bus, 0x7E0021) == 0xBB
   end
+
+  test "decimal ADC and SBC exhaustively handle valid packed BCD bytes" do
+    valid_bcd = for tens <- 0..9, ones <- 0..9, do: tens <<< 4 ||| ones
+
+    for {opcode, operation} <- [{0x65, :add}, {0xE5, :subtract}] do
+      {:ok, machine} =
+        Machine.load(SNESTestROM.build(:lorom, program: <<opcode, 0x00>>))
+
+      for right <- valid_bcd do
+        bus = %{machine.bus | wram: :array.set(0, right, machine.bus.wram)}
+
+        for left <- valid_bcd, carry <- [0, 1] do
+          p = 0x3C ||| carry
+          cpu = %{machine.cpu | a: 0xA500 ||| left, p: p, pc: 0x8000}
+          assert {:ok, cpu, _bus} = CPU.step_deferred(cpu, bus)
+
+          {expected, expected_carry?} = decimal_result(operation, left, right, carry, 100)
+          expected_flags = result_flags(expected, expected_carry?, 0x80)
+
+          assert {cpu.a, cpu.p &&& 0x83} == {0xA500 ||| expected, expected_flags},
+                 "#{operation} #{hex(left, 2)} #{hex(right, 2)} carry=#{carry}"
+        end
+      end
+    end
+  end
+
+  test "decimal ADC and SBC produce 65C816 overflow flags" do
+    cases = [
+      {0x69, 8, 0x49, 0x50, 0, 0x99, 0xC0},
+      {0x69, 8, 0x79, 0x00, 1, 0x80, 0xC0},
+      {0x69, 8, 0x50, 0x50, 0, 0x00, 0x43},
+      {0x69, 8, 0x99, 0x00, 1, 0x00, 0x03},
+      {0xE9, 8, 0x80, 0x01, 1, 0x79, 0x41},
+      {0xE9, 8, 0x00, 0x01, 1, 0x99, 0x80},
+      {0xE9, 8, 0x50, 0x50, 1, 0x00, 0x03},
+      {0x69, 16, 0x4999, 0x5000, 0, 0x9999, 0xC0},
+      {0x69, 16, 0x9999, 0x0001, 0, 0x0000, 0x03},
+      {0xE9, 16, 0x8000, 0x0001, 1, 0x7999, 0x41},
+      {0xE9, 16, 0x0000, 0x0001, 1, 0x9999, 0x80}
+    ]
+
+    for {opcode, width, left, right, carry, expected, flags} <- cases do
+      cpu = run_decimal_immediate(opcode, width, left, right, carry)
+      mask = if width == 8, do: 0xFF, else: 0xFFFF
+      assert (cpu.a &&& mask) == expected
+      assert (cpu.p &&& 0xC3) == flags
+    end
+  end
+
+  test "TCS forces the stack high byte to page one in emulation mode" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x1B>>))
+    machine = put_in(machine.cpu.a, 0xAB34)
+
+    assert {:ok, machine, 14} = Machine.step(machine)
+    assert machine.cpu.s == 0x0134
+
+    machine = %{
+      machine
+      | cpu: %{machine.cpu | a: 0xCD56, emulation?: false, p: 0, pc: 0x8000}
+    }
+
+    assert {:ok, machine, 14} = Machine.step(machine)
+    assert machine.cpu.s == 0xCD56
+  end
+
+  defp run_decimal_immediate(opcode, width, left, right, carry) do
+    operand = if width == 8, do: <<right>>, else: <<right::little-16>>
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<opcode>> <> operand))
+
+    {emulation?, p, a} =
+      if width == 8,
+        do: {true, 0x3C ||| carry, 0xA500 ||| left},
+        else: {false, 0x08 ||| carry, left}
+
+    machine = %{machine | cpu: %{machine.cpu | a: a, p: p, emulation?: emulation?}}
+    assert {:ok, machine, _clocks} = Machine.step(machine)
+    machine.cpu
+  end
+
+  defp decimal_result(:add, left, right, carry, modulus) do
+    result = bcd_to_integer(left) + bcd_to_integer(right) + carry
+    {integer_to_bcd(Integer.mod(result, modulus)), result >= modulus}
+  end
+
+  defp decimal_result(:subtract, left, right, carry, modulus) do
+    result = bcd_to_integer(left) - bcd_to_integer(right) - (1 - carry)
+    {integer_to_bcd(Integer.mod(result, modulus)), result >= 0}
+  end
+
+  defp bcd_to_integer(value), do: (value >>> 4) * 10 + (value &&& 0x0F)
+  defp integer_to_bcd(value), do: div(value, 10) <<< 4 ||| rem(value, 10)
+
+  defp result_flags(result, carry?, sign) do
+    if(carry?, do: 0x01, else: 0) |||
+      if(result == 0, do: 0x02, else: 0) |||
+      if((result &&& sign) != 0, do: 0x80, else: 0)
+  end
+
+  defp hex(value, bytes),
+    do: value |> Integer.to_string(16) |> String.pad_leading(bytes, "0")
 end

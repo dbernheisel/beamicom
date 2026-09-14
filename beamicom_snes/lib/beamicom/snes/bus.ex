@@ -7,7 +7,7 @@ defmodule Beamicom.SNES.Bus do
   """
 
   import Bitwise
-  alias Beamicom.SNES.{APU, Cartridge, PPU, Timing}
+  alias Beamicom.SNES.{APU, Cartridge, Cx4, PPU, Timing}
 
   @wram_size 128 * 1024
   @dma_channel %{
@@ -53,7 +53,8 @@ defmodule Beamicom.SNES.Bus do
                 dma_channels: nil,
                 hdma_enable: 0,
                 apu_pending_clocks: 0,
-                cpu_pending_clocks: 0
+                cpu_pending_clocks: 0,
+                coprocessor: nil
               ]
 
   @type t :: %__MODULE__{}
@@ -72,6 +73,7 @@ defmodule Beamicom.SNES.Bus do
       timing: timing,
       ppu: PPU.new(),
       apu: APU.new(),
+      coprocessor: if(Cx4.cartridge?(cartridge), do: Cx4.new()),
       dma_channels: List.duplicate(@dma_channel, 8) |> List.to_tuple()
     }
   end
@@ -87,6 +89,9 @@ defmodule Beamicom.SNES.Bus do
 
       {:sram, offset} ->
         :array.get(offset, bus.sram)
+
+      {:cx4, _offset} ->
+        Cx4.read(bus.coprocessor, address)
 
       :rom ->
         Cartridge.read_or(bus.cartridge, address, bus.open_bus)
@@ -138,6 +143,9 @@ defmodule Beamicom.SNES.Bus do
         {:sram, offset} ->
           %{bus | sram: :array.set(offset, value, bus.sram)}
 
+        {:cx4, _offset} ->
+          %{bus | coprocessor: Cx4.write(bus.coprocessor, address, value, bus.cartridge)}
+
         {:ppu, register} ->
           write_ppu(bus, register, value)
 
@@ -187,6 +195,9 @@ defmodule Beamicom.SNES.Bus do
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         cpu_read_wram(bus, offset)
 
+      cx4_address?(bus, address) ->
+        cpu_read_cx4(bus, address)
+
       offset < 0x8000 and sram_address?(bus, bank, offset) ->
         {:ok, sram_offset} = Cartridge.address_to_sram_offset(bus.cartridge, address)
         value = :array.get(sram_offset, bus.sram)
@@ -216,6 +227,9 @@ defmodule Beamicom.SNES.Bus do
 
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         cpu_write_wram(bus, offset, value)
+
+      cx4_address?(bus, address) ->
+        cpu_write_cx4(bus, address, value)
 
       offset < 0x8000 and sram_address?(bus, bank, offset) ->
         {:ok, sram_offset} = Cartridge.address_to_sram_offset(bus.cartridge, address)
@@ -253,6 +267,22 @@ defmodule Beamicom.SNES.Bus do
     value = Cartridge.read_or(bus.cartridge, address, bus.open_bus)
 
     {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks}, clocks}
+  end
+
+  defp cpu_read_cx4(bus, address) do
+    value = Cx4.read(bus.coprocessor, address)
+    {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
+  end
+
+  defp cpu_write_cx4(bus, address, value) do
+    coprocessor = Cx4.write(bus.coprocessor, address, value, bus.cartridge)
+
+    {%{
+       bus
+       | coprocessor: coprocessor,
+         open_bus: value,
+         cpu_pending_clocks: bus.cpu_pending_clocks + 8
+     }, 8}
   end
 
   defp cpu_read_mapped(bus, address) do
@@ -400,6 +430,7 @@ defmodule Beamicom.SNES.Bus do
       bank in 0x80..0xBF and offset in [0x4016, 0x4017] -> 12
       match?({:wram, _}, mapped) -> 8
       match?({:sram, _}, mapped) -> 8
+      match?({:cx4, _}, mapped) -> 8
       mapped == :rom and bus.fast_rom? and address >= 0x800000 -> 6
       mapped == :rom -> 8
       true -> 6
@@ -417,6 +448,9 @@ defmodule Beamicom.SNES.Bus do
 
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         {:wram, offset}
+
+      cx4_address?(bus, address) ->
+        {:cx4, offset - 0x6000}
 
       match?({:ok, _offset}, sram_offset) ->
         {:ok, offset} = sram_offset
@@ -468,6 +502,8 @@ defmodule Beamicom.SNES.Bus do
   defp read_region(bus, {:wram, offset}, _address), do: {:array.get(offset, bus.wram), bus}
 
   defp read_region(bus, {:sram, offset}, _address), do: {:array.get(offset, bus.sram), bus}
+
+  defp read_region(bus, {:cx4, _offset}, address), do: {Cx4.read(bus.coprocessor, address), bus}
 
   defp read_region(bus, {:wram_port, 0x2180}, _address) do
     value = :array.get(bus.wmadd, bus.wram)
@@ -781,12 +817,26 @@ defmodule Beamicom.SNES.Bus do
 
   defp raw_write(bus, address, value) do
     case region(bus, address) do
-      {:wram, offset} -> %{bus | wram: :array.set(offset, value, bus.wram)}
-      {:sram, offset} -> %{bus | sram: :array.set(offset, value, bus.sram)}
-      {:ppu, register} -> write_ppu(bus, register, value)
-      {:apu_port, port} -> %{bus | apu: APU.cpu_write(bus.apu, port, value)}
-      {:wram_port, register} -> write_wram_port(bus, register, value)
-      _ -> bus
+      {:wram, offset} ->
+        %{bus | wram: :array.set(offset, value, bus.wram)}
+
+      {:sram, offset} ->
+        %{bus | sram: :array.set(offset, value, bus.sram)}
+
+      {:cx4, _offset} ->
+        %{bus | coprocessor: Cx4.write(bus.coprocessor, address, value, bus.cartridge)}
+
+      {:ppu, register} ->
+        write_ppu(bus, register, value)
+
+      {:apu_port, port} ->
+        %{bus | apu: APU.cpu_write(bus.apu, port, value)}
+
+      {:wram_port, register} ->
+        write_wram_port(bus, register, value)
+
+      _ ->
+        bus
     end
   end
 
@@ -800,6 +850,9 @@ defmodule Beamicom.SNES.Bus do
   defp sram_address?(%{cartridge: %{layout: layout}}, bank, offset)
        when layout in [:hirom, :exhirom],
        do: offset in 0x6000..0x7FFF and (bank in 0x20..0x3F or bank in 0xA0..0xBF)
+
+  defp cx4_address?(%{coprocessor: %Cx4{}}, address), do: Cx4.mapped?(address)
+  defp cx4_address?(_bus, _address), do: false
 
   defp initialize_hdma(bus) do
     channels =

@@ -28,7 +28,7 @@ defmodule Beamicom.Scenic do
   NTSC filter), positive `:speed` (default 1.0), `:audio` (default true),
   integer `:volume` from 0 through 100 (default 100), `:audio_command` for
   overriding the external player, `:audio_prebuffer_ms` for the initial PCM
-  reserve (default 100), and core-specific
+  reserve (default 250), and core-specific
   `:load_options`. Scale is normally an integer; the Game Boy Pixel Transparency
   filter also accepts fractional values greater than one. When persisted integer
   scaling is enabled, the viewport chooses the largest complete native-size stage

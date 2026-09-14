@@ -12,6 +12,18 @@ defmodule Beamicom.SNES.CPU do
   require Beamicom.SNES.Bus.CPUAccess
   alias Beamicom.SNES.Bus, as: SystemBus
   alias Beamicom.SNES.Bus.CPUAccess, as: Bus
+  alias Beamicom.SNES.Timing
+
+  @compile {:inline,
+            execute_deferred: 2,
+            fetch8: 2,
+            accumulator_width: 1,
+            index_width: 1,
+            merge_accumulator: 3,
+            mask_width: 2,
+            next_bank_address: 1,
+            stack_value: 2,
+            flag: 3}
 
   @c 0x01
   @z 0x02
@@ -32,6 +44,9 @@ defmodule Beamicom.SNES.CPU do
             pc: 0,
             p: 0x34,
             emulation?: true,
+            waiting?: false,
+            stopped?: false,
+            poll_loop: nil,
             master_clocks: 0,
             instructions: 0
 
@@ -52,22 +67,26 @@ defmodule Beamicom.SNES.CPU do
   @doc false
   def step_deferred(%__MODULE__{} = cpu, %SystemBus{} = bus) do
     cond do
+      cpu.stopped? ->
+        {:error, :cpu_stopped, cpu, Bus.flush(bus)}
+
       bus.nmi_pending? ->
-        finish_deferred_interrupt(cpu, %{bus | nmi_pending?: false}, :nmi)
+        finish_deferred_interrupt(%{cpu | waiting?: false}, %{bus | nmi_pending?: false}, :nmi)
 
       bus.irq_flag? and (cpu.p &&& @i) == 0 ->
-        finish_deferred_interrupt(cpu, bus, :irq)
+        finish_deferred_interrupt(%{cpu | waiting?: false}, bus, :irq)
+
+      cpu.waiting? and bus.irq_flag? ->
+        execute_deferred(%{cpu | waiting?: false}, bus)
+
+      cpu.waiting? ->
+        {bus, _clocks} = Bus.idle(bus)
+        {:ok, cpu, Bus.flush_events(bus)}
 
       true ->
-        opcode_address = cpu.pb <<< 16 ||| cpu.pc
-        {opcode, cpu, bus} = fetch8(cpu, bus)
-
-        case execute(opcode, cpu, bus) do
-          {:ok, cpu, bus} ->
-            {:ok, %{cpu | instructions: cpu.instructions + 1}, Bus.flush_events(bus)}
-
-          {:error, reason, cpu, bus} ->
-            {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
+        case fast_forward_poll_loop(cpu, bus) do
+          {:ok, cpu, bus} -> {:ok, cpu, bus}
+          :no -> execute_deferred(%{cpu | poll_loop: nil}, bus)
         end
     end
   end
@@ -76,32 +95,136 @@ defmodule Beamicom.SNES.CPU do
     start = Bus.master_clocks(bus)
 
     cond do
+      cpu.stopped? ->
+        {:error, :cpu_stopped, cpu, Bus.flush(bus)}
+
       bus.nmi_pending? ->
-        finish_interrupt(cpu, %{bus | nmi_pending?: false}, :nmi, start, sync)
+        finish_interrupt(
+          %{cpu | waiting?: false},
+          %{bus | nmi_pending?: false},
+          :nmi,
+          start,
+          sync
+        )
 
       bus.irq_flag? and (cpu.p &&& @i) == 0 ->
-        finish_interrupt(cpu, bus, :irq, start, sync)
+        finish_interrupt(%{cpu | waiting?: false}, bus, :irq, start, sync)
+
+      cpu.waiting? and bus.irq_flag? ->
+        execute_step(%{cpu | waiting?: false}, bus, start, sync)
+
+      cpu.waiting? ->
+        {bus, _clocks} = Bus.idle(bus)
+        bus = sync_bus(bus, sync)
+        clocks = Bus.master_clocks(bus) - start
+        {:ok, %{cpu | master_clocks: cpu.master_clocks + clocks}, bus, clocks}
 
       true ->
-        opcode_address = cpu.pb <<< 16 ||| cpu.pc
-        {opcode, cpu, bus} = fetch8(cpu, bus)
-
-        case execute(opcode, cpu, bus) do
-          {:ok, cpu, bus} ->
-            bus = sync_bus(bus, sync)
-            clocks = Bus.master_clocks(bus) - start
-
-            {:ok,
-             %{
-               cpu
-               | master_clocks: cpu.master_clocks + clocks,
-                 instructions: cpu.instructions + 1
-             }, bus, clocks}
-
-          {:error, reason, cpu, bus} ->
-            {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
-        end
+        execute_step(cpu, bus, start, sync)
     end
+  end
+
+  defp execute_deferred(cpu, bus) do
+    opcode_address = cpu.pb <<< 16 ||| cpu.pc
+    {opcode, cpu, bus} = fetch8(cpu, bus)
+
+    case execute(opcode, cpu, bus) do
+      {:ok, cpu, bus} ->
+        {:ok, %{cpu | instructions: cpu.instructions + 1}, Bus.flush_events(bus)}
+
+      {:error, reason, cpu, bus} ->
+        {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
+    end
+  end
+
+  defp execute_step(cpu, bus, start, sync) do
+    opcode_address = cpu.pb <<< 16 ||| cpu.pc
+    {opcode, cpu, bus} = fetch8(cpu, bus)
+
+    case execute(opcode, cpu, bus) do
+      {:ok, cpu, bus} ->
+        bus = sync_bus(bus, sync)
+        clocks = Bus.master_clocks(bus) - start
+
+        {:ok,
+         %{
+           cpu
+           | master_clocks: cpu.master_clocks + clocks,
+             instructions: cpu.instructions + 1
+         }, bus, clocks}
+
+      {:error, reason, cpu, bus} ->
+        {:error, {reason, opcode_address}, cpu, Bus.flush(bus)}
+    end
+  end
+
+  # Games commonly wait for their NMI handler to set a direct-page flag with
+  # `LDA dp / BEQ -4`. Once observed, whole iterations can be charged up to
+  # the next scanline boundary without allocating two CPU/bus states for each
+  # pass. Interrupts are still sampled at that boundary.
+  defp fast_forward_poll_loop(
+         %{poll_loop: {pb, pc, address, loop_clocks}} = cpu,
+         %{irq_mode: :off} = bus
+       )
+       when cpu.pb == pb and cpu.pc == pc do
+    remaining = Timing.line_clocks(bus.timing) - bus.timing.hclock - bus.cpu_pending_clocks
+    iterations = div(max(remaining, 0), loop_clocks)
+
+    if iterations > 0 and Bus.peek(bus, address) == 0 do
+      cpu = %{
+        cpu
+        | a: cpu.a &&& 0xFF00,
+          p: cpu.p |> band(bnot(@n)) |> bor(@z),
+          instructions: cpu.instructions + iterations * 2
+      }
+
+      bus = %{
+        bus
+        | open_bus: 0xFC,
+          cpu_pending_clocks: bus.cpu_pending_clocks + iterations * loop_clocks
+      }
+
+      {:ok, cpu, Bus.flush_events(bus)}
+    else
+      :no
+    end
+  end
+
+  defp fast_forward_poll_loop(_cpu, _bus), do: :no
+
+  defp mark_poll_loop(cpu, 0xF0, 0xFC, target, bus) when (cpu.p &&& @m) != 0 do
+    opcode_address = cpu.pb <<< 16 ||| target
+    operand_address = cpu.pb <<< 16 ||| (target + 1 &&& 0xFFFF)
+
+    if Bus.peek(bus, opcode_address) == 0xA5 do
+      direct = cpu.d + Bus.peek(bus, operand_address) &&& 0xFFFF
+
+      if direct < 0x2000 do
+        clocks = poll_loop_clocks(cpu, bus, target, direct)
+        %{cpu | poll_loop: {cpu.pb, target, direct, clocks}}
+      else
+        cpu
+      end
+    else
+      cpu
+    end
+  end
+
+  defp mark_poll_loop(cpu, _opcode, _relative, _target, _bus), do: cpu
+
+  defp poll_loop_clocks(cpu, bus, target, direct) do
+    bank = cpu.pb <<< 16
+
+    fetch_clocks =
+      SystemBus.access_clocks(bus, bank ||| target) +
+        SystemBus.access_clocks(bus, bank ||| (target + 1 &&& 0xFFFF)) +
+        SystemBus.access_clocks(bus, direct) +
+        SystemBus.access_clocks(bus, bank ||| (target + 2 &&& 0xFFFF)) +
+        SystemBus.access_clocks(bus, bank ||| (target + 3 &&& 0xFFFF))
+
+    direct_penalty = if (cpu.d &&& 0xFF) != 0, do: 6, else: 0
+    branch_page_cross? = cpu.emulation? and (target &&& 0xFF00) != (target + 4 &&& 0xFF00)
+    fetch_clocks + direct_penalty + if(branch_page_cross?, do: 12, else: 6)
   end
 
   defp execute(opcode, cpu, bus) when opcode in [0x18, 0x38, 0x58, 0x78, 0xB8, 0xD8, 0xF8] do
@@ -248,7 +371,8 @@ defmodule Beamicom.SNES.CPU do
       target = cpu.pc + displacement &&& 0xFFFF
       page_cross? = cpu.emulation? and (cpu.pc &&& 0xFF00) != (target &&& 0xFF00)
       {bus, _clocks} = Bus.idle(bus, if(page_cross?, do: 2, else: 1))
-      {:ok, %{cpu | pc: target}, bus}
+      cpu = %{cpu | pc: target} |> mark_poll_loop(opcode, relative, target, bus)
+      {:ok, cpu, bus}
     else
       {:ok, cpu, bus}
     end
@@ -261,9 +385,33 @@ defmodule Beamicom.SNES.CPU do
     {:ok, %{cpu | pc: cpu.pc + displacement &&& 0xFFFF}, bus}
   end
 
+  # BRK and COP consume their signature byte before stacking the return
+  # address. Unlike hardware IRQ/NMI entry, neither has the two idle cycles.
+  defp execute(opcode, cpu, bus) when opcode in [0x00, 0x02] do
+    {_signature, cpu, bus} = fetch8(cpu, bus)
+    software_interrupt(cpu, bus, if(opcode == 0x00, do: :brk, else: :cop))
+  end
+
+  # WDM is architecturally a two-byte reserved instruction. Treating its
+  # signature as an opcode desynchronizes every following instruction.
+  defp execute(0x42, cpu, bus) do
+    {_signature, cpu, bus} = fetch8(cpu, bus)
+    {:ok, cpu, bus}
+  end
+
   defp execute(0xEA, cpu, bus) do
     {bus, _clocks} = Bus.idle(bus)
     {:ok, cpu, bus}
+  end
+
+  defp execute(0xCB, cpu, bus) do
+    {bus, _clocks} = Bus.idle(bus, 2)
+    {:ok, %{cpu | waiting?: true}, bus}
+  end
+
+  defp execute(0xDB, cpu, bus) do
+    {bus, _clocks} = Bus.idle(bus, 2)
+    {:ok, %{cpu | stopped?: true}, bus}
   end
 
   defp execute(0xEB, cpu, bus) do
@@ -378,7 +526,7 @@ defmodule Beamicom.SNES.CPU do
     {cpu, value, width, flags?} =
       case opcode do
         0x1B ->
-          {%{cpu | s: cpu.a &&& 0xFFFF}, cpu.a, 16, false}
+          {%{cpu | s: stack_value(cpu, cpu.a)}, cpu.a, 16, false}
 
         0x3B ->
           {%{cpu | a: cpu.s}, cpu.s, 16, true}
@@ -846,6 +994,17 @@ defmodule Beamicom.SNES.CPU do
 
   defp add(cpu, bus, left, right, width) do
     carry = if (cpu.p &&& @c) != 0, do: 1, else: 0
+
+    if (cpu.p &&& @d) != 0 do
+      {result, carry?, overflow?} = decimal_add(left, right, carry, width)
+      p = cpu.p |> flag(@c, carry?) |> flag(@v, overflow?)
+      alu_result(%{cpu | p: p}, bus, result, width)
+    else
+      binary_add(cpu, bus, left, right, carry, width)
+    end
+  end
+
+  defp binary_add(cpu, bus, left, right, carry, width) do
     mask = if width == 8, do: 0xFF, else: 0xFFFF
     sign = if width == 8, do: 0x80, else: 0x8000
     sum = left + right + carry
@@ -857,6 +1016,17 @@ defmodule Beamicom.SNES.CPU do
 
   defp subtract(cpu, bus, left, right, width) do
     carry = if (cpu.p &&& @c) != 0, do: 1, else: 0
+
+    if (cpu.p &&& @d) != 0 do
+      {result, carry?, overflow?} = decimal_subtract(left, right, carry, width)
+      p = cpu.p |> flag(@c, carry?) |> flag(@v, overflow?)
+      alu_result(%{cpu | p: p}, bus, result, width)
+    else
+      binary_subtract(cpu, bus, left, right, carry, width)
+    end
+  end
+
+  defp binary_subtract(cpu, bus, left, right, carry, width) do
     mask = if width == 8, do: 0xFF, else: 0xFFFF
     sign = if width == 8, do: 0x80, else: 0x8000
     sum = left + bxor(right, mask) + carry
@@ -864,6 +1034,78 @@ defmodule Beamicom.SNES.CPU do
     overflow? = (bxor(left, right) &&& bxor(left, result) &&& sign) != 0
     p = cpu.p |> flag(@c, sum > mask) |> flag(@v, overflow?)
     alu_result(%{cpu | p: p}, bus, result, width)
+  end
+
+  # The 65C816 performs decimal correction one nibble at a time. Overflow is
+  # sampled after the high-nibble addition but before that nibble's decimal
+  # correction, while N and Z describe the final corrected result.
+  defp decimal_add(left, right, carry, 8) do
+    result = (left &&& 0x0F) + (right &&& 0x0F) + carry
+    result = if result > 0x09, do: result + 0x06, else: result
+    nibble_carry = if result > 0x0F, do: 0x10, else: 0
+    result = (left &&& 0xF0) + (right &&& 0xF0) + nibble_carry + (result &&& 0x0F)
+    overflow? = (bnot(bxor(left, right)) &&& bxor(left, result) &&& 0x80) != 0
+    result = if result > 0x9F, do: result + 0x60, else: result
+    {result &&& 0xFF, result > 0xFF, overflow?}
+  end
+
+  defp decimal_add(left, right, carry, 16) do
+    result = (left &&& 0x000F) + (right &&& 0x000F) + carry
+    result = if result > 0x0009, do: result + 0x0006, else: result
+    nibble_carry = if result > 0x000F, do: 0x0010, else: 0
+    result = (left &&& 0x00F0) + (right &&& 0x00F0) + nibble_carry + (result &&& 0x000F)
+    result = if result > 0x009F, do: result + 0x0060, else: result
+    nibble_carry = if result > 0x00FF, do: 0x0100, else: 0
+    result = (left &&& 0x0F00) + (right &&& 0x0F00) + nibble_carry + (result &&& 0x00FF)
+    result = if result > 0x09FF, do: result + 0x0600, else: result
+    nibble_carry = if result > 0x0FFF, do: 0x1000, else: 0
+    result = (left &&& 0xF000) + (right &&& 0xF000) + nibble_carry + (result &&& 0x0FFF)
+    overflow? = (bnot(bxor(left, right)) &&& bxor(left, result) &&& 0x8000) != 0
+    result = if result > 0x9FFF, do: result + 0x6000, else: result
+    {result &&& 0xFFFF, result > 0xFFFF, overflow?}
+  end
+
+  defp decimal_subtract(left, right, carry, 8) do
+    complement = bxor(right, 0xFF)
+    result = (left &&& 0x0F) + (complement &&& 0x0F) + carry
+    result = if result <= 0x0F, do: result - 0x06, else: result
+    nibble_carry = if result > 0x0F, do: 0x10, else: 0
+
+    result =
+      (left &&& 0xF0) + (complement &&& 0xF0) + nibble_carry + (result &&& 0x0F)
+
+    overflow? = (bnot(bxor(left, complement)) &&& bxor(left, result) &&& 0x80) != 0
+    result = if result <= 0xFF, do: result - 0x60, else: result
+    {result &&& 0xFF, result > 0xFF, overflow?}
+  end
+
+  defp decimal_subtract(left, right, carry, 16) do
+    complement = bxor(right, 0xFFFF)
+    result = (left &&& 0x000F) + (complement &&& 0x000F) + carry
+    result = if result <= 0x000F, do: result - 0x0006, else: result
+    nibble_carry = if result > 0x000F, do: 0x0010, else: 0
+
+    result =
+      (left &&& 0x00F0) + (complement &&& 0x00F0) + nibble_carry +
+        (result &&& 0x000F)
+
+    result = if result <= 0x00FF, do: result - 0x0060, else: result
+    nibble_carry = if result > 0x00FF, do: 0x0100, else: 0
+
+    result =
+      (left &&& 0x0F00) + (complement &&& 0x0F00) + nibble_carry +
+        (result &&& 0x00FF)
+
+    result = if result <= 0x0FFF, do: result - 0x0600, else: result
+    nibble_carry = if result > 0x0FFF, do: 0x1000, else: 0
+
+    result =
+      (left &&& 0xF000) + (complement &&& 0xF000) + nibble_carry +
+        (result &&& 0x0FFF)
+
+    overflow? = (bnot(bxor(left, complement)) &&& bxor(left, result) &&& 0x8000) != 0
+    result = if result <= 0xFFFF, do: result - 0x6000, else: result
+    {result &&& 0xFFFF, result > 0xFFFF, overflow?}
   end
 
   defp compare_result(cpu, bus, left, right, width) do
@@ -1006,10 +1248,40 @@ defmodule Beamicom.SNES.CPU do
     {cpu, bus}
   end
 
+  defp software_interrupt(cpu, bus, kind) do
+    {cpu, bus} =
+      if cpu.emulation? do
+        {cpu, bus}
+      else
+        push(cpu, bus, cpu.pb)
+      end
+
+    {cpu, bus} = push(cpu, bus, cpu.pc >>> 8)
+    {cpu, bus} = push(cpu, bus, cpu.pc)
+    pushed_p = if cpu.emulation?, do: cpu.p ||| @x, else: cpu.p
+    {cpu, bus} = push(cpu, bus, pushed_p)
+    vector = interrupt_vector(cpu.emulation?, kind)
+    {low, bus, _clocks} = Bus.read(bus, vector)
+    {high, bus, _clocks} = Bus.read(bus, vector + 1)
+
+    cpu = %{
+      cpu
+      | pb: 0,
+        pc: low ||| high <<< 8,
+        p: cpu.p |> bor(@i) |> band(bnot(@d)) |> normalize_p(cpu.emulation?)
+    }
+
+    {:ok, cpu, bus}
+  end
+
   defp interrupt_vector(true, :nmi), do: 0x00FFFA
   defp interrupt_vector(true, :irq), do: 0x00FFFE
+  defp interrupt_vector(true, :brk), do: 0x00FFFE
+  defp interrupt_vector(true, :cop), do: 0x00FFF4
   defp interrupt_vector(false, :nmi), do: 0x00FFEA
   defp interrupt_vector(false, :irq), do: 0x00FFEE
+  defp interrupt_vector(false, :brk), do: 0x00FFE6
+  defp interrupt_vector(false, :cop), do: 0x00FFE4
 
   defp push(cpu, bus, value) do
     {bus, _clocks} = Bus.write(bus, cpu.s, value)

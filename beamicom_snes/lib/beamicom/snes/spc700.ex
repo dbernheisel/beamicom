@@ -4,6 +4,9 @@ defmodule Beamicom.SNES.SPC700 do
   import Bitwise
   alias Beamicom.SNES.DSP
 
+  @compile {:inline,
+            direct: 2, fetch: 1, ram_get: 2, memory_get: 2, signed: 1, carry_value: 1, flag: 3}
+
   @n 0x80
   @v 0x40
   @p 0x20
@@ -30,6 +33,7 @@ defmodule Beamicom.SNES.SPC700 do
             control: 0x80,
             dsp_addr: 0,
             dsp: nil,
+            dsp_events: [],
             aux: {0, 0},
             timer_targets: {0, 0, 0},
             timer_stages: {0, 0, 0},
@@ -37,6 +41,7 @@ defmodule Beamicom.SNES.SPC700 do
             timer_phase: {0, 0, 0},
             timer_last_cycles: {0, 0, 0},
             cycles: 0,
+            cycle_credit: 0,
             stopped?: false,
             error: nil
 
@@ -49,11 +54,23 @@ defmodule Beamicom.SNES.SPC700 do
   def put_input_port(%__MODULE__{} = spc, port, value),
     do: %{spc | input_ports: put_elem(spc.input_ports, port, value &&& 0xFF)}
 
-  def run(%__MODULE__{} = spc, cycles) when is_integer(cycles), do: run_cycles(spc, cycles)
+  def run(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
+    {spc, cycle_credit} = run_cycles(spc, spc.cycle_credit + cycles)
+    %{spc | cycle_credit: cycle_credit}
+  end
 
-  defp run_cycles(%__MODULE__{error: error} = spc, _cycles) when not is_nil(error), do: spc
-  defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles), do: spc
-  defp run_cycles(spc, cycles) when cycles <= 0, do: spc
+  @doc false
+  def run_with_dsp_events(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
+    spc = run(%{spc | dsp_events: []}, cycles)
+    {Enum.reverse(spc.dsp_events), %{spc | dsp_events: []}}
+  end
+
+  defp run_cycles(spc, cycles) when cycles <= 0, do: {spc, cycles}
+
+  defp run_cycles(%__MODULE__{error: error} = spc, _cycles) when not is_nil(error),
+    do: {spc, 0}
+
+  defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles), do: {spc, 0}
 
   defp run_cycles(spc, cycles) do
     {opcode, spc} = fetch(spc)
@@ -65,7 +82,7 @@ defmodule Beamicom.SNES.SPC700 do
         run_cycles(spc, cycles - used)
 
       {:error, reason, spc} ->
-        %{spc | error: {reason, spc.pc - 1 &&& 0xFFFF}}
+        {%{spc | error: {reason, spc.pc - 1 &&& 0xFFFF}}, 0}
     end
   end
 
@@ -878,12 +895,17 @@ defmodule Beamicom.SNES.SPC700 do
         %{spc | dsp_addr: value}
 
       0xF3 ->
-        address = spc.dsp_addr &&& 0x7F
+        if spc.dsp_addr < 0x80 do
+          address = spc.dsp_addr
 
-        %{
+          %{
+            spc
+            | dsp: DSP.write(spc.dsp, address, value),
+              dsp_events: [{spc.cycles, address, value} | spc.dsp_events]
+          }
+        else
           spc
-          | dsp: DSP.write(spc.dsp, address, value)
-        }
+        end
 
       x when x in 0xF4..0xF7 ->
         %{spc | output_ports: put_elem(spc.output_ports, x - 0xF4, value)}

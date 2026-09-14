@@ -6,8 +6,9 @@ defmodule Beamicom.SNES.APU do
   synthesis is layered behind the same clock and register boundary; until that
   stage is complete, drained samples are deterministic silence.
 
-  Sample production is accumulated arithmetically per bus span; it never loops
-  once per master clock or materializes audio until `take_pcm/1`.
+  Sample production is synchronized at the DSP's 32-SPC-cycle boundary so
+  short-lived key and mixer changes retain their correct order. It never loops
+  once per master clock.
   """
 
   import Bitwise
@@ -28,14 +29,25 @@ defmodule Beamicom.SNES.APU do
             spc: nil,
             sample_phase: 0,
             spc_phase: 0,
+            dsp_cycle_phase: 0,
             pending_frames: 0,
+            pending_pcm: [],
             pending_spc_cycles: 0,
             elapsed_master_clocks: 0
 
   @type t :: %__MODULE__{}
 
-  @spec new() :: t()
-  def new, do: %__MODULE__{}
+  @spec new(keyword()) :: t()
+  def new(opts \\ []) do
+    apu = %__MODULE__{}
+
+    if Keyword.get(opts, :native_ipl, false) do
+      spc = %{SPC700.new(apu.ram, 0xFFC0) | control: 0xB0}
+      %{apu | spc: spc, ipl_state: :running}
+    else
+      apu
+    end
+  end
 
   @spec cpu_read(t(), 0..3) :: byte()
   def cpu_read(%__MODULE__{spc: %SPC700{output_ports: ports}}, port) when port in 0..3,
@@ -84,16 +96,20 @@ defmodule Beamicom.SNES.APU do
     frames = div(sample_phase, clock_numerator)
     spc_cycles = div(spc_phase, clock_numerator)
 
-    spc = if apu.spc, do: SPC700.run(apu.spc, spc_cycles), else: nil
+    {spc, dsp_cycle_phase, pcm} =
+      advance_audio(apu.spc, spc_cycles, apu.dsp_cycle_phase, frames)
 
     apu_to_cpu = if spc, do: spc.output_ports, else: apu.apu_to_cpu
     ram = if spc, do: spc.ram, else: apu.ram
+    pending_pcm = if pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]
 
     %{
       apu
       | sample_phase: rem(sample_phase, clock_numerator),
         spc_phase: rem(spc_phase, clock_numerator),
+        dsp_cycle_phase: dsp_cycle_phase,
         pending_frames: apu.pending_frames + frames,
+        pending_pcm: pending_pcm,
         pending_spc_cycles: apu.pending_spc_cycles + spc_cycles,
         elapsed_master_clocks: apu.elapsed_master_clocks + clocks,
         spc: spc,
@@ -109,15 +125,44 @@ defmodule Beamicom.SNES.APU do
 
   @doc "Drains `{frame_count, signed-16 little-endian stereo PCM, updated_apu}`."
   @spec take_pcm(t()) :: {non_neg_integer(), binary(), t()}
-  def take_pcm(%__MODULE__{pending_frames: frames, spc: %SPC700{} = spc} = apu) do
-    {dsp, pcm} = DSP.render(spc.dsp, spc.ram, frames)
-    {frames, pcm, %{apu | pending_frames: 0, spc: %{spc | dsp: dsp}}}
+  def take_pcm(%__MODULE__{pending_frames: frames, pending_pcm: chunks} = apu) do
+    pcm = chunks |> Enum.reverse() |> IO.iodata_to_binary()
+    {frames, pcm, %{apu | pending_frames: 0, pending_pcm: []}}
   end
 
-  def take_pcm(%__MODULE__{pending_frames: frames} = apu),
-    do:
-      {frames, :binary.copy(<<0::signed-little-16, 0::signed-little-16>>, frames),
-       %{apu | pending_frames: 0}}
+  defp advance_audio(nil, spc_cycles, dsp_cycle_phase, frames) do
+    pcm = :binary.copy(<<0::signed-little-16, 0::signed-little-16>>, frames)
+    {nil, rem(dsp_cycle_phase + spc_cycles, 32), pcm}
+  end
+
+  defp advance_audio(%SPC700{} = spc, spc_cycles, dsp_cycle_phase, _frames) do
+    start_cycles = spc.cycles
+    debt = max(-spc.cycle_credit, 0)
+    start_dsp = spc.dsp
+    {events, spc} = SPC700.run_with_dsp_events(spc, spc_cycles)
+
+    {dsp, dsp_cycle_phase, pcm, position} =
+      Enum.reduce(events, {start_dsp, dsp_cycle_phase, [], 0}, fn
+        {event_cycle, address, value}, {dsp, phase, pcm, position} ->
+          event_position = (event_cycle - start_cycles + debt) |> max(position) |> min(spc_cycles)
+          {dsp, phase, chunk} = render_dsp_span(dsp, spc.ram, event_position - position, phase)
+          pcm = if chunk == <<>>, do: pcm, else: [chunk | pcm]
+          {DSP.write(dsp, address, value), phase, pcm, event_position}
+      end)
+
+    {dsp, dsp_cycle_phase, tail} =
+      render_dsp_span(dsp, spc.ram, spc_cycles - position, dsp_cycle_phase)
+
+    pcm = if tail == <<>>, do: pcm, else: [tail | pcm]
+    {%{spc | dsp: dsp}, dsp_cycle_phase, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
+  end
+
+  defp render_dsp_span(dsp, ram, cycles, phase) do
+    elapsed = phase + cycles
+    frames = div(elapsed, 32)
+    {dsp, pcm} = DSP.render(dsp, ram, frames)
+    {dsp, rem(elapsed, 32), pcm}
+  end
 
   # NTSC is exactly 945/44 MHz. PAL's supplied master clock is integral in Hz.
   defp master_clock_ratio(:ntsc), do: {945_000_000, 44}

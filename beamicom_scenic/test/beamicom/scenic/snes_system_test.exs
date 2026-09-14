@@ -22,8 +22,8 @@ defmodule Beamicom.Scenic.SNESSystemTest do
     assert state.halted == nil
   end
 
-  test "freezes unsupported work while retaining an inspectable video surface" do
-    assert {:ok, state} = SNESSystem.load(rom(<<0x02>>))
+  test "freezes stopped CPU work while retaining an inspectable video surface" do
+    assert {:ok, state} = SNESSystem.load(rom(<<0xDB>>))
     assert {halted, [%VideoFrame{} = first]} = SNESSystem.run_slice(state)
     refute is_nil(halted.halted)
 

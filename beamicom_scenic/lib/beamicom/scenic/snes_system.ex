@@ -2,9 +2,9 @@ defmodule Beamicom.Scenic.SNESSystem do
   @moduledoc """
   Temporary host adapter for inspecting the in-progress SNES core in Scenic.
 
-  Unsupported CPU instructions freeze the machine at the point of failure and
-  keep presenting its last PPU state. This deliberately favors bring-up and
-  visual inspection over treating the unfinished core as production-ready.
+  CPU execution errors freeze the machine at the point of failure and keep
+  presenting its last PPU state. This deliberately favors bring-up and visual
+  inspection over treating the unfinished core as production-ready.
   """
 
   @behaviour Beamicom.Host.System

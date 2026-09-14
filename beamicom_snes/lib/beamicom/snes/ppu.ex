@@ -5,8 +5,9 @@ defmodule Beamicom.SNES.PPU do
   The register path implements forced blank/brightness, BG mode and tile-map
   bases, BG tile-data bases, scroll, VRAM addressing/increment, CGRAM writes,
   main/sub-screen enables, windows, color math, Mode 7 transforms, and SETINI.
-  The native renderer supports Mode 0, Mode 1, Mode 7, and OBJ. Mosaic,
-  offset-per-tile modes, hires, and interlace field weaving are pending.
+  The native renderer supports all background bit depths and priority orders,
+  Mode 7 transforms, mosaic, and OBJ. Offset-per-tile scrolling, true hires,
+  and interlace field weaving are pending.
 
   VRAM and CGRAM use fixed persistent arrays so a byte write updates a shallow
   tree rather than copying the complete memory binary.
@@ -56,12 +57,69 @@ defmodule Beamicom.SNES.PPU do
     {:obj, 0},
     {:bg, 2, 2, 0}
   ]
+  @mode2_layers [
+    {:obj, 3},
+    {:bg, 0, 4, 1},
+    {:obj, 2},
+    {:bg, 1, 4, 1},
+    {:obj, 1},
+    {:bg, 0, 4, 0},
+    {:obj, 0},
+    {:bg, 1, 4, 0}
+  ]
+  @mode3_layers [
+    {:obj, 3},
+    {:bg, 0, 8, 1},
+    {:obj, 2},
+    {:bg, 1, 4, 1},
+    {:obj, 1},
+    {:bg, 0, 8, 0},
+    {:obj, 0},
+    {:bg, 1, 4, 0}
+  ]
+  @mode4_layers [
+    {:obj, 3},
+    {:bg, 0, 8, 1},
+    {:obj, 2},
+    {:bg, 1, 2, 1},
+    {:obj, 1},
+    {:bg, 0, 8, 0},
+    {:obj, 0},
+    {:bg, 1, 2, 0}
+  ]
+  @mode5_layers [
+    {:obj, 3},
+    {:bg, 0, 4, 1},
+    {:obj, 2},
+    {:bg, 1, 2, 1},
+    {:obj, 1},
+    {:bg, 0, 4, 0},
+    {:obj, 0},
+    {:bg, 1, 2, 0}
+  ]
+  @mode6_layers [
+    {:obj, 3},
+    {:bg, 0, 4, 1},
+    {:obj, 2},
+    {:obj, 1},
+    {:bg, 0, 4, 0},
+    {:obj, 0}
+  ]
   @mode7_layers [
     {:obj, 3},
     {:obj, 2},
     {:obj, 1},
     {:bg, 0, 7, 0},
     {:obj, 0}
+  ]
+  @mode7_extbg_layers [
+    {:obj, 3},
+    {:obj, 2},
+    {:bg, 1, 7, 1},
+    {:obj, 1},
+    {:bg, 0, 7, 0},
+    {:obj, 0},
+    {:bg, 1, 7, 0}
   ]
 
   defstruct vram: :array.new(0x10000, default: 0, fixed: true),
@@ -73,6 +131,7 @@ defmodule Beamicom.SNES.PPU do
             bg_mode: 0,
             bg3_priority?: false,
             bg_tile_size: 0,
+            mosaic: 0,
             bg_sc: {0, 0, 0, 0},
             bg_name_base: {0, 0, 0, 0},
             bg_hofs: {0, 0, 0, 0},
@@ -91,6 +150,10 @@ defmodule Beamicom.SNES.PPU do
             m7_product: 0,
             obsel: 0,
             oamadd: 0,
+            oam_internal_address: 0,
+            oam_latch: 0,
+            obj_priority_rotation?: false,
+            obj_first: 0,
             oam_version: 0,
             vmain: 0,
             vmadd: 0,
@@ -109,6 +172,7 @@ defmodule Beamicom.SNES.PPU do
             fixed_color: 0,
             interlace?: false,
             overscan?: false,
+            extbg?: false,
             frame_number: 0,
             frame_ready: nil,
             scanline_states: nil,
@@ -155,19 +219,49 @@ defmodule Beamicom.SNES.PPU do
         bg_tile_size: value >>> 4
       })
 
-  def write(ppu, 0x2102, value), do: %{ppu | oamadd: (ppu.oamadd &&& 0x100) ||| value}
+  def write(ppu, 0x2106, value), do: update_visual(ppu, %{mosaic: value})
 
-  def write(ppu, 0x2103, value),
-    do: %{ppu | oamadd: (ppu.oamadd &&& 0x0FF) ||| (value &&& 1) <<< 8}
+  def write(ppu, 0x2102, value) do
+    oamadd = (ppu.oamadd &&& 0x100) ||| value
+    reset_oam_address(ppu, oamadd, ppu.obj_priority_rotation?)
+  end
+
+  def write(ppu, 0x2103, value) do
+    oamadd = (ppu.oamadd &&& 0x0FF) ||| (value &&& 1) <<< 8
+    reset_oam_address(ppu, oamadd, (value &&& 0x80) != 0)
+  end
 
   def write(ppu, 0x2104, value) do
-    address = rem(ppu.oamadd, 544)
-    dirty? = :array.get(address, ppu.oam) != value
+    address = ppu.oam_internal_address
+
+    {oam, dirty?} =
+      cond do
+        address < 0x200 and (address &&& 1) == 0 ->
+          {ppu.oam, false}
+
+        address < 0x200 ->
+          low_address = address - 1
+
+          dirty? =
+            :array.get(low_address, ppu.oam) != ppu.oam_latch or
+              :array.get(address, ppu.oam) != value
+
+          oam =
+            :array.set(address, value, :array.set(low_address, ppu.oam_latch, ppu.oam))
+
+          {oam, dirty?}
+
+        true ->
+          physical = oam_physical_address(address)
+          dirty? = :array.get(physical, ppu.oam) != value
+          {:array.set(physical, value, ppu.oam), dirty?}
+      end
 
     %{
       ppu
-      | oam: :array.set(address, value, ppu.oam),
-        oamadd: rem(address + 1, 544),
+      | oam: oam,
+        oam_latch: value,
+        oam_internal_address: address + 1 &&& 0x3FF,
         oam_version: ppu.oam_version + if(dirty?, do: 1, else: 0),
         render_dirty?: ppu.render_dirty? or dirty?
     }
@@ -316,12 +410,18 @@ defmodule Beamicom.SNES.PPU do
     do:
       update_visual(ppu, %{
         interlace?: (value &&& 0x01) != 0,
-        overscan?: (value &&& 0x04) != 0
+        overscan?: (value &&& 0x04) != 0,
+        extbg?: (value &&& 0x40) != 0
       })
 
   def write(ppu, _register, _value), do: ppu
 
   @spec read(t(), 0x2100..0x213F, byte()) :: {byte(), t()}
+  def read(ppu, 0x2138, _open_bus) do
+    value = :array.get(oam_physical_address(ppu.oam_internal_address), ppu.oam)
+    {value, %{ppu | oam_internal_address: ppu.oam_internal_address + 1 &&& 0x3FF}}
+  end
+
   def read(ppu, 0x2139, _open_bus), do: read_vram(ppu, :low)
   def read(ppu, 0x213A, _open_bus), do: read_vram(ppu, :high)
   def read(ppu, 0x213B, _open_bus), do: read_cgram(ppu)
@@ -338,6 +438,12 @@ defmodule Beamicom.SNES.PPU do
   def enter_scanline(%__MODULE__{} = ppu, line) do
     if line == vblank_start(ppu) do
       {frame, ppu} = render_or_reuse_frame(ppu)
+
+      ppu =
+        if ppu.force_blank?,
+          do: ppu,
+          else: %{ppu | oam_internal_address: ppu.oamadd <<< 1}
+
       %{ppu | frame_ready: frame, frame_number: ppu.frame_number + 1}
     else
       ppu
@@ -376,7 +482,7 @@ defmodule Beamicom.SNES.PPU do
 
     data =
       cond do
-        ppu.force_blank? or ppu.brightness == 0 or ppu.bg_mode not in [0, 1, 7] ->
+        ppu.force_blank? or ppu.brightness == 0 ->
           :binary.copy(<<0, 0, 0>>, @width * height)
 
         nx_renderer?(ppu) ->
@@ -422,7 +528,8 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp nx_renderer?(ppu) do
-    Application.get_env(:beamicom_snes, :ppu_renderer, :native) == :nx and
+    not mosaic_active?(ppu) and
+      Application.get_env(:beamicom_snes, :ppu_renderer, :native) == :nx and
       Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) and
       Beamicom.SNES.Nx.PPURenderer.supported?(ppu)
   end
@@ -435,8 +542,15 @@ defmodule Beamicom.SNES.PPU do
         do: 0..(height - 1) |> Enum.map(&elem(elem(scanlines, &1), 9)) |> List.to_tuple(),
         else: ppu.obsel
 
+    object_state_key =
+      if scanlines,
+        do:
+          0..(height - 1) |> Enum.map(&visual_obj_state(elem(scanlines, &1))) |> List.to_tuple(),
+        else: obj_state(ppu)
+
     cache_key =
-      {ppu.cache_identity, ppu.oam_version, object_vram_versions(ppu, obsel_key), obsel_key}
+      {ppu.cache_identity, ppu.oam_version, object_vram_versions(ppu, obsel_key),
+       object_state_key}
 
     process_key = {__MODULE__, :nx_object_layer}
 
@@ -452,12 +566,13 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp build_nx_object_layer(ppu, height, scanlines) do
-    obsel_key =
+    object_state_key =
       if scanlines,
-        do: 0..(height - 1) |> Enum.map(&elem(elem(scanlines, &1), 9)) |> List.to_tuple(),
-        else: ppu.obsel
+        do:
+          0..(height - 1) |> Enum.map(&visual_obj_state(elem(scanlines, &1))) |> List.to_tuple(),
+        else: obj_state(ppu)
 
-    cache_key = {ppu.cache_identity, ppu.oam_version, obsel_key}
+    cache_key = {ppu.cache_identity, ppu.oam_version, object_state_key}
     process_key = {__MODULE__, :nx_object_rows}
 
     {rows, entries} =
@@ -486,7 +601,7 @@ defmodule Beamicom.SNES.PPU do
         pages = obj_row_vram_pages(row_ppu, selected)
         versions = obj_page_versions(row_ppu, pages)
         row = render_nx_obj_row(row_ppu, selected)
-        {{row_ppu.obsel, selected, pages, versions, row}, cache}
+        {{obj_state(row_ppu), selected, pages, versions, row}, cache}
       end)
 
     entries = List.to_tuple(entries)
@@ -497,8 +612,16 @@ defmodule Beamicom.SNES.PPU do
     {rows, entries} =
       entries
       |> Tuple.to_list()
-      |> Enum.map_reduce([], fn {obsel, sprites, pages, old_versions, old_row}, entries ->
-        row_ppu = %{ppu | obsel: obsel}
+      |> Enum.map_reduce([], fn {object_state, sprites, pages, old_versions, old_row}, entries ->
+        {obsel, priority_rotation?, first} = object_state
+
+        row_ppu = %{
+          ppu
+          | obsel: obsel,
+            obj_priority_rotation?: priority_rotation?,
+            obj_first: first
+        }
+
         versions = obj_page_versions(row_ppu, pages)
 
         row =
@@ -506,7 +629,7 @@ defmodule Beamicom.SNES.PPU do
             do: old_row,
             else: render_nx_obj_row(row_ppu, sprites)
 
-        {row, [{obsel, sprites, pages, versions, row} | entries]}
+        {row, [{object_state, sprites, pages, versions, row} | entries]}
       end)
 
     {rows, entries |> Enum.reverse() |> List.to_tuple()}
@@ -666,6 +789,15 @@ defmodule Beamicom.SNES.PPU do
 
   defp render_layers(%{bg_mode: 1}, screen), do: enabled_layers(@mode1_layers, screen)
 
+  defp render_layers(%{bg_mode: 2}, screen), do: enabled_layers(@mode2_layers, screen)
+  defp render_layers(%{bg_mode: 3}, screen), do: enabled_layers(@mode3_layers, screen)
+  defp render_layers(%{bg_mode: 4}, screen), do: enabled_layers(@mode4_layers, screen)
+  defp render_layers(%{bg_mode: 5}, screen), do: enabled_layers(@mode5_layers, screen)
+  defp render_layers(%{bg_mode: 6}, screen), do: enabled_layers(@mode6_layers, screen)
+
+  defp render_layers(%{bg_mode: 7, extbg?: true}, screen),
+    do: enabled_layers(@mode7_extbg_layers, screen)
+
   defp render_layers(%{bg_mode: 7}, screen), do: enabled_layers(@mode7_layers, screen)
 
   defp enabled_layers(layers, screen),
@@ -748,7 +880,7 @@ defmodule Beamicom.SNES.PPU do
     else
       if direct_color?(ppu, layer),
         do: color_to_rgb(main, components),
-        else: elem(rgb_palette, main_index)
+        else: elem(rgb_palette, main_index &&& 0xFF)
     end
   end
 
@@ -785,20 +917,38 @@ defmodule Beamicom.SNES.PPU do
 
     if color == main and not color_math_enabled?(ppu.color_math, layer) and
          not direct_color?(ppu, layer),
-       do: elem(rgb_palette, main_index),
+       do: elem(rgb_palette, main_index &&& 0xFF),
        else: color_to_rgb(color, components)
   end
 
   defp palette_color(ppu, palette, layer, index) when ppu.bg_mode == 7 and layer == 0 do
     if direct_color?(ppu, layer),
-      do: (index &&& 0x07) <<< 2 ||| (index &&& 0x38) <<< 4 ||| (index &&& 0xC0) <<< 7,
-      else: elem(palette, index)
+      do: direct_color(index, 0),
+      else: elem(palette, index &&& 0xFF)
   end
 
-  defp palette_color(_ppu, palette, _layer, index), do: elem(palette, index)
+  defp palette_color(ppu, palette, layer, index)
+       when ppu.bg_mode in [3, 4] and layer == 0 do
+    if direct_color?(ppu, layer),
+      do: direct_color(index, index >>> 8),
+      else: elem(palette, index &&& 0xFF)
+  end
+
+  defp palette_color(_ppu, palette, _layer, index), do: elem(palette, index &&& 0xFF)
 
   defp direct_color?(%{bg_mode: 7, color_window_select: select}, 0), do: (select &&& 1) != 0
+
+  defp direct_color?(%{bg_mode: mode, color_window_select: select}, 0)
+       when mode in [3, 4],
+       do: (select &&& 1) != 0
+
   defp direct_color?(_ppu, _layer), do: false
+
+  defp direct_color(index, palette) do
+    (index &&& 0x07) <<< 2 ||| (palette &&& 0x01) <<< 1 |||
+      (index &&& 0x38) <<< 4 ||| (palette &&& 0x02) <<< 5 |||
+      (index &&& 0xC0) <<< 7 ||| (palette &&& 0x04) <<< 10
+  end
 
   defp window_mode_applies?(0, _inside?), do: false
   defp window_mode_applies?(1, inside?), do: not inside?
@@ -892,7 +1042,7 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp cached_obj_sprites(ppu, obj_cache) do
-    key = ppu.obsel
+    key = obj_state(ppu)
 
     case obj_cache do
       %{^key => sprites} ->
@@ -907,7 +1057,15 @@ defmodule Beamicom.SNES.PPU do
   defp parse_obj_sprites(ppu) do
     {small_size, large_size} = obj_sizes(ppu.obsel >>> 5)
 
-    for index <- 0..127 do
+    indices =
+      if ppu.obj_priority_rotation? do
+        first = ppu.obj_first
+        Enum.to_list(first..127) ++ if(first == 0, do: [], else: Enum.to_list(0..(first - 1)))
+      else
+        0..127
+      end
+
+    for index <- indices do
       offset = index * 4
       high = :binary.at(ppu.oam, 512 + div(index, 4)) >>> (rem(index, 4) * 2)
       x = :binary.at(ppu.oam, offset) ||| (high &&& 1) <<< 8
@@ -1005,7 +1163,8 @@ defmodule Beamicom.SNES.PPU do
   defp obj_sizes(5), do: {32, 64}
   defp obj_sizes(_), do: {16, 32}
 
-  defp render_bg_row(ppu, bg, bpp, screen_y, tile_cache) when bpp in [2, 4] do
+  defp render_bg_row(ppu, bg, bpp, screen_y, tile_cache) when bpp in [2, 4, 8] do
+    screen_y = mosaic_coordinate(ppu, bg, :vertical, screen_y)
     x = elem(ppu.bg_hofs, bg) &&& 0x03FF
     y = screen_y + elem(ppu.bg_vofs, bg) &&& 0x03FF
     large_tiles? = (ppu.bg_tile_size &&& 1 <<< bg) != 0
@@ -1021,7 +1180,12 @@ defmodule Beamicom.SNES.PPU do
         bg_tile_pixels(ppu, bg, bpp, first_tile + offset, tile_y, y, tile_width, tile_cache)
       end)
 
-    pixels = pixels |> List.flatten() |> Enum.drop(skip) |> Enum.take(@width)
+    pixels =
+      pixels
+      |> List.flatten()
+      |> Enum.drop(skip)
+      |> Enum.take(@width)
+      |> apply_horizontal_mosaic(ppu, bg)
 
     priorities =
       Enum.reduce(pixels, 0, fn
@@ -1032,7 +1196,8 @@ defmodule Beamicom.SNES.PPU do
     {List.to_tuple(pixels), priorities, tile_cache}
   end
 
-  defp render_bg_row(%{bg_mode: 7} = ppu, 0, 7, screen_y, tile_cache) do
+  defp render_bg_row(%{bg_mode: 7} = ppu, bg, 7, screen_y, tile_cache)
+       when bg in [0, 1] do
     a = signed16(ppu.m7a)
     b = signed16(ppu.m7b)
     c = signed16(ppu.m7c)
@@ -1041,6 +1206,7 @@ defmodule Beamicom.SNES.PPU do
     center_y = signed13(ppu.m7y)
     hofs = signed13(ppu.m7hofs)
     vofs = signed13(ppu.m7vofs)
+    screen_y = mosaic_coordinate(ppu, bg, :vertical, screen_y)
     screen_y = if((ppu.m7sel &&& 0x02) != 0, do: 255 - (screen_y + 1), else: screen_y + 1)
     xx = clip_m7_offset(hofs - center_x)
     yy = clip_m7_offset(vofs - center_y)
@@ -1053,12 +1219,54 @@ defmodule Beamicom.SNES.PPU do
         texture_x = (a * screen_x + band64(a * xx) + row_x) >>> 8
         texture_y = (c * screen_x + band64(c * xx) + row_y) >>> 8
         color = mode7_color(ppu, texture_x, texture_y)
-        {0, color}
+
+        if bg == 0,
+          do: {0, color},
+          else: {color >>> 7, color &&& 0x7F}
       end
 
-    priorities = if Enum.any?(pixels, fn {_priority, color} -> color != 0 end), do: 1, else: 0
+    pixels = apply_horizontal_mosaic(pixels, ppu, bg)
+
+    priorities =
+      Enum.reduce(pixels, 0, fn
+        {_priority, 0}, mask -> mask
+        {priority, _color}, mask -> mask ||| 1 <<< priority
+      end)
+
     {List.to_tuple(pixels), priorities, tile_cache}
   end
+
+  # Mosaic samples the upper-left source pixel of a screen-aligned square,
+  # after scrolling but before windows and color math. Mode 7 EXTBG exposes a
+  # hardware quirk: BG1's enable controls vertical mosaic and BG2's controls
+  # horizontal mosaic for both views of the shared Mode 7 pixel data.
+  defp mosaic_coordinate(ppu, bg, axis, coordinate) do
+    size = (ppu.mosaic >>> 4) + 1
+
+    if size > 1 and mosaic_axis_enabled?(ppu, bg, axis),
+      do: coordinate - rem(coordinate, size),
+      else: coordinate
+  end
+
+  defp apply_horizontal_mosaic(pixels, ppu, bg) do
+    size = (ppu.mosaic >>> 4) + 1
+
+    if size > 1 and mosaic_axis_enabled?(ppu, bg, :horizontal) do
+      source = List.to_tuple(pixels)
+      for x <- 0..(@width - 1), do: elem(source, x - rem(x, size))
+    else
+      pixels
+    end
+  end
+
+  defp mosaic_axis_enabled?(%{bg_mode: 7, extbg?: true, mosaic: mosaic}, _bg, :vertical),
+    do: (mosaic &&& 0x01) != 0
+
+  defp mosaic_axis_enabled?(%{bg_mode: 7, extbg?: true, mosaic: mosaic}, _bg, :horizontal),
+    do: (mosaic &&& 0x02) != 0
+
+  defp mosaic_axis_enabled?(%{mosaic: mosaic}, bg, _axis),
+    do: (mosaic &&& 1 <<< bg) != 0
 
   defp mode7_color(ppu, texture_x, texture_y) do
     repeat = ppu.m7sel >>> 6
@@ -1120,7 +1328,7 @@ defmodule Beamicom.SNES.PPU do
     palette = entry >>> 10 &&& 0x07
     palette_base = if ppu.bg_mode == 0, do: bg * 32, else: 0
     priority = entry >>> 13 &&& 1
-    color_base = palette_base + palette * (1 <<< bpp)
+    color_base = if bpp == 8, do: 0, else: palette_base + palette * (1 <<< bpp)
 
     pixels =
       for output_x <- 0..(tile_width - 1) do
@@ -1131,7 +1339,13 @@ defmodule Beamicom.SNES.PPU do
         # Tile color zero is transparent before the palette base is applied.
         # Treating palette N's color zero as index N*16 makes stencil layers
         # opaque (notably the Final Fantasy III title-logo mask).
-        color = if tile_color == 0, do: 0, else: color_base + tile_color
+        color =
+          cond do
+            tile_color == 0 -> 0
+            bpp == 8 -> tile_color ||| palette <<< 8
+            true -> color_base + tile_color
+          end
+
         {priority, color}
       end
 
@@ -1194,6 +1408,27 @@ defmodule Beamicom.SNES.PPU do
 
         (p0 >>> bit &&& 1) ||| (p1 >>> bit &&& 1) <<< 1 |||
           (p2 >>> bit &&& 1) <<< 2 ||| (p3 >>> bit &&& 1) <<< 3
+      end
+    )
+  end
+
+  defp decode_tile_row(ppu, bg, 8, tile, y) do
+    base = elem(ppu.bg_name_base, bg) * 0x2000 + tile * 64
+
+    planes =
+      for pair <- 0..3 do
+        address = base + y * 2 + pair * 16
+        {vram_byte(ppu.vram, address), vram_byte(ppu.vram, address + 1)}
+      end
+
+    List.to_tuple(
+      for x <- 0..7 do
+        bit = 7 - x
+
+        Enum.reduce(Enum.with_index(planes), 0, fn {{low, high}, pair}, color ->
+          color ||| (low >>> bit &&& 1) <<< (pair * 2) |||
+            (high >>> bit &&& 1) <<< (pair * 2 + 1)
+        end)
       end
     )
   end
@@ -1290,7 +1525,10 @@ defmodule Beamicom.SNES.PPU do
       ppu.bg_mode,
       ppu.bg3_priority?,
       ppu.bg_tile_size,
+      ppu.mosaic,
       ppu.obsel,
+      ppu.obj_priority_rotation?,
+      ppu.obj_first,
       ppu.bg_sc,
       ppu.bg_name_base,
       ppu.bg_hofs,
@@ -1315,6 +1553,7 @@ defmodule Beamicom.SNES.PPU do
       ppu.color_math,
       ppu.fixed_color,
       ppu.overscan?,
+      ppu.extbg?,
       ppu.scanline_states,
       render_vram_key(ppu),
       if((ppu.main_screen &&& 0x10) != 0 or (ppu.sub_screen &&& 0x10) != 0,
@@ -1326,7 +1565,9 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp render_vram_key(%{bg_mode: 7} = ppu) do
-    if (ppu.main_screen &&& 0x01) != 0 or (ppu.sub_screen &&& 0x01) != 0,
+    backgrounds = if ppu.extbg?, do: 0x03, else: 0x01
+
+    if (ppu.main_screen &&& backgrounds) != 0 or (ppu.sub_screen &&& backgrounds) != 0,
       do: Enum.map(0..255, fn page -> {page, elem(ppu.vram_page_versions, page)} end),
       else: render_obj_vram_key(ppu)
   end
@@ -1350,7 +1591,7 @@ defmodule Beamicom.SNES.PPU do
           end
 
         tile_base = elem(ppu.bg_name_base, bg) * 0x2000
-        tile_bytes = if bpp == 2, do: 0x4000, else: 0x8000
+        tile_bytes = if bpp == 2, do: 0x4000, else: bpp * 0x2000
         vram_pages(tilemap_base, tilemap_bytes) ++ vram_pages(tile_base, tile_bytes)
       end)
 
@@ -1392,6 +1633,26 @@ defmodule Beamicom.SNES.PPU do
 
   defp mark_dirty_if(ppu, true), do: %{ppu | render_dirty?: true}
   defp mark_dirty_if(ppu, false), do: ppu
+
+  defp reset_oam_address(ppu, oamadd, priority_rotation?) do
+    obj_first = if priority_rotation?, do: oamadd >>> 1 &&& 0x7F, else: 0
+
+    dirty? =
+      ppu.obj_priority_rotation? != priority_rotation? or
+        ppu.obj_first != obj_first
+
+    %{
+      ppu
+      | oamadd: oamadd,
+        oam_internal_address: oamadd <<< 1,
+        obj_priority_rotation?: priority_rotation?,
+        obj_first: obj_first,
+        render_dirty?: ppu.render_dirty? or dirty?
+    }
+  end
+
+  defp oam_physical_address(address) when address < 0x200, do: address
+  defp oam_physical_address(address), do: 0x200 + (address &&& 0x1F)
 
   defp write_m7_word(ppu, key, value) do
     word = value <<< 8 ||| ppu.m7_latch
@@ -1440,7 +1701,11 @@ defmodule Beamicom.SNES.PPU do
       ppu.m7c,
       ppu.m7d,
       ppu.m7x,
-      ppu.m7y
+      ppu.m7y,
+      ppu.extbg?,
+      ppu.mosaic,
+      ppu.obj_priority_rotation?,
+      ppu.obj_first
     }
   end
 
@@ -1449,7 +1714,8 @@ defmodule Beamicom.SNES.PPU do
          {force_blank?, brightness, bg_mode, bg3_priority?, bg_tile_size, bg_sc, bg_name_base,
           bg_hofs, bg_vofs, obsel, window_select, window_positions, window_logic, main_screen,
           sub_screen, main_window, sub_window, color_window_select, color_math, fixed_color,
-          cgram_version, cgram, m7sel, m7hofs, m7vofs, m7a, m7b, m7c, m7d, m7x, m7y}
+          cgram_version, cgram, m7sel, m7hofs, m7vofs, m7a, m7b, m7c, m7d, m7x, m7y, extbg?,
+          mosaic, obj_priority_rotation?, obj_first}
        ) do
     %{
       ppu
@@ -1483,8 +1749,19 @@ defmodule Beamicom.SNES.PPU do
         m7c: m7c,
         m7d: m7d,
         m7x: m7x,
-        m7y: m7y
+        m7y: m7y,
+        extbg?: extbg?,
+        mosaic: mosaic,
+        obj_priority_rotation?: obj_priority_rotation?,
+        obj_first: obj_first
     }
+  end
+
+  defp mosaic_active?(%{mosaic: mosaic, scanline_states: states}) do
+    active? = fn value -> (value &&& 0x0F) != 0 and value >>> 4 != 0 end
+
+    active?.(mosaic) or
+      (is_list(states) and Enum.any?(states, fn state -> active?.(elem(state, 32)) end))
   end
 
   defp scanline_states(%{scanline_states: states}, height) when is_list(states) do
@@ -1492,6 +1769,9 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp scanline_states(_ppu, _height), do: nil
+
+  defp obj_state(ppu), do: {ppu.obsel, ppu.obj_priority_rotation?, ppu.obj_first}
+  defp visual_obj_state(state), do: {elem(state, 9), elem(state, 33), elem(state, 34)}
 
   defp read_vram(ppu, byte) do
     address = translated_vmadd(ppu) * 2

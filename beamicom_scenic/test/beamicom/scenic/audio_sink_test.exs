@@ -25,7 +25,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   test "defaults to a short prebuffer for stable realtime playback" do
     pid = start_supervised!({AudioSink, command: @discard_command, name: :buffered_audio_sink})
 
-    assert %{ready?: false, prebuffer_frames: 4_410} = :sys.get_state(pid)
+    assert %{ready?: false, prebuffer_frames: 11_025} = :sys.get_state(pid)
   end
 
   test "scales signed 16-bit PCM independently of channel layout" do
@@ -175,6 +175,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
 
     assert "audiotoolbox" in command
     refute "direct" in command
+    refute "nobuffer" in command
     refute Enum.any?(command, &String.contains?(&1, "asetnsamples"))
 
     assert ["ffplay" | slow_command] =

@@ -30,6 +30,45 @@ defmodule Beamicom.SNES.BusTest do
     assert Bus.peek(bus, 0xF00123) == 0x42
   end
 
+  test "maps Cx4 RAM and mirrors its identity command across cartridge banks" do
+    {:ok, cartridge} =
+      :lorom |> SNESTestROM.build(cartridge_type: 0xF3) |> Cartridge.load()
+
+    bus = Bus.new(cartridge)
+    assert %Beamicom.SNES.Cx4{} = bus.coprocessor
+
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x89)
+    assert Bus.peek(bus, 0x807F80) == 0x36
+    assert Bus.peek(bus, 0x807F81) == 0x43
+    assert Bus.peek(bus, 0x807F82) == 0x05
+    assert Bus.peek(bus, 0x007F5E) == 0
+    assert bus.coprocessor.command_counts == %{0x89 => 1}
+  end
+
+  test "performs Cx4 ROM-to-RAM transfers from the cartridge bus" do
+    media =
+      :lorom
+      |> SNESTestROM.build(cartridge_type: 0xF3)
+      |> SNESTestROM.put_bytes(0x0100, <<0x11, 0x22, 0x33>>)
+
+    {:ok, cartridge} = Cartridge.load(media)
+
+    bus = Bus.new(cartridge)
+    {bus, 8} = Bus.write(bus, 0x007F40, 0x00)
+    {bus, 8} = Bus.write(bus, 0x007F41, 0x81)
+    {bus, 8} = Bus.write(bus, 0x007F42, 0x00)
+    {bus, 8} = Bus.write(bus, 0x007F43, 3)
+    {bus, 8} = Bus.write(bus, 0x007F44, 0)
+    {bus, 8} = Bus.write(bus, 0x007F45, 0x00)
+    {bus, 8} = Bus.write(bus, 0x007F46, 0x60)
+    {bus, 8} = Bus.write(bus, 0x007F47, 0)
+
+    assert [Bus.peek(bus, 0x006000), Bus.peek(bus, 0x006001), Bus.peek(bus, 0x006002)] ==
+             [0x11, 0x22, 0x33]
+
+    assert bus.coprocessor.load_count == 1
+  end
+
   test "prices WRAM, MMIO, JOYSER, slow ROM, and fast ROM accesses", %{bus: bus} do
     assert Bus.access_clocks(bus, 0x7E0000) == 8
     assert Bus.access_clocks(bus, 0x002100) == 6

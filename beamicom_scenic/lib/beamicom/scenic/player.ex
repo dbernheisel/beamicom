@@ -43,6 +43,7 @@ defmodule Beamicom.Scenic.Player do
          :ok <- validate_options(scale, speed, volume),
          :ok <- validate_scale(scale, core, video_filter),
          core = configure_core(core, load_options),
+         :ok <- warm_core(core),
          {:ok, machine} <- load(core, path, media, load_options),
          rom_hash = SaveState.rom_hash(core.id, machine),
          {machine, lighting} <- configure_nes_lighting(core, machine, player_options, rom_hash) do
@@ -590,7 +591,7 @@ defmodule Beamicom.Scenic.Player do
         audio: core.capabilities.audio,
         speed: speed,
         volume: Keyword.get(options, :volume, 100),
-        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 100)
+        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 250)
       ]
 
       audio_options =
@@ -608,6 +609,17 @@ defmodule Beamicom.Scenic.Player do
       {:ok, nil}
     end
   end
+
+  defp warm_core(%Core{id: :snes}) do
+    if Application.get_env(:beamicom_snes, :ppu_renderer, :native) == :nx and
+         Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      Beamicom.SNES.Nx.PPURenderer.warmup()
+    else
+      :ok
+    end
+  end
+
+  defp warm_core(%Core{}), do: :ok
 
   defp pause_audio(nil), do: :ok
   defp pause_audio(audio), do: AudioSink.pause(audio)

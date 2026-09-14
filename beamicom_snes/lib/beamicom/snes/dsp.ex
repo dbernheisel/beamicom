@@ -3,6 +3,8 @@ defmodule Beamicom.SNES.DSP do
 
   import Bitwise
 
+  @compile {:inline, reg: 2, ram_get: 2, signed8: 1, clip16: 1}
+
   @voice %{
     active?: false,
     block_address: 0,
@@ -66,13 +68,27 @@ defmodule Beamicom.SNES.DSP do
     dsp = apply_keys(dsp, ram)
     mixer = mixer_state(dsp)
 
-    {dsp, pcm} =
-      Enum.reduce(1..frames, {dsp, []}, fn _, {dsp, pcm} ->
-        {left, right, dsp} = mix_sample(dsp, ram, mixer)
-        {dsp, [<<left::signed-little-16, right::signed-little-16>> | pcm]}
-      end)
+    {voices, end_flags, pcm} =
+      render_samples(render_voices(dsp.voices), dsp.end_flags, ram, mixer, frames, [])
 
+    dsp = %{dsp | voices: store_voices(voices), end_flags: end_flags}
     {dsp, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
+  end
+
+  defp render_samples(voices, end_flags, _ram, _mixer, 0, pcm),
+    do: {voices, end_flags, pcm}
+
+  defp render_samples(voices, end_flags, ram, mixer, remaining, pcm) do
+    {left, right, voices, end_flags} = mix_sample(voices, end_flags, ram, mixer)
+
+    render_samples(
+      voices,
+      end_flags,
+      ram,
+      mixer,
+      remaining - 1,
+      [<<left::signed-little-16, right::signed-little-16>> | pcm]
+    )
   end
 
   defp apply_keys(dsp, ram) do
@@ -128,91 +144,204 @@ defmodule Beamicom.SNES.DSP do
     }
   end
 
-  defp mix_sample(dsp, ram, {mixer_voices, muted?, master_left, master_right}) do
-    {left, right, voices, end_flags} =
-      Enum.reduce(0..7, {0, 0, dsp.voices, dsp.end_flags}, fn index,
-                                                              {left, right, voices, end_flags} ->
-        voice = elem(voices, index)
-
-        if voice.active? do
-          {pitch, volume_left, volume_right} = elem(mixer_voices, index)
-          sample = elem(voice.samples, voice.sample_index)
-          voice = advance_voice(voice, pitch, ram)
-          left = left + div(sample * volume_left, 128)
-          right = right + div(sample * volume_right, 128)
-          end_flags = if voice.active?, do: end_flags, else: end_flags ||| 1 <<< index
-          {left, right, put_elem(voices, index, voice), end_flags}
-        else
-          {left, right, voices, end_flags}
-        end
-      end)
+  defp mix_sample(voices, end_flags, ram, {mixer_voices, muted?, master_left, master_right}) do
+    {v0, v1, v2, v3, v4, v5, v6, v7} = voices
+    {m0, m1, m2, m3, m4, m5, m6, m7} = mixer_voices
+    {left, right, v0, end_flags} = mix_voice(v0, m0, ram, 0, 0, 0, end_flags)
+    {left, right, v1, end_flags} = mix_voice(v1, m1, ram, 1, left, right, end_flags)
+    {left, right, v2, end_flags} = mix_voice(v2, m2, ram, 2, left, right, end_flags)
+    {left, right, v3, end_flags} = mix_voice(v3, m3, ram, 3, left, right, end_flags)
+    {left, right, v4, end_flags} = mix_voice(v4, m4, ram, 4, left, right, end_flags)
+    {left, right, v5, end_flags} = mix_voice(v5, m5, ram, 5, left, right, end_flags)
+    {left, right, v6, end_flags} = mix_voice(v6, m6, ram, 6, left, right, end_flags)
+    {left, right, v7, end_flags} = mix_voice(v7, m7, ram, 7, left, right, end_flags)
 
     left = if muted?, do: 0, else: clip16(div(left * master_left, 128))
     right = if muted?, do: 0, else: clip16(div(right * master_right, 128))
-    {left, right, %{dsp | voices: voices, end_flags: end_flags}}
+    {left, right, {v0, v1, v2, v3, v4, v5, v6, v7}, end_flags}
   end
 
-  defp advance_voice(voice, pitch, ram) do
-    phase = voice.phase + pitch
+  defp mix_voice(
+         {false, _, _, _, _, _, _, _, _, _} = voice,
+         _mixer,
+         _ram,
+         _index,
+         left,
+         right,
+         end_flags
+       ),
+       do: {left, right, voice, end_flags}
+
+  defp mix_voice(
+         {true, _, _, _, _, samples, sample_index, _, _, _} = voice,
+         {pitch, volume_left, volume_right},
+         ram,
+         index,
+         left,
+         right,
+         end_flags
+       ) do
+    sample = elem(samples, sample_index)
+    voice = advance_render_voice(voice, pitch, ram)
+    left = left + div(sample * volume_left, 128)
+    right = right + div(sample * volume_right, 128)
+    end_flags = if elem(voice, 0), do: end_flags, else: end_flags ||| 1 <<< index
+    {left, right, voice, end_flags}
+  end
+
+  defp advance_render_voice({_, _, _, _, _, _, _, phase, _, _} = voice, pitch, ram) do
+    phase = phase + pitch
     steps = phase >>> 12
-    voice = %{voice | phase: phase &&& 0x0FFF}
-    advance_samples(voice, steps, ram)
+    voice = put_elem(voice, 7, phase &&& 0x0FFF)
+    advance_render_samples(voice, steps, ram)
   end
 
-  defp advance_samples(voice, 0, _ram), do: voice
-  defp advance_samples(%{active?: false} = voice, _steps, _ram), do: voice
+  defp advance_render_samples(voice, 0, _ram), do: voice
 
-  defp advance_samples(voice, steps, ram) do
-    voice = %{voice | sample_index: voice.sample_index + 1}
+  defp advance_render_samples({false, _, _, _, _, _, _, _, _, _} = voice, _steps, _ram),
+    do: voice
+
+  defp advance_render_samples(
+         {true, block_address, loop_address, block_end?, block_loop?, samples, sample_index,
+          phase, previous1, previous2},
+         steps,
+         ram
+       ) do
+    sample_index = sample_index + 1
 
     voice =
-      if voice.sample_index >= 16 do
+      if sample_index >= 16 do
         cond do
-          voice.block_end? and voice.block_loop? ->
-            %{voice | block_address: voice.loop_address, sample_index: 0} |> decode_block(ram)
+          block_end? and block_loop? ->
+            {true, loop_address, loop_address, block_end?, block_loop?, samples, 0, phase,
+             previous1, previous2}
+            |> decode_render_block(ram)
 
-          voice.block_end? ->
-            %{voice | active?: false, sample_index: 15}
+          block_end? ->
+            {false, block_address, loop_address, block_end?, block_loop?, samples, 15, phase,
+             previous1, previous2}
 
           true ->
-            %{voice | block_address: voice.block_address + 9 &&& 0xFFFF, sample_index: 0}
-            |> decode_block(ram)
+            {true, block_address + 9 &&& 0xFFFF, loop_address, block_end?, block_loop?, samples,
+             0, phase, previous1, previous2}
+            |> decode_render_block(ram)
         end
       else
-        voice
+        {true, block_address, loop_address, block_end?, block_loop?, samples, sample_index, phase,
+         previous1, previous2}
       end
 
-    advance_samples(voice, steps - 1, ram)
+    advance_render_samples(voice, steps - 1, ram)
+  end
+
+  defp render_voices({v0, v1, v2, v3, v4, v5, v6, v7}),
+    do:
+      {render_voice(v0), render_voice(v1), render_voice(v2), render_voice(v3), render_voice(v4),
+       render_voice(v5), render_voice(v6), render_voice(v7)}
+
+  defp render_voice(voice),
+    do:
+      {voice.active?, voice.block_address, voice.loop_address, voice.block_end?,
+       voice.block_loop?, voice.samples, voice.sample_index, voice.phase, voice.previous1,
+       voice.previous2}
+
+  defp store_voices({v0, v1, v2, v3, v4, v5, v6, v7}),
+    do:
+      {store_voice(v0), store_voice(v1), store_voice(v2), store_voice(v3), store_voice(v4),
+       store_voice(v5), store_voice(v6), store_voice(v7)}
+
+  defp store_voice(
+         {active?, block_address, loop_address, block_end?, block_loop?, samples, sample_index,
+          phase, previous1, previous2}
+       ) do
+    %{
+      active?: active?,
+      block_address: block_address,
+      loop_address: loop_address,
+      block_end?: block_end?,
+      block_loop?: block_loop?,
+      samples: samples,
+      sample_index: sample_index,
+      phase: phase,
+      previous1: previous1,
+      previous2: previous2
+    }
+  end
+
+  defp decode_render_block(
+         {active?, block_address, loop_address, _block_end?, _block_loop?, _samples, sample_index,
+          phase, previous1, previous2},
+         ram
+       ) do
+    {samples, previous1, previous2, block_end?, block_loop?} =
+      decode_block_data(block_address, previous1, previous2, ram)
+
+    {active?, block_address, loop_address, block_end?, block_loop?, samples, sample_index, phase,
+     previous1, previous2}
   end
 
   defp decode_block(voice, ram) do
-    header = ram_get(ram, voice.block_address)
+    {samples, previous1, previous2, block_end?, block_loop?} =
+      decode_block_data(voice.block_address, voice.previous1, voice.previous2, ram)
+
+    %{
+      voice
+      | samples: samples,
+        previous1: previous1,
+        previous2: previous2,
+        block_end?: block_end?,
+        block_loop?: block_loop?
+    }
+  end
+
+  defp decode_block_data(block_address, previous1, previous2, ram) do
+    header = ram_get(ram, block_address)
     range = header >>> 4
     filter = header >>> 2 &&& 0x03
 
     {samples, previous1, previous2} =
-      Enum.reduce(0..15, {[], voice.previous1, voice.previous2}, fn index,
-                                                                    {samples, previous1,
-                                                                     previous2} ->
-        byte = ram_get(ram, voice.block_address + 1 + div(index, 2))
-        nibble = if rem(index, 2) == 0, do: byte >>> 4, else: byte &&& 0x0F
-        nibble = if nibble >= 8, do: nibble - 16, else: nibble
+      decode_brr_bytes(ram, block_address, 0, range, filter, previous1, previous2, [])
 
-        sample =
-          if range <= 12, do: (nibble <<< range) >>> 1, else: if(nibble < 0, do: -2048, else: 0)
+    {samples |> Enum.reverse() |> List.to_tuple(), previous1, previous2, (header &&& 1) != 0,
+     (header &&& 2) != 0}
+  end
 
-        sample = apply_filter(sample, filter, previous1, previous2) |> clip16()
-        {[sample | samples], sample, previous1}
-      end)
+  defp decode_brr_bytes(_ram, _address, 8, _range, _filter, previous1, previous2, samples),
+    do: {samples, previous1, previous2}
 
-    %{
-      voice
-      | samples: samples |> Enum.reverse() |> List.to_tuple(),
-        previous1: previous1,
-        previous2: previous2,
-        block_end?: (header &&& 1) != 0,
-        block_loop?: (header &&& 2) != 0
-    }
+  defp decode_brr_bytes(
+         ram,
+         address,
+         byte_index,
+         range,
+         filter,
+         previous1,
+         previous2,
+         samples
+       ) do
+    byte = ram_get(ram, address + 1 + byte_index)
+    high = decode_brr_nibble(byte >>> 4, range, filter, previous1, previous2)
+    low = decode_brr_nibble(byte &&& 0x0F, range, filter, high, previous1)
+
+    decode_brr_bytes(
+      ram,
+      address,
+      byte_index + 1,
+      range,
+      filter,
+      low,
+      high,
+      [low, high | samples]
+    )
+  end
+
+  defp decode_brr_nibble(nibble, range, filter, previous1, previous2) do
+    nibble = if nibble >= 8, do: nibble - 16, else: nibble
+
+    sample =
+      if range <= 12, do: (nibble <<< range) >>> 1, else: if(nibble < 0, do: -2048, else: 0)
+
+    apply_filter(sample, filter, previous1, previous2) |> clip16()
   end
 
   defp apply_filter(sample, 0, _p1, _p2), do: sample

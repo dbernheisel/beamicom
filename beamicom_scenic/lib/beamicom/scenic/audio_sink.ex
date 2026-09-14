@@ -22,6 +22,7 @@ defmodule Beamicom.Scenic.AudioSink do
   alias Beamicom.NES.Output, as: NESOutput
 
   @default_audio %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
+  @default_prebuffer_ms 250
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -40,7 +41,7 @@ defmodule Beamicom.Scenic.AudioSink do
     audio = Keyword.get(opts, :audio, @default_audio)
     volume = Keyword.get(opts, :volume, 100)
     command = Keyword.get(opts, :command, default_command(Keyword.get(opts, :speed, 1.0), audio))
-    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, 100)
+    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, @default_prebuffer_ms)
     prebuffer_frames = max(0, div(audio.sample_rate * prebuffer_ms + 999, 1_000))
 
     case {command, volume} do
@@ -87,11 +88,11 @@ defmodule Beamicom.Scenic.AudioSink do
 
     case os do
       {:unix, :darwin} ->
-        ~w(ffmpeg -loglevel quiet -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
+        ~w(ffmpeg -loglevel quiet -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i -) ++
           audio_filters(speed) ++ ~w(-f audiotoolbox -)
 
       _other ->
-        ~w(ffplay -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
+        ~w(ffplay -nodisp -autoexit -loglevel error -probesize 32 -analyzeduration 0 -f #{format(audio.sample_format)} -ar #{audio.sample_rate} -ch_layout #{layout} -i pipe:0) ++
           audio_filters(speed)
     end
   end
