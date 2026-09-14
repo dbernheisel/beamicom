@@ -1,13 +1,21 @@
 #include <erl_nif.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef __APPLE__
-#import <Cocoa/Cocoa.h>
-#include <dispatch/dispatch.h>
-#include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+extern char **environ;
 #else
 #include <dlfcn.h>
 #endif
@@ -229,13 +237,246 @@ static dialog_result_t result(dialog_result_kind_t kind, const char *value) {
 
 #ifdef __APPLE__
 
-typedef struct {
-  const dialog_request_t *request;
-  dialog_result_t result;
-} mac_dialog_context_t;
+#define MAC_HELPER_EXECUTABLE_SUFFIX "/Contents/MacOS/BeamicomFileDialog"
+#define MAC_HELPER_MAX_OUTPUT (1024 * 1024)
+#define MAC_HELPER_TIMEOUT_SECONDS (10 * 60)
+#define MAC_HELPER_WAIT_NANOSECONDS (50 * 1000 * 1000)
 
-static NSArray<NSString *> *mac_extensions(const dialog_request_t *request) {
-  NSMutableArray<NSString *> *extensions = [NSMutableArray array];
+typedef enum {
+  MAC_HELPER_EXITED,
+  MAC_HELPER_WAIT_ERROR,
+  MAC_HELPER_WAIT_TIMEOUT,
+} mac_helper_wait_result_t;
+
+static dialog_result_t mac_error(const char *operation, int error_number) {
+  char message[512];
+  snprintf(message, sizeof(message), "%s: %s", operation,
+           strerror(error_number));
+  return result(DIALOG_ERROR, message);
+}
+
+static bool deadline_reached(const struct timespec *deadline,
+                             const struct timespec *now) {
+  return now->tv_sec > deadline->tv_sec ||
+         (now->tv_sec == deadline->tv_sec &&
+          now->tv_nsec >= deadline->tv_nsec);
+}
+
+static mac_helper_wait_result_t wait_for_helper(pid_t pid, int *status,
+                                                int *wait_error) {
+  struct timespec deadline;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &deadline) == -1) {
+    *wait_error = errno;
+    return MAC_HELPER_WAIT_ERROR;
+  }
+
+  deadline.tv_sec += MAC_HELPER_TIMEOUT_SECONDS;
+
+  for (;;) {
+    pid_t waited = waitpid(pid, status, WNOHANG);
+
+    if (waited == pid) {
+      return MAC_HELPER_EXITED;
+    }
+
+    if (waited == -1 && errno != EINTR) {
+      *wait_error = errno;
+      return MAC_HELPER_WAIT_ERROR;
+    }
+
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+      *wait_error = errno;
+      return MAC_HELPER_WAIT_ERROR;
+    }
+
+    if (deadline_reached(&deadline, &now)) {
+      return MAC_HELPER_WAIT_TIMEOUT;
+    }
+
+    struct timespec pause = {
+        .tv_sec = 0,
+        .tv_nsec = MAC_HELPER_WAIT_NANOSECONDS,
+    };
+
+    while (nanosleep(&pause, &pause) == -1) {
+      if (errno != EINTR) {
+        *wait_error = errno;
+        return MAC_HELPER_WAIT_ERROR;
+      }
+    }
+  }
+}
+
+static void terminate_and_reap_helper(pid_t pid) {
+  int status;
+
+  if (kill(pid, SIGKILL) == -1 && errno != ESRCH) {
+    return;
+  }
+
+  while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+  }
+}
+
+static char *mac_helper_executable_path(const char *helper_bundle_path) {
+  size_t bundle_length = strlen(helper_bundle_path);
+  size_t suffix_length = strlen(MAC_HELPER_EXECUTABLE_SUFFIX);
+
+  if (bundle_length > SIZE_MAX - suffix_length - 1) {
+    return NULL;
+  }
+
+  char *executable_path = enif_alloc(bundle_length + suffix_length + 1);
+
+  if (executable_path == NULL) {
+    return NULL;
+  }
+
+  memcpy(executable_path, helper_bundle_path, bundle_length);
+  memcpy(executable_path + bundle_length, MAC_HELPER_EXECUTABLE_SUFFIX,
+         suffix_length + 1);
+  return executable_path;
+}
+
+static bool read_helper_output(int descriptor, char **output, size_t *length,
+                               int *read_error) {
+  size_t capacity = 4096;
+  char *buffer = enif_alloc(capacity);
+
+  if (buffer == NULL) {
+    *read_error = ENOMEM;
+    return false;
+  }
+
+  *length = 0;
+
+  for (;;) {
+    if (*length == capacity) {
+      if (capacity >= MAC_HELPER_MAX_OUTPUT) {
+        enif_free(buffer);
+        *read_error = EOVERFLOW;
+        return false;
+      }
+
+      size_t new_capacity = capacity * 2;
+      char *larger_buffer = enif_realloc(buffer, new_capacity);
+
+      if (larger_buffer == NULL) {
+        enif_free(buffer);
+        *read_error = ENOMEM;
+        return false;
+      }
+
+      buffer = larger_buffer;
+      capacity = new_capacity;
+    }
+
+    ssize_t bytes_read = read(descriptor, buffer + *length, capacity - *length);
+
+    if (bytes_read > 0) {
+      *length += (size_t)bytes_read;
+    } else if (bytes_read == 0) {
+      break;
+    } else if (errno != EINTR) {
+      enif_free(buffer);
+      *read_error = errno;
+      return false;
+    }
+  }
+
+  if (*length == capacity) {
+    char *larger_buffer = enif_realloc(buffer, capacity + 1);
+
+    if (larger_buffer == NULL) {
+      enif_free(buffer);
+      *read_error = ENOMEM;
+      return false;
+    }
+
+    buffer = larger_buffer;
+  }
+
+  buffer[*length] = '\0';
+  *output = buffer;
+  return true;
+}
+
+static dialog_result_t decode_helper_output(const char *output, size_t length) {
+  if (length == 0) {
+    return result(DIALOG_ERROR, "macOS file dialog helper returned no result");
+  }
+
+  switch (output[0]) {
+  case 'O':
+    if (length == 1) {
+      return result(DIALOG_ERROR,
+                    "macOS file dialog helper returned an empty path");
+    }
+    return result(DIALOG_OK, output + 1);
+  case 'C':
+    return result(DIALOG_CANCEL, NULL);
+  case 'E':
+    return result(DIALOG_ERROR,
+                  length == 1 ? "macOS file dialog failed" : output + 1);
+  default:
+    return result(DIALOG_ERROR,
+                  "macOS file dialog helper returned an invalid result");
+  }
+}
+
+static dialog_result_t run_mac_helper(const dialog_request_t *request,
+                                      const char *helper_bundle_path) {
+  char *helper_executable_path =
+      mac_helper_executable_path(helper_bundle_path);
+
+  if (helper_executable_path == NULL) {
+    return result(DIALOG_ERROR, "out of memory");
+  }
+
+  if (access(helper_executable_path, X_OK) != 0) {
+    int access_error = errno;
+    enif_free(helper_executable_path);
+    return mac_error("could not launch macOS file dialog helper", access_error);
+  }
+
+  size_t extension_count = 0;
+
+  for (size_t filter_index = 0; filter_index < request->filter_count;
+       filter_index++) {
+    extension_count += request->filters[filter_index].extension_count;
+  }
+
+  char result_path[] = "/tmp/beamicom-file-dialog.XXXXXX";
+  int result_descriptor = mkstemp(result_path);
+
+  if (result_descriptor == -1) {
+    enif_free(helper_executable_path);
+    return mac_error("could not create macOS file dialog result", errno);
+  }
+
+  close(result_descriptor);
+
+  char **arguments = enif_alloc(sizeof(char *) * (extension_count + 7));
+
+  if (arguments == NULL) {
+    enif_free(helper_executable_path);
+    unlink(result_path);
+    return result(DIALOG_ERROR, "out of memory");
+  }
+
+  size_t argument_index = 0;
+  arguments[argument_index++] = helper_executable_path;
+  arguments[argument_index++] = result_path;
+  arguments[argument_index++] =
+      request->directory ? "directory" : (request->save ? "save" : "open");
+  arguments[argument_index++] = request->title;
+  arguments[argument_index++] =
+      request->initial_directory == NULL ? "" : request->initial_directory;
+  arguments[argument_index++] =
+      request->default_name == NULL ? "" : request->default_name;
 
   for (size_t filter_index = 0; filter_index < request->filter_count;
        filter_index++) {
@@ -243,85 +484,75 @@ static NSArray<NSString *> *mac_extensions(const dialog_request_t *request) {
 
     for (size_t extension_index = 0;
          extension_index < filter->extension_count; extension_index++) {
-      NSString *extension =
-          [NSString stringWithUTF8String:filter->extensions[extension_index]];
-
-      if (extension != nil) {
-        [extensions addObject:extension];
-      }
+      arguments[argument_index++] = filter->extensions[extension_index];
     }
   }
 
-  return extensions;
+  arguments[argument_index] = NULL;
+
+  pid_t pid;
+  int spawn_error = posix_spawn(&pid, helper_executable_path, NULL, NULL,
+                                arguments, environ);
+  enif_free(arguments);
+  enif_free(helper_executable_path);
+
+  if (spawn_error != 0) {
+    unlink(result_path);
+    return mac_error("could not launch macOS file dialog", spawn_error);
+  }
+
+  int status;
+  int wait_error = 0;
+  mac_helper_wait_result_t wait_result =
+      wait_for_helper(pid, &status, &wait_error);
+
+  if (wait_result == MAC_HELPER_WAIT_TIMEOUT) {
+    terminate_and_reap_helper(pid);
+    unlink(result_path);
+    return result(DIALOG_ERROR, "macOS file dialog helper timed out");
+  }
+
+  if (wait_result == MAC_HELPER_WAIT_ERROR) {
+    terminate_and_reap_helper(pid);
+    unlink(result_path);
+    return mac_error("could not wait for macOS file dialog", wait_error);
+  }
+
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    unlink(result_path);
+    return result(DIALOG_ERROR,
+                  "macOS file dialog helper exited unexpectedly");
+  }
+
+  result_descriptor = open(result_path, O_RDONLY);
+
+  if (result_descriptor == -1) {
+    int open_error = errno;
+    unlink(result_path);
+    return mac_error("could not open macOS file dialog result", open_error);
+  }
+
+  char *output = NULL;
+  size_t output_length = 0;
+  int read_error = 0;
+  bool output_read = read_helper_output(result_descriptor, &output,
+                                        &output_length, &read_error);
+  close(result_descriptor);
+  unlink(result_path);
+
+  if (!output_read) {
+    return mac_error("could not read macOS file dialog result", read_error);
+  }
+
+  dialog_result_t dialog_result =
+      decode_helper_output(output, output_length);
+  enif_free(output);
+  return dialog_result;
 }
 
-static void mac_show_on_main(void *opaque_context) {
-  mac_dialog_context_t *context = opaque_context;
-  const dialog_request_t *request = context->request;
-
-  @autoreleasepool {
-    [NSApplication sharedApplication];
-    [[NSRunningApplication currentApplication]
-        activateWithOptions:NSApplicationActivateIgnoringOtherApps];
-
-    NSSavePanel *panel;
-
-    if (request->directory) {
-      NSOpenPanel *open_panel = [NSOpenPanel openPanel];
-      open_panel.canChooseDirectories = YES;
-      open_panel.canChooseFiles = NO;
-      open_panel.allowsMultipleSelection = NO;
-      panel = open_panel;
-    } else {
-      panel = request->save ? [NSSavePanel savePanel] : [NSOpenPanel openPanel];
-    }
-
-    panel.title = [NSString stringWithUTF8String:request->title];
-
-    if (request->initial_directory != NULL) {
-      NSString *directory =
-          [NSString stringWithUTF8String:request->initial_directory];
-      panel.directoryURL = [NSURL fileURLWithPath:directory isDirectory:YES];
-    }
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    if (!request->directory) {
-      NSArray<NSString *> *extensions = mac_extensions(request);
-      if (extensions.count > 0) {
-        panel.allowedFileTypes = extensions;
-      }
-    }
-#pragma clang diagnostic pop
-
-    if (request->save && request->default_name != NULL) {
-      panel.nameFieldStringValue =
-          [NSString stringWithUTF8String:request->default_name];
-    }
-
-    NSModalResponse response = [panel runModal];
-
-    if (response == NSModalResponseOK && panel.URL.path != nil) {
-      context->result = result(DIALOG_OK, panel.URL.path.UTF8String);
-    } else {
-      context->result = result(DIALOG_CANCEL, NULL);
-    }
-  }
-}
-
-static dialog_result_t platform_show(const dialog_request_t *request) {
-  mac_dialog_context_t context = {
-      .request = request,
-      .result = {.kind = DIALOG_ERROR, .value = NULL},
-  };
-
-  if (pthread_main_np() != 0) {
-    mac_show_on_main(&context);
-  } else {
-    dispatch_sync_f(dispatch_get_main_queue(), &context, mac_show_on_main);
-  }
-
-  return context.result;
+static dialog_result_t platform_show(const dialog_request_t *request,
+                                     const char *helper_path) {
+  return run_mac_helper(request, helper_path);
 }
 
 #else
@@ -424,7 +655,10 @@ static bool add_gtk_filters(void *dialog, const dialog_request_t *request) {
   return true;
 }
 
-static dialog_result_t platform_show(const dialog_request_t *request) {
+static dialog_result_t platform_show(const dialog_request_t *request,
+                                     const char *helper_path) {
+  (void)helper_path;
+
   if (!load_gtk()) {
     return result(DIALOG_ERROR, "GTK 3 is unavailable");
   }
@@ -531,30 +765,36 @@ static ERL_NIF_TERM show_dialog(ErlNifEnv *env, int argc,
                                 const ERL_NIF_TERM argv[], bool save,
                                 bool directory) {
   dialog_request_t request;
+  char *helper_path = NULL;
+  memset(&request, 0, sizeof(request));
 
-  if (!decode_request(env, argc, argv, save, directory, &request)) {
+  if (argc < 1 ||
+      !decode_request(env, argc - 1, argv, save, directory, &request) ||
+      !decode_string(env, argv[argc - 1], &helper_path)) {
+    free_request(&request);
     return enif_make_badarg(env);
   }
 
   enif_mutex_lock(dialog_mutex);
-  dialog_result_t dialog_result = platform_show(&request);
+  dialog_result_t dialog_result = platform_show(&request, helper_path);
   enif_mutex_unlock(dialog_mutex);
+  enif_free(helper_path);
   free_request(&request);
   return encode_result(env, dialog_result);
 }
 
-static ERL_NIF_TERM open_nif(ErlNifEnv *env, int argc,
-                             const ERL_NIF_TERM argv[]) {
+static ERL_NIF_TERM mac_open_nif(ErlNifEnv *env, int argc,
+                                 const ERL_NIF_TERM argv[]) {
   return show_dialog(env, argc, argv, false, false);
 }
 
-static ERL_NIF_TERM save_nif(ErlNifEnv *env, int argc,
-                             const ERL_NIF_TERM argv[]) {
+static ERL_NIF_TERM mac_save_nif(ErlNifEnv *env, int argc,
+                                 const ERL_NIF_TERM argv[]) {
   return show_dialog(env, argc, argv, true, false);
 }
 
-static ERL_NIF_TERM directory_nif(ErlNifEnv *env, int argc,
-                                  const ERL_NIF_TERM argv[]) {
+static ERL_NIF_TERM mac_directory_nif(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]) {
   return show_dialog(env, argc, argv, false, true);
 }
 
@@ -584,9 +824,9 @@ static void unload(ErlNifEnv *env, void *private_data) {
 }
 
 static ErlNifFunc nif_functions[] = {
-    {"open", 3, open_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"save", 4, save_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"directory", 2, directory_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"mac_open", 4, mac_open_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"mac_save", 5, mac_save_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"mac_directory", 3, mac_directory_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
 };
 
 ERL_NIF_INIT(Elixir.Beamicom.Scenic.FileDialog.Native, nif_functions, load,

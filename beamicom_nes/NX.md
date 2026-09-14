@@ -6,7 +6,7 @@ native PPU resolves mapper-sensitive tile rows, evaluates sprites, and applies s
 side effects. The atlas variant records compact CHR row references for both
 background tiles and sprites instead of fetching their pattern bytes. At frame
 completion this adapter gathers those rows and composes all 240 by 256 palette
-addresses in one EXLA CPU call.
+addresses in one call to the configured Nx compiler.
 
 Add Nx and EXLA to the client and select the core renderers in compile-time
 configuration:
@@ -19,11 +19,13 @@ configuration:
 config :beamicom_nes,
   ppu_renderer: Beamicom.NES.Nx.PPURenderer,
   apu_renderer: Beamicom.NES.Nx.APUBlockRenderer
+
+config :nx, :default_defn_options, compiler: EXLA, client: :host
 ```
 
-The values are consumed while `beamicom_nes` is compiled. Changing these
-defaults requires recompilation; startup and frame execution never query the
-application environment for a backend.
+The renderer values are consumed while `beamicom_nes` is compiled. The Nx
+compiler is selected when each graph is prepared, and the compiled cache is
+partitioned by compiler options so frame replay does not query configuration.
 
 ## Opt-in emissive sprite lighting
 
@@ -86,18 +88,17 @@ native = [
 composite = Beamicom.NES.Nx.video_options(:composite, lighting: lighting)
 ```
 
-The observed CHR-RAM identities are tiles 92-95, subpalette 2, color slots 2-3
-for the flame's yellow/white core; tiles 130-133, every animated subpalette,
+The observed CHR-RAM identities are tiles 92-95, subpalette 2, color slots 1-3
+for the flame's red/yellow/white body; tiles 130-133, every animated subpalette,
 color slot 3 for the sword blade and traveling beam; and tiles 48-49, every
 animated subpalette, color slot 3 for the four beam-burst particles. The flame
 uses deterministic organic flicker. Additional verified emitters are rupee tiles
-50-51 in flashing subpalettes 1-2 at 60% intensity; Link tiles 0-19 only in the clock-flash
-subpalettes 1-2; enemy-fireball tiles 68-69 across all four animated
-subpalettes; and heart-pickup tiles 498-499 in flashing subpalettes 1-2. These
-use color slots 2-3 except for the single-color heart pattern, which uses slot
-1. Normal Link uses subpalette 0 and therefore remains non-emitting. The other
-pixels in those sprites remain non-emitting, although they can still receive the
-nearby halo.
+50-51 in flashing subpalettes 1-2 at 60% intensity; enemy-fireball tiles 68-69
+across all four animated subpalettes; enemy-death burst tiles 98 and 100 across
+all four animated subpalettes and all three visible color slots; and heart-pickup
+tiles 498-499 in flashing subpalettes 1-2. Link is not an emitter. The other pixels
+in those sprites remain non-emitting, although they can still receive the nearby
+halo.
 
 The Blargg renderer keeps the identity-derived emissive plane at native
 resolution, applies the selected NTSC filter, and adds the resampled halo to the
@@ -112,6 +113,9 @@ Run the optional real-ROM checkpoint test with:
 ```console
 BEAMICOM_NX=1 BEAMICOM_ZELDA_STATE=/path/to/zelda-state.png \
   mix test nx_test/nes/zelda_lighting_e2e_test.exs
+
+BEAMICOM_NX=1 BEAMICOM_ZELDA_DEATH_STATE=/path/to/zelda-death-state.png \
+  mix test nx_test/nes/zelda_enemy_death_lighting_e2e_test.exs
 ```
 
 The test validates the ROM-content and checkpoint hashes, exercises all twenty
@@ -120,9 +124,9 @@ traveling beam, and four-particle burst. It is skipped when the external ROM or
 checkpoint is unavailable.
 
 Optional supplemental checkpoint coverage uses
-`BEAMICOM_ZELDA_RUPEE_STATE`, `BEAMICOM_ZELDA_CLOCK_STATE`,
-`BEAMICOM_ZELDA_FIREBALL_STATE`, and `BEAMICOM_ZELDA_HEART_STATE`. When all four
-are present, the suite verifies their hashes, sprite identities, unchanged
+`BEAMICOM_ZELDA_RUPEE_STATE`, `BEAMICOM_ZELDA_FIREBALL_STATE`, and
+`BEAMICOM_ZELDA_HEART_STATE`. When all three are present, the suite verifies
+their hashes, sprite identities, unchanged
 palette-address planes, and localized RGB emission.
 
 Lighting changes only the optional RGB presentation. The native 256×240
@@ -202,7 +206,7 @@ PPU status timing and mapper-visible effects remain native even when visual work
 moves into the adapter. CHR RAM and latch-driven cartridges automatically use
 the byte-capture path.
 
-The block APU retains oscillator and filter state on EXLA. The native bus records
+The block APU retains oscillator and filter state on the configured Nx backend. The native bus records
 timestamped 2A03 and MMC5 register operations and continues to maintain
 frame/DMC IRQs, length status, DMC DMA, and Sunsoft 5B timing. For DMC and
 Sunsoft 5B playback it sends one resolved level per output sample, keeping the
@@ -214,7 +218,7 @@ the latest three repeated 902-frame Castlevania III runs, the combined
 `nx` + `nx_block` path produced identical RGB and PCM hashes at a median
 **112.37 FPS** (110.53–113.80). The dependency-free block build reached 64.17
 FPS (64.04–64.41) with the same three RGB consumers. The renderer also survives
-save-state snapshot and restore with its resident state reconstructed on EXLA.
+save-state snapshot and restore with its resident state reconstructed on that backend.
 
 The dependency-free Elixir block renderer produces the same Castlevania III PCM
 and framebuffer hashes. With a native PPU it reaches 65.69 FPS versus 66.54 FPS

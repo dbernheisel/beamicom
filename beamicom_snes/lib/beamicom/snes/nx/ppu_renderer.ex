@@ -1,6 +1,6 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.SNES.Nx.PPURenderer do
-    @moduledoc "Frame-wide EXLA renderer for supported 256x224 Mode 1 and Mode 7 paths."
+    @moduledoc "Frame-wide Nx renderer for supported 256x224 Mode 1 and Mode 7 paths."
 
     import Nx.Defn
 
@@ -703,7 +703,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     defp controls_tensor(rows), do: Nx.tensor(rows, type: :s32)
 
     defp vram_tensor(ppu) do
-      key = {__MODULE__, :resident_vram}
+      key = {__MODULE__, :resident_vram, Beamicom.SNES.Nx.backend()}
 
       case Process.get(key) do
         {identity, version, tensor}
@@ -716,7 +716,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
             |> :array.to_list()
             |> :erlang.list_to_binary()
             |> Nx.from_binary(:u8)
-            |> Nx.backend_copy({EXLA.Backend, client: :host})
+            |> Nx.backend_copy(Beamicom.SNES.Nx.backend())
 
           Process.put(key, {ppu.cache_identity, ppu.vram_version, tensor})
           tensor
@@ -724,7 +724,8 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(args, variant) do
-      key = {__MODULE__, :background_obj_v4, variant}
+      key =
+        {__MODULE__, :background_obj_v4, variant, Beamicom.SNES.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->
@@ -740,8 +741,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
                 &render_mode7/4
             end
 
-          compiled =
-            EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)
+          compiled = Beamicom.SNES.Nx.compile(function, args)
 
           :persistent_term.put(key, compiled)
           compiled

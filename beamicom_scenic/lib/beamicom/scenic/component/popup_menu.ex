@@ -20,7 +20,12 @@ defmodule Beamicom.Scenic.Component.PopupMenu do
       |> Kernel.+(@horizontal_padding)
       |> ceil()
 
-    label_width |> max(@minimum_width) |> min(@maximum_width)
+    minimum_width =
+      if Enum.any?(items, &MenuItem.slider?/1),
+        do: label_width + 210,
+        else: @minimum_width
+
+    label_width |> max(minimum_width) |> min(@maximum_width)
   end
 
   defp text_width(text) do

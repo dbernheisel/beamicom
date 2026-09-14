@@ -17,6 +17,8 @@ defmodule Beamicom.Scenic.Host do
   def set_enhancement(enhancement, enabled),
     do: GenServer.call(__MODULE__, {:set_enhancement, enhancement, enabled})
 
+  def set_volume(volume), do: GenServer.call(__MODULE__, {:set_volume, volume})
+
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
   def unload, do: GenServer.call(__MODULE__, :unload, :infinity)
   def status, do: GenServer.call(__MODULE__, :status)
@@ -138,6 +140,24 @@ defmodule Beamicom.Scenic.Host do
 
   def handle_call({:set_enhancement, enhancement, enabled}, _from, state) do
     case Player.set_enhancement(state.player, enhancement, enabled) do
+      {:ok, options} ->
+        session = %{state.session | options: options}
+        {:reply, :ok, %{state | session: session}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:set_volume, volume}, _from, %{player: nil} = state)
+      when is_integer(volume) and volume >= 0 and volume <= 100,
+      do: {:reply, :ok, state}
+
+  def handle_call({:set_volume, _volume}, _from, %{player: nil} = state),
+    do: {:reply, {:error, {:invalid_option, :volume}}, state}
+
+  def handle_call({:set_volume, volume}, _from, state) do
+    case Player.set_volume(state.player, volume) do
       {:ok, options} ->
         session = %{state.session | options: options}
         {:reply, :ok, %{state | session: session}}

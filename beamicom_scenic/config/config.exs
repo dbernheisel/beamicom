@@ -6,7 +6,7 @@ import Config
 # the standalone SNES package remains native-first.
 config :beamicom_snes, ppu_renderer: :nx
 
-# Opt the NES and Game Boy render boundaries into their EXLA implementations at compile
+# Opt the NES and Game Boy render boundaries into their Nx implementations at compile
 # time. Keep this environment variable set for every Mix invocation so Mix's
 # compile-env validation sees the same configuration at build and launch.
 if System.get_env("BEAMICOM_SCENIC_NX") in ["1", "true", "yes", "on"] do

@@ -1,9 +1,9 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.PPURenderer do
     @moduledoc """
     Adaptive frame-wide NES pixel compositor.
 
-    Immutable CHR ROM is decoded into an EXLA-resident tile atlas at cartridge
+    Immutable CHR ROM is decoded into a backend-resident tile atlas at cartridge
     load. CHR RAM and mapper-sensitive cases automatically use byte or hybrid
     capture inside the same renderer.
     """
@@ -37,14 +37,15 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     def prepare_chr_atlas(<<>>), do: nil
 
     def prepare_chr_atlas(chr) do
-      key = {__MODULE__, :chr_atlas, :crypto.hash(:sha256, chr)}
+      key =
+        {__MODULE__, :chr_atlas, Beamicom.NES.Nx.backend(), :crypto.hash(:sha256, chr)}
 
       case :persistent_term.get(key, nil) do
         nil ->
           atlas =
             chr |> decode_chr() |> Nx.from_binary(:u8) |> Nx.reshape({div(byte_size(chr), 2), 8})
 
-          atlas = Nx.backend_copy(atlas, {EXLA.Backend, client: :host})
+          atlas = Nx.backend_copy(atlas, Beamicom.NES.Nx.backend())
           :persistent_term.put(key, atlas)
 
         _atlas ->
@@ -89,7 +90,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           strength:
             strength
             |> Nx.tensor(type: :f32)
-            |> Nx.backend_copy({EXLA.Backend, client: :host})
+            |> Nx.backend_copy(Beamicom.NES.Nx.backend())
         }
       end
     end
@@ -172,7 +173,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       values
       |> Nx.tensor(type: :u16)
       |> Nx.reshape({tile_count, 4, 4})
-      |> Nx.backend_copy({EXLA.Backend, client: :host})
+      |> Nx.backend_copy(Beamicom.NES.Nx.backend())
     end
 
     defp gaussian_kernel(radius, sigma, direction) do
@@ -190,7 +191,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       weights
       |> Nx.tensor(type: :f32)
       |> Nx.reshape(shape)
-      |> Nx.backend_copy({EXLA.Backend, client: :host})
+      |> Nx.backend_copy(Beamicom.NES.Nx.backend())
     end
 
     defp atlas_key(%{atlas: atlas}), do: atlas
@@ -1579,60 +1580,46 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     defp tensor(binary, shape, type), do: binary |> Nx.from_binary(type) |> Nx.reshape(shape)
 
     defp compiled(kind, args, output) do
-      key = {@compiled_key, kind, output, Enum.map(args, &Nx.shape/1)}
+      key =
+        {@compiled_key, Beamicom.NES.Nx.compiler_options(), kind, output,
+         Enum.map(args, &Nx.shape/1)}
 
       case :persistent_term.get(key, nil) do
         nil ->
           fun =
             case {kind, output} do
               {:bytes, :rgb} ->
-                EXLA.compile(&compose_bytes/14, Enum.map(args, &Nx.to_template/1), client: :host)
+                Beamicom.NES.Nx.compile(&compose_bytes/14, args)
 
               {:atlas, :rgb} ->
-                EXLA.compile(&compose_atlas/13, Enum.map(args, &Nx.to_template/1), client: :host)
+                Beamicom.NES.Nx.compile(&compose_atlas/13, args)
 
               {:hybrid, :rgb} ->
-                EXLA.compile(&compose_hybrid/17, Enum.map(args, &Nx.to_template/1), client: :host)
+                Beamicom.NES.Nx.compile(&compose_hybrid/17, args)
 
               {:bytes_lit, :rgb} ->
-                EXLA.compile(&compose_bytes_lit/16, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_bytes_lit/16, args)
 
               {:atlas_lit, :rgb} ->
-                EXLA.compile(&compose_atlas_lit/14, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_atlas_lit/14, args)
 
               {:hybrid_lit, :rgb} ->
-                EXLA.compile(&compose_hybrid_lit/19, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_hybrid_lit/19, args)
 
               {:lighting, :rgb} ->
-                EXLA.compile(&compose_lighting/8, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_lighting/8, args)
 
               {:provenance, :emission} ->
-                EXLA.compile(&resolve_composed_emission/5, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&resolve_composed_emission/5, args)
 
               {:bytes, :pixels} ->
-                EXLA.compile(&compose_bytes_pixels/10, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_bytes_pixels/10, args)
 
               {:atlas, :pixels} ->
-                EXLA.compile(&compose_atlas_pixels/9, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_atlas_pixels/9, args)
 
               {:hybrid, :pixels} ->
-                EXLA.compile(&compose_hybrid_pixels/13, Enum.map(args, &Nx.to_template/1),
-                  client: :host
-                )
+                Beamicom.NES.Nx.compile(&compose_hybrid_pixels/13, args)
             end
 
           :persistent_term.put(key, fun)

@@ -1,7 +1,7 @@
 defmodule Beamicom.Scenic.Component.BackgroundTest do
   use ExUnit.Case, async: true
 
-  alias Beamicom.Scenic.Component.{Background, StatusBar}
+  alias Beamicom.Scenic.Component.{Backdrop, Background, StatusBar}
 
   test "validates component dimensions and status data" do
     assert {:ok, {960, 800}} = Background.validate({960, 800})
@@ -25,5 +25,12 @@ defmodule Beamicom.Scenic.Component.BackgroundTest do
       assert is_float(y)
       assert scale > 0
     end
+  end
+
+  test "the static and animated landscape horizons align inside the frame" do
+    {_width, inner_height} = size = {916, 756}
+    [animated_horizon | _grid] = Background.animation_frame(size, 0).grid
+
+    assert Backdrop.horizon(inner_height + 44) == 22 + animated_horizon
   end
 end

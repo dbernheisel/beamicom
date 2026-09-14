@@ -1,7 +1,7 @@
 defmodule Beamicom.Scenic.Settings do
   @moduledoc "Persistent user settings for the Scenic application shell."
 
-  @version 1
+  @version 2
   @nes_video_filters [:none, :composite, :svideo, :rgb]
   @gbc_video_filters [:none, :pixel_transparency]
 
@@ -13,7 +13,8 @@ defmodule Beamicom.Scenic.Settings do
           nes_trim_borders: boolean(),
           gbc_video_filter: :none | :pixel_transparency,
           integer_scaling: boolean(),
-          audio: boolean()
+          audio: boolean(),
+          volume: 0..100
         }
 
   def nes_video_filters, do: @nes_video_filters
@@ -29,7 +30,8 @@ defmodule Beamicom.Scenic.Settings do
       nes_trim_borders: false,
       gbc_video_filter: :none,
       integer_scaling: true,
-      audio: true
+      audio: true,
+      volume: 100
     }
   end
 
@@ -85,6 +87,7 @@ defmodule Beamicom.Scenic.Settings do
       options
       |> Keyword.put_new(:video_filter, filter_option(configured_filter))
       |> Keyword.put_new(:audio, settings.audio)
+      |> Keyword.put_new(:volume, settings.volume)
 
     if system == :nes do
       options
@@ -99,7 +102,10 @@ defmodule Beamicom.Scenic.Settings do
   end
 
   def player_options(:snes, options, settings) when is_list(options) and is_map(settings),
-    do: Keyword.put_new(options, :audio, settings.audio)
+    do:
+      options
+      |> Keyword.put_new(:audio, settings.audio)
+      |> Keyword.put_new(:volume, settings.volume)
 
   defp decode(json) do
     with {:ok, decoded} <- decode_json(json),
@@ -112,7 +118,8 @@ defmodule Beamicom.Scenic.Settings do
            nes_trim_borders: Map.get(decoded, "nes_trim_borders"),
            gbc_video_filter: Map.get(decoded, "gbc_video_filter"),
            integer_scaling: Map.get(decoded, "integer_scaling"),
-           audio: Map.get(decoded, "audio")
+           audio: Map.get(decoded, "audio"),
+           volume: Map.get(decoded, "volume")
          },
          {:ok, settings} <- normalize(settings, defaults()) do
       {:ok, settings}
@@ -137,7 +144,8 @@ defmodule Beamicom.Scenic.Settings do
       "nes_trim_borders" => settings.nes_trim_borders,
       "gbc_video_filter" => Atom.to_string(settings.gbc_video_filter),
       "integer_scaling" => settings.integer_scaling,
-      "audio" => settings.audio
+      "audio" => settings.audio,
+      "volume" => settings.volume
     }
 
     {:ok, json |> :json.encode() |> IO.iodata_to_binary()}
@@ -160,7 +168,8 @@ defmodule Beamicom.Scenic.Settings do
            setting(settings, :gbc_video_filter, fallbacks, &normalize_gbc_filter/1),
          {:ok, integer_scaling} <-
            setting(settings, :integer_scaling, fallbacks, &normalize_boolean/1),
-         {:ok, audio} <- setting(settings, :audio, fallbacks, &normalize_boolean/1) do
+         {:ok, audio} <- setting(settings, :audio, fallbacks, &normalize_boolean/1),
+         {:ok, volume} <- setting(settings, :volume, fallbacks, &normalize_volume/1) do
       {:ok,
        %{
          save_state_folder: save_state_folder,
@@ -170,7 +179,8 @@ defmodule Beamicom.Scenic.Settings do
          nes_trim_borders: nes_trim_borders,
          gbc_video_filter: gbc_video_filter,
          integer_scaling: integer_scaling,
-         audio: audio
+         audio: audio,
+         volume: volume
        }}
     end
   end
@@ -208,6 +218,9 @@ defmodule Beamicom.Scenic.Settings do
 
   defp normalize_boolean(value) when is_boolean(value), do: {:ok, value}
   defp normalize_boolean(_value), do: {:error, :invalid_boolean}
+
+  defp normalize_volume(value) when is_integer(value) and value in 0..100, do: {:ok, value}
+  defp normalize_volume(_value), do: {:error, {:invalid_setting, :volume}}
 
   defp normalize_enum(value, choices, key) do
     case Enum.find(choices, &(Atom.to_string(&1) == value)) do

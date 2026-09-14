@@ -140,7 +140,7 @@ Config
   NES
     FILTER
     None
-    Blargg composite
+    Composite
     S-Video
     RGB
     ----------
@@ -347,7 +347,8 @@ Beamicom.Scenic.FileDialog.save(filters, initial_directory, default_name)
 
 It has no Rust dependency or Rust toolchain requirement:
 
-- macOS uses `NSOpenPanel` and `NSSavePanel` from AppKit.
+- macOS uses a C NIF to launch an isolated `NSOpenPanel` or `NSSavePanel`
+  helper executable, keeping AppKit on that process's main thread.
 - Linux launches Zenity as an isolated port process. GTK must not run inside the
   BEAM after direct calls proved capable of hanging and crashing the VM.
 
@@ -568,8 +569,8 @@ on macOS and Linux.
 ## Decisions recorded
 
 - Menus are Scenic-drawn rather than native operating-system menus.
-- File selectors are native: an AppKit NIF on macOS and an isolated Zenity
-  process on Linux.
+- File selectors are native: a C NIF with an isolated AppKit helper on macOS
+  and an isolated Zenity process on Linux.
 - macOS and Linux are the only supported desktop targets for this work.
 - The Scenic window is long-lived; emulator sessions are replaceable.
 - Background motion is time-based and uses Scenic vector primitives.

@@ -29,7 +29,8 @@ defmodule Beamicom.Scenic.Component.MenuBar do
       open_menu: nil,
       selected_item: nil,
       open_submenu: nil,
-      selected_subitem: nil
+      selected_subitem: nil,
+      tracking_slider: nil
     }
 
     graph = render(data, state)
@@ -67,6 +68,15 @@ defmodule Beamicom.Scenic.Component.MenuBar do
   end
 
   @impl Scenic.Scene
+  def handle_input(
+        {:cursor_pos, {x, _y}},
+        _id,
+        %{assigns: %{menu_state: %{tracking_slider: index}}} = scene
+      )
+      when is_integer(index) do
+    {:noreply, update_slider(scene, index, x)}
+  end
+
   def handle_input({:cursor_pos, _point}, {:menu_title, index}, scene) do
     state = scene.assigns.menu_state
     state = %{state | selected_menu: index}
@@ -91,8 +101,8 @@ defmodule Beamicom.Scenic.Component.MenuBar do
     {:noreply, activate_title(scene, index)}
   end
 
-  def handle_input({:cursor_button, {:btn_left, 1, _, _}}, {:menu_item, index}, scene) do
-    {:noreply, activate_item(scene, index)}
+  def handle_input({:cursor_button, {:btn_left, 1, _, {x, _}}}, {:menu_item, index}, scene) do
+    {:noreply, activate_item(scene, index, x)}
   end
 
   def handle_input(
@@ -101,6 +111,15 @@ defmodule Beamicom.Scenic.Component.MenuBar do
         scene
       ) do
     {:noreply, activate_subitem(scene, index)}
+  end
+
+  def handle_input(
+        {:cursor_button, {:btn_left, 0, _, _}},
+        _id,
+        %{assigns: %{menu_state: %{tracking_slider: index}}} = scene
+      )
+      when is_integer(index) do
+    {:noreply, commit_slider(scene, index)}
   end
 
   def handle_input({:cursor_button, {:btn_left, 1, _, _}}, _id, scene) do
@@ -236,7 +255,7 @@ defmodule Beamicom.Scenic.Component.MenuBar do
     end
   end
 
-  defp activate_item(scene, index) do
+  defp activate_item(scene, index, cursor_x \\ nil) do
     state = scene.assigns.menu_state
 
     with open when is_integer(open) <- state.open_menu,
@@ -244,6 +263,14 @@ defmodule Beamicom.Scenic.Component.MenuBar do
          item when is_map(item) <- Enum.at(menu.items, index),
          true <- Map.get(item, :enabled, true) do
       case item do
+        %{slider: _slider} when is_number(cursor_x) ->
+          scene
+          |> put_menu_state(%{state | selected_item: index, tracking_slider: index})
+          |> update_slider(index, cursor_x)
+
+        %{slider: _slider} ->
+          scene
+
         %{submenu: submenu} when is_list(submenu) and submenu != [] ->
           put_menu_state(scene, open_submenu(state, index, submenu))
 
@@ -323,9 +350,16 @@ defmodule Beamicom.Scenic.Component.MenuBar do
   defp handle_key(scene, :key_left) do
     state = scene.assigns.menu_state
 
-    if is_integer(state.open_submenu),
-      do: put_menu_state(scene, %{state | open_submenu: nil, selected_subitem: nil}),
-      else: move_menu(scene, -1)
+    cond do
+      is_integer(state.open_submenu) ->
+        put_menu_state(scene, %{state | open_submenu: nil, selected_subitem: nil})
+
+      selected_slider?(scene, state) ->
+        adjust_selected_slider(scene, -1)
+
+      true ->
+        move_menu(scene, -1)
+    end
   end
 
   defp handle_key(scene, :key_right) do
@@ -334,6 +368,9 @@ defmodule Beamicom.Scenic.Component.MenuBar do
     cond do
       is_integer(state.open_submenu) ->
         scene
+
+      selected_slider?(scene, state) ->
+        adjust_selected_slider(scene, 1)
 
       is_integer(state.open_menu) ->
         case selected_submenu(scene, state) do
@@ -410,7 +447,8 @@ defmodule Beamicom.Scenic.Component.MenuBar do
           open_menu: index,
           selected_item: next_enabled(menu.items, nil, 1),
           open_submenu: nil,
-          selected_subitem: nil
+          selected_subitem: nil,
+          tracking_slider: nil
       }
     else
       %{
@@ -419,7 +457,8 @@ defmodule Beamicom.Scenic.Component.MenuBar do
           open_menu: nil,
           selected_item: nil,
           open_submenu: nil,
-          selected_subitem: nil
+          selected_subitem: nil,
+          tracking_slider: nil
       }
     end
   end
@@ -459,8 +498,67 @@ defmodule Beamicom.Scenic.Component.MenuBar do
       | open_menu: nil,
         selected_item: nil,
         open_submenu: nil,
-        selected_subitem: nil
+        selected_subitem: nil,
+        tracking_slider: nil
     })
+  end
+
+  defp selected_slider?(scene, state) do
+    with open when is_integer(open) <- state.open_menu,
+         menu <- Enum.at(scene.assigns.data.menus, open),
+         item when is_map(item) <- Enum.at(menu.items, state.selected_item) do
+      MenuItem.slider?(item)
+    else
+      _other -> false
+    end
+  end
+
+  defp adjust_selected_slider(scene, direction) do
+    state = scene.assigns.menu_state
+    menu = Enum.at(scene.assigns.data.menus, state.open_menu)
+    item = Enum.at(menu.items, state.selected_item)
+    value = item.slider.value + direction * item.slider.step
+
+    scene
+    |> set_slider_value(state.selected_item, value)
+    |> commit_slider(state.selected_item)
+  end
+
+  defp update_slider(scene, index, cursor_x) do
+    state = scene.assigns.menu_state
+    menu = Enum.at(scene.assigns.data.menus, state.open_menu)
+    item = Enum.at(menu.items, index)
+    {menu_x, _menu_width} = Enum.at(menu_positions(scene.assigns.data.menus), state.open_menu)
+    value = MenuItem.slider_value(item, PopupMenu.width(menu.items), cursor_x - menu_x)
+
+    set_slider_value(scene, index, value)
+  end
+
+  defp set_slider_value(scene, index, value) do
+    state = scene.assigns.menu_state
+    menu = Enum.at(scene.assigns.data.menus, state.open_menu)
+    item = Enum.at(menu.items, index)
+    value = value |> max(item.slider.min) |> min(item.slider.max)
+
+    if value == item.slider.value do
+      scene
+    else
+      items = List.update_at(menu.items, index, fn item -> put_in(item.slider.value, value) end)
+      menus = List.update_at(scene.assigns.data.menus, state.open_menu, &%{&1 | items: items})
+      data = %{scene.assigns.data | menus: menus}
+      send_parent_event(scene, {:volume_changed, value})
+
+      graph = render(data, state)
+      scene |> assign(data: data, graph: graph) |> push_graph(graph)
+    end
+  end
+
+  defp commit_slider(scene, index) do
+    state = scene.assigns.menu_state
+    menu = Enum.at(scene.assigns.data.menus, state.open_menu)
+    value = Enum.at(menu.items, index).slider.value
+    send_parent_event(scene, {:volume_committed, value})
+    put_menu_state(scene, %{state | tracking_slider: nil})
   end
 
   defp put_menu_state(scene, state) do

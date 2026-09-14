@@ -8,8 +8,8 @@ shared coarse-grained video, input, and lifecycle boundaries.
 ## Optional Nx renderers
 
 The package also contains frame-wide PPU and block APU renderers backed by Nx
-and EXLA. A consuming application opts in by including those optional
-dependencies directly and selecting the modules before the core compiles:
+and a configured compiler. A consuming application opts in by including those
+optional dependencies directly and selecting the modules before the core compiles:
 
 ```elixir
 # mix.exs
@@ -18,6 +18,8 @@ dependencies directly and selecting the modules before the core compiles:
 {:exla, "~> 1.0"}
 
 # config/config.exs
+config :nx, :default_defn_options, compiler: EXLA, client: :host
+
 config :beamicom_gbc,
   ppu_renderer: Beamicom.GB.Nx.PPURenderer,
   apu_renderer: Beamicom.GB.Nx.APUBlockRenderer

@@ -5,23 +5,69 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   alias Beamicom.Host.{AudioChunk, Output}
   alias Beamicom.Scenic.{AudioSink, Screen}
 
-  test "streams pre-encoded PCM chunks to its port without crashing" do
-    # Pipe to `cat` instead of ffplay so the test needs no audio device.
-    pid = start_supervised!({AudioSink, command: ["cat"], name: :test_audio_sink})
+  @discard_command ["sh", "-c", "cat >/dev/null"]
+
+  test "streams the first PCM chunk without a startup delay" do
+    pid = start_supervised!({AudioSink, command: @discard_command, name: :test_audio_sink})
 
     pcm = <<100::signed-little-16, -100::signed-little-16, 200::signed-little-16>>
     send(pid, {:audio, 3, pcm})
     send(pid, {:frame, 0})
     # Force the mailbox to drain (FIFO), then confirm the sink is still alive.
-    :sys.get_state(pid)
+    assert %{ready?: true, pending: []} = :sys.get_state(pid)
+    assert {:priority, :high} = Process.info(pid, :priority)
     assert Process.alive?(pid)
+  end
+
+  test "scales signed 16-bit PCM independently of channel layout" do
+    pcm =
+      <<-32_768::signed-little-16, -101::signed-little-16, 101::signed-little-16,
+        32_767::signed-little-16>>
+
+    assert AudioSink.scale_pcm(pcm, 100) == pcm
+
+    assert AudioSink.scale_pcm(pcm, 50) ==
+             <<-16_384::signed-little-16, -50::signed-little-16, 50::signed-little-16,
+               16_383::signed-little-16>>
+
+    assert AudioSink.scale_pcm(pcm, 0) == :binary.copy(<<0::signed-little-16>>, 4)
+  end
+
+  test "updates and validates volume while the sink is running" do
+    pid = start_supervised!({AudioSink, command: @discard_command, name: :volume_audio_sink})
+
+    assert :ok = AudioSink.set_volume(pid, 35)
+    assert :sys.get_state(pid).volume == 35
+
+    assert {:error, {:invalid_volume, 101}} = AudioSink.set_volume(pid, 101)
+    assert :sys.get_state(pid).volume == 35
+  end
+
+  test "restarts the external player after emulation is paused" do
+    pid = start_supervised!({AudioSink, command: @discard_command, name: :pausable_audio_sink})
+    first_port = :sys.get_state(pid).port
+
+    assert :ok = AudioSink.pause(pid)
+    assert %{port: nil, pending: [], pending_frames: 0} = :sys.get_state(pid)
+    refute Port.info(first_port)
+
+    send(pid, {:audio, 1, <<100::signed-little-16>>})
+    assert %{port: nil, pending: []} = :sys.get_state(pid)
+
+    assert :ok = AudioSink.resume(pid)
+    second_port = :sys.get_state(pid).port
+    assert is_port(second_port)
+    refute second_port == first_port
+
+    send(pid, {:audio, 1, <<-100::signed-little-16>>})
+    assert %{port: ^second_port, ready?: true, pending: []} = :sys.get_state(pid)
   end
 
   test "holds initial PCM until the prebuffer duration is full" do
     pid =
       start_supervised!(
         {AudioSink,
-         command: ["cat"],
+         command: @discard_command,
          name: :gated_audio_sink,
          audio: %{sample_rate: 1_000, channels: 1, sample_format: :s16le},
          prebuffer_ms: 2}
@@ -47,7 +93,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     pid =
       start_supervised!(
         {AudioSink,
-         command: ["cat"],
+         command: @discard_command,
          name: :test_gbc_audio_sink,
          output: output,
          audio: %{sample_rate: 44_100, channels: 2, sample_format: :s16le}}
@@ -115,6 +161,8 @@ defmodule Beamicom.Scenic.AudioSinkTest do
              )
 
     assert "audiotoolbox" in command
+    assert "direct" in command
+    refute Enum.any?(command, &String.contains?(&1, "asetnsamples"))
 
     assert ["ffplay" | slow_command] =
              AudioSink.default_command(
@@ -143,7 +191,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   end
 
   test "legacy audio start retains its registered process name" do
-    pid = start_supervised!({Beamicom.NES.AudioSink, command: ["cat"]})
+    pid = start_supervised!({Beamicom.NES.AudioSink, command: @discard_command})
     assert Process.whereis(Beamicom.NES.AudioSink) == pid
   end
 end

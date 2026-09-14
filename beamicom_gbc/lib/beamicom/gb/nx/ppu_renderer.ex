@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.GB.Nx.PPURenderer do
     @moduledoc """
     Frame-wide Game Boy renderer over frame-start PPU memory and timed writes.
@@ -384,7 +384,8 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(model, kind, args) do
-      key = {__MODULE__, model, kind, :frame_memory_v2}
+      key =
+        {__MODULE__, model, kind, :frame_memory_v2, Beamicom.GB.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->
@@ -402,7 +403,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
               {:cgb, _capacity} -> &render_cgb/6
             end
 
-          compiled = EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)
+          compiled = Beamicom.GB.Nx.compile(function, args)
           :persistent_term.put(key, compiled)
           compiled
 

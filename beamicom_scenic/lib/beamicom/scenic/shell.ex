@@ -192,6 +192,19 @@ defmodule Beamicom.Scenic.Shell do
     {:noreply, save_setting(scene, :audio, value, "audio")}
   end
 
+  def handle_event({:volume_changed, volume}, _from, scene)
+      when is_integer(volume) and volume >= 0 and volume <= 100 do
+    case Beamicom.Scenic.Host.set_volume(volume) do
+      :ok -> {:noreply, assign(scene, settings: %{scene.assigns.settings | volume: volume})}
+      {:error, reason} -> {:noreply, put_message(scene, "volume failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event({:volume_committed, volume}, _from, scene)
+      when is_integer(volume) and volume >= 0 and volume <= 100 do
+    {:noreply, save_setting(scene, :volume, volume, "volume")}
+  end
+
   def handle_event({:menu_opened, _menu}, _from, %{assigns: %{mode: :running}} = scene) do
     :ok = Beamicom.Scenic.Host.pause()
     {:noreply, scene}
@@ -820,11 +833,11 @@ defmodule Beamicom.Scenic.Shell do
       t: {22, 22},
       scissor: {width - 44, height - 44}
     )
+    |> add_logo(width, height, nil)
     |> MenuBar.add_to_graph(menu_data(width, nil, settings),
       id: :menu_bar,
       t: {44, 42}
     )
-    |> add_logo(width, height, nil)
     |> StatusBar.add_to_graph(
       status_data(width, nil, message),
       id: :status_bar,
@@ -1042,12 +1055,13 @@ defmodule Beamicom.Scenic.Shell do
   end
 
   defp setting_value(:none), do: "none"
-  defp setting_value(:composite), do: "Blargg composite"
+  defp setting_value(:composite), do: "Composite"
   defp setting_value(:svideo), do: "S-Video"
   defp setting_value(:rgb), do: "RGB"
   defp setting_value(:pixel_transparency), do: "pixel transparency"
   defp setting_value(true), do: "on"
   defp setting_value(false), do: "off"
+  defp setting_value(value) when is_integer(value), do: "#{value}%"
   defp setting_value(value) when is_binary(value), do: Path.basename(value)
 
   defp filter_option(:none), do: nil

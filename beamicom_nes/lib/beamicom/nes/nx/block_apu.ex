@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.BlockAPU do
     @moduledoc "Timestamped Nx audio blocks: vector waveform evaluation between control events, sequential filters."
     import Nx.Defn

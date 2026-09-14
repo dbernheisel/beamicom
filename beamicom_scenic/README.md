@@ -113,10 +113,11 @@ Beamicom.Scenic.play("/path/to/game.nes", video_filter: :composite, scale: 1)
 ```
 
 The Nx APU graph for either core is compiled while the machine starts. Scenic
-holds the initial PCM until the first video frame, so first-use PPU compilation
-cannot start and then starve the audio player. Later machines in the same BEAM
-instance reuse the compiled programs. Game Boy slices are paced from their
-actual PCM duration, including longer intervals while a ROM disables the LCD.
+starts PCM playback with the first audio chunk published after the first video
+frame, without adding a platform-specific startup delay. Later machines in the
+same BEAM instance reuse the compiled programs. Game Boy slices are paced from
+their actual PCM duration, including longer intervals while a ROM disables the
+LCD.
 
 To return to the native renderer defaults, unset the flag and rebuild the same
 dependencies:
@@ -169,16 +170,17 @@ The in-window Config menu writes JSON to
 `~/.config/beamicom/config.json`. It stores:
 
 - The initial folder for save-state open/save dialogs.
-- The default NES filter: None, Blargg Composite, S-Video, or RGB.
+- The default NES filter: None, Composite, S-Video, or RGB.
 - ROM-specific NES sprite lighting for verified light-source profiles.
 - NES enhancements for removing the eight-sprites-per-scanline limit and trimming the horizontal borders.
 - The default Game Boy/Game Boy Color filter: None or Pixel Transparency.
 - Whether framebuffer presentation is constrained to whole-number scaling stages.
 - Whether audio is enabled for newly loaded sessions.
+- The Scenic playback volume, from 0% through 100%.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "save_state_folder": "/home/player/.local/share/beamicom/states",
   "nes_video_filter": "composite",
   "nes_lighting": false,
@@ -186,7 +188,8 @@ The in-window Config menu writes JSON to
   "nes_trim_borders": false,
   "gbc_video_filter": "pixel_transparency",
   "integer_scaling": true,
-  "audio": true
+  "audio": true,
+  "volume": 100
 }
 ```
 
@@ -203,7 +206,8 @@ Filter and sprite-lighting changes apply immediately to a matching active system
 while preserving the current emulation state and paused/running mode. Lighting
 activates only when the loaded ROM has a verified profile. NES enhancement
 changes also apply immediately to the active runtime and survive Reset and
-video-filter changes. Audio changes apply on the next load or reset. Explicit
+video-filter changes. Volume changes apply immediately in Scenic and survive
+Reset; enabling or disabling audio applies on the next load or reset. Explicit
 options passed to `play/2` or `replace/2` take precedence over persisted defaults
 at startup.
 The save-state folder defaults to `$XDG_DATA_HOME/beamicom/states`, falling back
@@ -263,8 +267,8 @@ match the selected rate.
 The existing `Beamicom.NES.Scenic.play/2` entry point remains available and now
 selects either core too. The in-window Game menu can load media, reset or resume
 the current session, and save or load the self-contained PNG states supported by
-both cores. File selection uses an Objective-C NIF on macOS and an isolated
-Zenity process on Linux; it does not require Rust.
+both cores. File selection uses a C NIF with an isolated AppKit helper on macOS
+and an isolated Zenity process on Linux; it does not require Rust.
 
 The multi-system scene, audio sink, and asset library live under
 `Beamicom.Scenic`. Their former `Beamicom.NES` module names remain available as
@@ -294,7 +298,8 @@ Without an NTSC filter, the viewport uses 256×240 as the NES 1× stage and
 160×144 as the Game Boy 1× stage. CGB RGB24 is displayed directly; original
 Game Boy shade indices use the core's green display palette. Resizing centers
 the display and selects a new whole-number stage only after it fully fits. NES
-audio is 44.1 kHz mono and Game Boy audio is 44.1 kHz stereo.
+audio is 44.1 kHz mono; Game Boy and SNES audio are stereo. All three systems
+share Scenic's Config-menu volume slider.
 
 ### Controls (player 1)
 

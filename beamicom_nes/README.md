@@ -41,14 +41,14 @@ the frame boundary. DMC and Sunsoft 5B remain clocked in the live control state;
 their sample-boundary levels are included in the block so mapper timing remains
 exact. Optional Nx modules in this package can replace this renderer at compile time.
 
-Both renderers implement `Beamicom.NES.APURenderer`; Nx and EXLA are optional
+Both renderers implement `Beamicom.NES.APURenderer`; Nx and its compiler are optional
 dependencies. CPU-visible length status, DMC DMA, APU IRQs, and mapper expansion
 audio remain in the live native control state for every backend.
 
 ### Optional Nx renderers
 
-Applications that want EXLA acceleration include Nx and EXLA directly, then
-select the renderer modules in compile-time configuration:
+Applications that want Nx acceleration include Nx and a compiler directly, then
+select the compiler and renderer modules in configuration:
 
 ```elixir
 # mix.exs
@@ -57,13 +57,15 @@ select the renderer modules in compile-time configuration:
 {:exla, "~> 1.0"}
 
 # config/config.exs
+config :nx, :default_defn_options, compiler: EXLA, client: :host
+
 config :beamicom_nes,
   ppu_renderer: Beamicom.NES.Nx.PPURenderer,
   apu_renderer: Beamicom.NES.Nx.APUBlockRenderer
 ```
 
-The settings are consumed when `beamicom_nes` compiles, so backend selection
-adds no lookup to the frame hot path. Applications that omit Nx and EXLA compile
+The renderer settings are consumed when `beamicom_nes` compiles. Applications
+that omit Nx and its compiler compile
 only the native implementation. The Nx PPU performs frame-wide tile and sprite
 composition; the block APU batches timestamped 2A03 and MMC5 operations while
 the native control state preserves DMC DMA, IRQ, and mapper timing.

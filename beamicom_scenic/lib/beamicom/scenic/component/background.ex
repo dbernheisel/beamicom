@@ -100,7 +100,7 @@ defmodule Beamicom.Scenic.Component.Background do
 
   defp add_grid(graph, width, horizon) do
     Enum.reduce(0..(@grid_lines - 1), graph, fn index, graph ->
-      line(graph, {{22, horizon}, {width - 22, horizon}},
+      line(graph, {{0, horizon}, {width, horizon}},
         id: {:grid_line, index},
         stroke: {1, {24, 94, 202, 210}}
       )
@@ -146,7 +146,7 @@ defmodule Beamicom.Scenic.Component.Background do
         Graph.modify(
           graph,
           {:grid_line, index},
-          &line(&1, {{22, y}, {elem(size, 0) - 22, y}}, [])
+          &line(&1, {{0, y}, {elem(size, 0), y}}, [])
         )
       end)
 

@@ -33,7 +33,10 @@ defmodule Beamicom.Scenic.Menu do
             toggle: true,
             checked: settings.integer_scaling
           ),
-          item(:audio, "Audio", true, toggle: true, checked: settings.audio)
+          item(:audio, "Audio", true, toggle: true, checked: settings.audio),
+          item(:volume, "Volume", true,
+            slider: %{min: 0, max: 100, value: settings.volume, step: 1}
+          )
         ]
       }
     ]
@@ -87,7 +90,7 @@ defmodule Beamicom.Scenic.Menu do
   defp section(id, label), do: %{id: id, label: String.upcase(label), enabled: false}
 
   defp nes_filter_label(:none), do: "None"
-  defp nes_filter_label(:composite), do: "Blargg composite"
+  defp nes_filter_label(:composite), do: "Composite"
   defp nes_filter_label(:svideo), do: "S-Video"
   defp nes_filter_label(:rgb), do: "RGB"
 

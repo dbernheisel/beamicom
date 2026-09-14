@@ -14,9 +14,6 @@ defmodule Beamicom.NES.Nx.ZeldaLightingE2ETest do
     rupee:
       {Elixir.System.get_env("BEAMICOM_ZELDA_RUPEE_STATE") || "",
        "8c1b14ab538fb722aa6db11b5aebb7c3143ea9bc3c733ffd82c31f0e1f8804cb", 50, 48..63, 168..191},
-    clock_flash_link:
-      {Elixir.System.get_env("BEAMICOM_ZELDA_CLOCK_STATE") || "",
-       "c4443a8540df3358249e37b70bcf277abf1245ccf30619120aa2bef60b4f40c7", 4, 76..103, 188..215},
     enemy_fireball:
       {Elixir.System.get_env("BEAMICOM_ZELDA_FIREBALL_STATE") || "",
        "97d531081d2e75195953e15aca4bd38f7157fb2de0e0af6b7342d757d66ca2c2", 68, 48..67, 158..181},
@@ -131,9 +128,9 @@ defmodule Beamicom.NES.Nx.ZeldaLightingE2ETest do
   @tag skip:
          if(@supplemental_ready,
            do: false,
-           else: "set the BEAMICOM_ZELDA_{RUPEE,CLOCK,FIREBALL,HEART}_STATE checkpoints"
+           else: "set the BEAMICOM_ZELDA_{RUPEE,FIREBALL,HEART}_STATE checkpoints"
          )
-  test "rupee, clock-flashing Link, enemy fireball, and heart checkpoints emit",
+  test "rupee, enemy fireball, and heart checkpoints emit",
        %{lighting: lighting} do
     for {name, {path, sha256, tile, xs, ys}} <- @supplemental_states do
       message = Atom.to_string(name)

@@ -1,17 +1,17 @@
 # Optional GBC Nx renderers
 
-Optional EXLA frame and audio renderer modules in `beamicom_gbc`, covering both
+Optional Nx frame and audio renderer modules in `beamicom_gbc`, covering both
 DMG and CGB execution. The dependency-free core keeps LCD timing and memory access
 rules in Elixir. The renderer receives frame-start VRAM, OAM, and palette RAM,
 nine control bytes per scanline, and accepted visible memory writes tagged with
-the first line they affect. At VBlank one EXLA operation performs tile-map and
+the first line they affect. At VBlank one compiled Nx operation performs tile-map and
 pattern lookup, evaluates all 40 sprites with the first-10 rule, expands bit
 planes, and composes all 144×160 pixels.
 
 The default Nx audio renderer batches the already resolved channel levels. The
 core also contains `Beamicom.GB.Nx.APUSynthRenderer`, which accepts compact
 control epochs and keeps pulse timers, wave position, noise LFSR, and sample
-phase in EXLA across frames. It synthesizes every sample in an epoch as one
+phase on the configured Nx backend across frames. It synthesizes every sample in an epoch as one
 vector operation and is useful for further batching work, although it is slower
 for one emulator on the current CPU client.
 
@@ -26,6 +26,8 @@ configuration:
 config :beamicom_gbc,
   ppu_renderer: Beamicom.GB.Nx.PPURenderer,
   apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+
+config :nx, :default_defn_options, compiler: EXLA, client: :host
 ```
 
 Select full event-block synthesis explicitly:
@@ -34,16 +36,17 @@ Select full event-block synthesis explicitly:
 config :beamicom_gbc, apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 ```
 
-Changing a renderer requires recompiling `beamicom_gbc`. Machine creation and
-execution never query the application environment for a backend.
+Changing a renderer requires recompiling `beamicom_gbc`. The Nx compiler is
+selected when each graph is prepared, and the compiled cache is partitioned by
+compiler options so frame replay does not query configuration.
 
 The default APU graph and the common static/visible-write PPU startup graphs are
 compiled while the machine loads, before a host opens audio playback. Uncommon
 PPU event shapes remain cached on first use; the shared runtime treats such a
 compile as a clock discontinuity instead of emitting catch-up audio.
 
-Nx and EXLA remain optional dependencies of the core. PPU and APU programs resolve
-concurrently at the host output boundary, and EXLA-backed audio state is copied
+Nx and its compiler remain optional dependencies of the core. PPU and APU programs resolve
+concurrently at the host output boundary, and backend-resident audio state is copied
 through the renderer's snapshot/restore callbacks for portable save states.
 
 Compare implementations with the deterministic benchmark task:

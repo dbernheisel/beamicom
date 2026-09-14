@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.APUWrites do
     @moduledoc "Tensor register writes for block audio; -1 at $4015 represents a status read."
     import Nx.Defn

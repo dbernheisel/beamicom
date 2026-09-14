@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx do
     @moduledoc """
     Nx renderer selection and runtime video options for the NES core.
@@ -13,6 +13,22 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
 
     @doc "Returns the renderer modules selected when the NES core was compiled."
     def backends, do: %{ppu: @ppu_renderer, apu: @apu_renderer}
+
+    @doc false
+    def compile(function, args) do
+      Nx.Defn.compile(function, Enum.map(args, &Nx.to_template/1), compiler_options())
+    end
+
+    @doc false
+    def backend, do: Nx.Defn.to_backend(compiler_options())
+
+    @doc false
+    def compiler_options do
+      case Nx.Defn.default_options() do
+        [] -> fallback_compiler_options()
+        options -> options
+      end
+    end
 
     @doc """
     Build `Beamicom.NES.System.load/2` options for an Nx-rendered NTSC frame.
@@ -31,6 +47,10 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     @doc "Return NES capabilities adjusted for a runtime Blargg NTSC renderer."
     def video_capabilities(preset \\ :composite, options \\ []) do
       Beamicom.NES.System.capabilities(video_options(preset, options))
+    end
+
+    defp fallback_compiler_options do
+      if Code.ensure_loaded?(EXLA), do: [compiler: EXLA, client: :host], else: []
     end
   end
 end

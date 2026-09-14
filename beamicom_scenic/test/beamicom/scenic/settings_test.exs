@@ -21,14 +21,15 @@ defmodule Beamicom.Scenic.SettingsTest do
         nes_trim_borders: true,
         gbc_video_filter: :pixel_transparency,
         integer_scaling: false,
-        audio: false
+        audio: false,
+        volume: 35
     }
 
     assert :ok = Settings.save(settings, path)
     assert {:ok, ^settings} = Settings.load(path)
 
     decoded = path |> File.read!() |> :json.decode()
-    assert decoded["version"] == 1
+    assert decoded["version"] == 2
     assert decoded["nes_video_filter"] == "svideo"
     assert decoded["nes_lighting"] == true
     assert decoded["nes_remove_sprite_limit"] == true
@@ -36,6 +37,7 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert decoded["gbc_video_filter"] == "pixel_transparency"
     assert decoded["integer_scaling"] == false
     assert decoded["audio"] == false
+    assert decoded["volume"] == 35
   end
 
   test "missing JSON keys inherit defaults while invalid values are rejected" do
@@ -49,6 +51,7 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert settings.nes_remove_sprite_limit == false
     assert settings.nes_trim_borders == false
     assert settings.gbc_video_filter == :none
+    assert settings.volume == 100
 
     File.write!(path, ~s({"nes_video_filter":"crt-magic"}))
     assert {:error, {:invalid_setting, :nes_video_filter}} = Settings.load(path)
@@ -63,7 +66,8 @@ defmodule Beamicom.Scenic.SettingsTest do
       | nes_video_filter: :composite,
         nes_lighting: true,
         nes_remove_sprite_limit: true,
-        audio: false
+        audio: false,
+        volume: 40
     }
 
     assert Settings.next_nes_video_filter(:none) == :composite
@@ -73,6 +77,7 @@ defmodule Beamicom.Scenic.SettingsTest do
 
     options = Settings.player_options(:nes, [], settings)
     assert options[:audio] == false
+    assert options[:volume] == 40
     assert options[:video_filter] == :composite
     assert options[:nes_lighting] == true
     assert options[:enhancements] == [unlimited_sprites: true, hide_horizontal_overscan: false]
@@ -84,6 +89,7 @@ defmodule Beamicom.Scenic.SettingsTest do
           video_filter: :rgb,
           nes_lighting: false,
           audio: true,
+          volume: 75,
           enhancements: [unlimited_sprites: false]
         ],
         settings
@@ -92,7 +98,22 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert explicit[:video_filter] == :rgb
     assert explicit[:nes_lighting] == false
     assert explicit[:audio] == true
+    assert explicit[:volume] == 75
     assert explicit[:enhancements] == [unlimited_sprites: false]
+
+    snes_options = Settings.player_options(:snes, [], settings)
+    assert snes_options[:audio] == false
+    assert snes_options[:volume] == 40
+  end
+
+  test "volume must be an integer percentage" do
+    path = temporary_path()
+    File.mkdir_p!(Path.dirname(path))
+
+    for volume <- [-1, 101, 50.0, "50"] do
+      File.write!(path, :json.encode(%{"volume" => volume}))
+      assert {:error, {:invalid_setting, :volume}} = Settings.load(path)
+    end
   end
 
   defp temporary_path do

@@ -28,7 +28,8 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
         nes_trim_borders: false,
         gbc_video_filter: :pixel_transparency,
         integer_scaling: false,
-        audio: false
+        audio: false,
+        volume: 35
     }
 
     config = Menu.model(false, settings) |> Enum.find(&(&1.id == :config))
@@ -41,7 +42,8 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
              :nes,
              :gbc,
              :integer_scaling,
-             :audio
+             :audio,
+             :volume
            ]
 
     assert item(config, :save_state_folder).label == "State folder..."
@@ -60,6 +62,8 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
 
     assert Enum.find(filter_choices(nes_submenu, :nes_video_filter), & &1.checked).action ==
              {:nes_video_filter, :composite}
+
+    assert item_in(nes_submenu, {:nes_video_filter, :composite}).label == "Composite"
 
     assert Enum.map(filter_choices(gbc_submenu, :gbc_video_filter), & &1.action) == [
              {:gbc_video_filter, :none},
@@ -80,14 +84,24 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
     assert item(config, :integer_scaling).label == "Integer scaling"
     refute item(config, :integer_scaling).checked
     refute item(config, :audio).checked
+    assert item(config, :volume).slider == %{min: 0, max: 100, value: 35, step: 1}
 
     assert MenuItem.display_label(item(config, :integer_scaling)) ==
              "  Integer scaling  OFF"
 
     assert MenuItem.display_label(item(config, :audio)) == "  Audio  OFF"
+    assert MenuItem.display_label(item(config, :volume)) == "  Volume  35 pct"
+    assert MenuItem.slider_value(item(config, :volume), PopupMenu.width(config.items), 0) == 0
 
-    assert PopupMenu.width(nes_submenu) > PopupMenu.width(config.items)
+    assert MenuItem.slider_value(
+             item(config, :volume),
+             PopupMenu.width(config.items),
+             PopupMenu.width(config.items)
+           ) == 100
+
+    assert PopupMenu.width(nes_submenu) >= 286
     assert PopupMenu.width(gbc_submenu) >= 286
+    assert PopupMenu.width(config.items) >= 520
 
     {:ok, {Scenic.Assets.Static.Font, metrics}} =
       Scenic.Assets.Static.meta(:beamicom_ui)

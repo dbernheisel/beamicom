@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.GB.Nx.PixelTransparency do
     @moduledoc """
     Nx port of Matt Akins' [Pixel Transparency][pixel-transparency] shader.
@@ -354,9 +354,11 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(key, args) do
+      key = {key, Beamicom.GB.Nx.compiler_options()}
+
       case :persistent_term.get(key, nil) do
         nil ->
-          compiled = EXLA.compile(&render/4, Enum.map(args, &Nx.to_template/1), client: :host)
+          compiled = Beamicom.GB.Nx.compile(&render/4, args)
           :persistent_term.put(key, compiled)
           compiled
 

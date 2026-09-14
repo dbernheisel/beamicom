@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.BlarggNTSC.Renderer do
     @moduledoc """
     Runtime-selectable NES PPU renderer with Blargg NTSC presentation.
@@ -209,11 +209,12 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(args) do
-      key = {@compiled_key, Enum.map(args, &Nx.shape/1)}
+      key =
+        {@compiled_key, Beamicom.NES.Nx.compiler_options(), Enum.map(args, &Nx.shape/1)}
 
       case :persistent_term.get(key, nil) do
         nil ->
-          fun = EXLA.compile(&add_native_glow/3, Enum.map(args, &Nx.to_template/1), client: :host)
+          fun = Beamicom.NES.Nx.compile(&add_native_glow/3, args)
           :persistent_term.put(key, fun)
           fun
 

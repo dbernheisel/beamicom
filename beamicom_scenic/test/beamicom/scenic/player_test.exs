@@ -5,6 +5,8 @@ defmodule Beamicom.Scenic.PlayerTest do
 
   alias Beamicom.Scenic.{Host, Player, SaveState, Shell, Shutdown}
 
+  @discard_audio_command ["sh", "-c", "cat >/dev/null"]
+
   setup do
     original_viewport = Application.fetch_env!(:beamicom_scenic, :viewport)
     Application.put_env(:beamicom_scenic, :viewport, Keyword.put(original_viewport, :drivers, []))
@@ -53,19 +55,19 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert eventually(fn -> is_pid(:sys.get_state(host).shell) end)
     shell = :sys.get_state(host).shell
 
-    [background] =
-      shell
-      |> :sys.get_state()
-      |> Map.fetch!(:assigns)
-      |> Map.fetch!(:graph)
-      |> Scenic.Graph.get(:background)
+    graph = shell |> :sys.get_state() |> Map.fetch!(:assigns) |> Map.fetch!(:graph)
+    [background] = Scenic.Graph.get(graph, :background)
+
+    assert draw_order(graph, :logo) < draw_order(graph, :menu_bar)
 
     assert background.data |> elem(1) == {916, 756}
     assert background.styles.scissor == {916, 756}
     assert background.transforms.translate == {22, 22}
 
     {:ok, [background_pid]} = Scenic.Scene.child(:sys.get_state(shell), :background)
-    started_at = :sys.get_state(background_pid).assigns.started_at
+    background_state = :sys.get_state(background_pid)
+    started_at = background_state.assigns.started_at
+    assert_grid_width(background_state.assigns.graph, 916)
 
     assert {:noreply, pending_resize} =
              Shell.handle_input(
@@ -88,6 +90,7 @@ defmodule Beamicom.Scenic.PlayerTest do
            end)
 
     assert :sys.get_state(background_pid).assigns.started_at == started_at
+    assert_grid_width(:sys.get_state(background_pid).assigns.graph, 1_056)
 
     assert :ok = Beamicom.Scenic.start()
     assert Process.whereis(Host) == host
@@ -148,6 +151,29 @@ defmodule Beamicom.Scenic.PlayerTest do
     end
 
     assert {:error, :not_running} = Beamicom.Scenic.status()
+  end
+
+  test "applies volume to the active system-neutral audio sink", %{path: path} do
+    assert :ok =
+             Beamicom.Scenic.play(path,
+               audio_command: @discard_audio_command,
+               speed: 0.01,
+               volume: 80
+             )
+
+    player = Process.whereis(Player)
+    audio = :sys.get_state(player).audio
+
+    assert %{volume: 80} = Beamicom.Scenic.status()
+    assert :sys.get_state(audio).volume == 80
+
+    assert :ok = Host.set_volume(25)
+    assert :sys.get_state(audio).volume == 25
+    assert :sys.get_state(player).volume == 25
+    assert :sys.get_state(Host).session.options[:volume] == 25
+
+    assert {:error, {:invalid_option, :volume}} = Host.set_volume(101)
+    assert :sys.get_state(audio).volume == 25
   end
 
   test "legacy play facade routes NES and owns its lifecycle" do
@@ -317,6 +343,26 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert Process.alive?(state.runtime)
     assert Process.alive?(:sys.get_state(Host).scenic)
     assert %{system: :gbc, video: %{width: 160, height: 144}} = Beamicom.Scenic.status()
+  end
+
+  test "pause and resume restart the external audio player", %{path: path} do
+    assert :ok =
+             Beamicom.Scenic.play(path,
+               audio_command: ["sh", "-c", "cat >/dev/null"],
+               speed: 0.01
+             )
+
+    audio = :sys.get_state(Player).audio
+    first_port = :sys.get_state(audio).port
+
+    assert :ok = Beamicom.Scenic.pause()
+    assert %{port: nil} = :sys.get_state(audio)
+    refute Port.info(first_port)
+
+    assert :ok = Beamicom.Scenic.resume()
+    second_port = :sys.get_state(audio).port
+    assert is_port(second_port)
+    refute second_port == first_port
   end
 
   test "accepts the Game Boy Pixel Transparency presentation filter", %{path: path} do
@@ -631,6 +677,18 @@ defmodule Beamicom.Scenic.PlayerTest do
   defp links(pid) do
     {:links, links} = Process.info(pid, :links)
     Enum.sort(links)
+  end
+
+  defp draw_order(graph, id) do
+    [uid] = Map.fetch!(graph.ids, id)
+    Enum.find_index(graph.primitives[0].data, &(&1 == uid))
+  end
+
+  defp assert_grid_width(graph, width) do
+    for index <- 0..10 do
+      [line] = Scenic.Graph.get(graph, {:grid_line, index})
+      assert {{0, _}, {^width, _}} = line.data
+    end
   end
 
   defp await_buttons(runtime, expected, attempts \\ 100)

@@ -1,10 +1,10 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.APUBlockRenderer do
     @moduledoc """
     Frame-block Nx renderer for the 2A03, MMC5, and mapper expansion audio.
 
     The native core supplies timestamped register operations while the oscillator
-    and filter state remains resident on EXLA between calls.
+    and filter state remains resident on the configured Nx backend between calls.
     """
 
     alias Beamicom.NES.Nx.{APU, BlockAPU}
@@ -18,10 +18,10 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       state =
         native_apu
         |> APU.pack()
-        |> Nx.backend_copy({EXLA.Backend, client: :host})
+        |> Nx.backend_copy(backend())
 
       # Compile while the console is loading. Scenic starts its audio player only
-      # after load returns, so first-use EXLA compilation cannot starve the player
+      # after load returns, so first-use Nx compilation cannot starve the player
       # or make the runtime enqueue a catch-up burst.
       compiled([
         state,
@@ -38,7 +38,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     @impl true
     def snapshot(state), do: Nx.backend_copy(state, Nx.BinaryBackend)
     @impl true
-    def restore(state), do: Nx.backend_copy(state, {EXLA.Backend, client: :host})
+    def restore(state), do: Nx.backend_copy(state, backend())
 
     @impl true
     def render(state, events, cycles, sample_inputs) do
@@ -54,7 +54,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           type: :f64
         )
 
-      resident = fn tensor -> Nx.backend_copy(tensor, {EXLA.Backend, client: :host}) end
+      resident = fn tensor -> Nx.backend_copy(tensor, backend()) end
 
       args = [
         state,
@@ -80,12 +80,13 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       do: addr in 0x4000..0x4013 or addr in [0x4015, 0x4017] or addr in 0x5000..0x5015
 
     defp compiled(args) do
-      case :persistent_term.get(@compiled_key, nil) do
-        nil ->
-          fun =
-            EXLA.compile(&BlockAPU.run/6, Enum.map(args, &Nx.to_template/1), client: :host)
+      key = {@compiled_key, Beamicom.NES.Nx.compiler_options()}
 
-          :persistent_term.put(@compiled_key, fun)
+      case :persistent_term.get(key, nil) do
+        nil ->
+          fun = Beamicom.NES.Nx.compile(&BlockAPU.run/6, args)
+
+          :persistent_term.put(key, fun)
           fun
 
         fun ->
@@ -101,5 +102,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       end)
       |> Enum.unzip()
     end
+
+    defp backend, do: Beamicom.NES.Nx.backend()
   end
 end

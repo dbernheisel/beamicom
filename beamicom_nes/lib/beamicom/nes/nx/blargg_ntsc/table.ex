@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   # SPDX-License-Identifier: LGPL-2.1-or-later
 
   defmodule Beamicom.NES.Nx.BlarggNTSC.Table do

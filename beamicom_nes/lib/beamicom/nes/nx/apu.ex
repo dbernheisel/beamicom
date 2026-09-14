@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.APU do
     @moduledoc "Resident numeric 2A03/MMC5 oscillator, sequencer, mixer, and filter state. DMC levels are supplied by the native control path."
     import Nx.Defn

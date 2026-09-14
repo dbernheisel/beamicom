@@ -7,7 +7,7 @@ defmodule Beamicom.Scenic.Player do
   alias Beamicom.GB.ShareImage, as: GBShareImage
   alias Beamicom.NES.{PPU, ShareImage}
   alias Beamicom.NES.Output, as: NESOutput
-  alias Beamicom.Scenic.{Core, Runtime, SaveState, Settings}
+  alias Beamicom.Scenic.{AudioSink, Core, Runtime, SaveState, Settings}
 
   def start(options), do: GenServer.start(__MODULE__, options, name: __MODULE__)
   def start_link(options), do: GenServer.start_link(__MODULE__, options, name: __MODULE__)
@@ -19,6 +19,9 @@ defmodule Beamicom.Scenic.Player do
 
   def set_enhancement(server \\ __MODULE__, enhancement, enabled),
     do: GenServer.call(server, {:set_enhancement, enhancement, enabled})
+
+  def set_volume(server \\ __MODULE__, volume),
+    do: GenServer.call(server, {:set_volume, volume})
 
   def prepare_reconfigure(server \\ __MODULE__, options),
     do: GenServer.call(server, {:prepare_reconfigure, options}, :infinity)
@@ -34,9 +37,10 @@ defmodule Beamicom.Scenic.Player do
          player_options =
            Settings.player_options(core.id, requested_options, Settings.load_or_defaults()),
          speed = Keyword.get(player_options, :speed, 1.0),
+         volume = Keyword.get(player_options, :volume, 100),
          {:ok, load_options, video_filter} <- load_options(core, player_options),
          scale = Keyword.get(player_options, :scale, default_scale(core, video_filter)),
-         :ok <- validate_options(scale, speed),
+         :ok <- validate_options(scale, speed, volume),
          :ok <- validate_scale(scale, core, video_filter),
          core = configure_core(core, load_options),
          {:ok, machine} <- load(core, path, media, load_options),
@@ -52,6 +56,7 @@ defmodule Beamicom.Scenic.Player do
          rom_hash: rom_hash,
          scale: scale,
          speed: speed,
+         volume: volume,
          video_filter: video_filter,
          lighting: lighting
        }}
@@ -71,7 +76,13 @@ defmodule Beamicom.Scenic.Player do
       end
 
     with {:ok, prepared} <- prepared_result,
-         %{core: core, machine: machine, speed: speed, options: player_options} <- prepared,
+         %{
+           core: core,
+           machine: machine,
+           speed: speed,
+           volume: volume,
+           options: player_options
+         } <- prepared,
          {:ok, output, owned_output} <- start_output(core),
          {:ok, audio} <- start_audio(core, output, speed, player_options),
          {:ok, runtime} <- start_runtime(core, machine, output, speed, player_options),
@@ -87,6 +98,7 @@ defmodule Beamicom.Scenic.Player do
          core: core,
          scale: prepared.scale,
          speed: speed,
+         volume: volume,
          video_filter: prepared.video_filter,
          lighting: prepared.lighting,
          output: output,
@@ -117,6 +129,7 @@ defmodule Beamicom.Scenic.Player do
        paused: state.paused,
        scale: state.scale,
        speed: state.speed,
+       volume: state.volume,
        video_filter: filter_name(state.video_filter),
        lighting: state.lighting,
        video: %{
@@ -158,6 +171,19 @@ defmodule Beamicom.Scenic.Player do
   def handle_call({:set_enhancement, _enhancement, _enabled}, _from, state),
     do: {:reply, {:error, :unsupported_system}, state}
 
+  def handle_call({:set_volume, volume}, _from, state)
+      when is_integer(volume) and volume >= 0 and volume <= 100 do
+    :ok = set_audio_volume(state.audio, volume)
+    options = Keyword.put(state.options, :volume, volume)
+    requested_options = Keyword.put(state.requested_options, :volume, volume)
+
+    {:reply, {:ok, requested_options},
+     %{state | volume: volume, options: options, requested_options: requested_options}}
+  end
+
+  def handle_call({:set_volume, _volume}, _from, state),
+    do: {:reply, {:error, {:invalid_option, :volume}}, state}
+
   def handle_call({:prepare_reconfigure, overrides}, _from, state)
       when is_list(overrides) do
     requested_options = Keyword.merge(state.requested_options, overrides)
@@ -166,9 +192,10 @@ defmodule Beamicom.Scenic.Player do
       Settings.player_options(state.core.id, requested_options, Settings.load_or_defaults())
 
     with speed = Keyword.get(player_options, :speed, 1.0),
+         volume = Keyword.get(player_options, :volume, 100),
          {:ok, load_options, video_filter} <- load_options(state.core, player_options),
          scale = Keyword.get(player_options, :scale, default_scale(state.core, video_filter)),
-         :ok <- validate_options(scale, speed),
+         :ok <- validate_options(scale, speed, volume),
          :ok <- validate_scale(scale, state.core, video_filter),
          core = configure_core(state.core, load_options),
          {:ok, machine} <- snapshot_machine(state, load_options),
@@ -185,6 +212,7 @@ defmodule Beamicom.Scenic.Player do
           rom_hash: state.rom_hash,
           scale: scale,
           speed: speed,
+          volume: volume,
           video_filter: video_filter,
           lighting: lighting
         }}, state}
@@ -230,6 +258,7 @@ defmodule Beamicom.Scenic.Player do
 
   def handle_call(:pause, _from, state) do
     clear_input(state.core, state.runtime)
+    :ok = pause_audio(state.audio)
     runtime_action(state.core, state.runtime, :pause)
     {:reply, :ok, %{state | paused: true, controller_buttons: %{}}}
   end
@@ -237,6 +266,7 @@ defmodule Beamicom.Scenic.Player do
   def handle_call(:resume, _from, %{paused: false} = state), do: {:reply, :ok, state}
 
   def handle_call(:resume, _from, state) do
+    :ok = resume_audio(state.audio)
     runtime_action(state.core, state.runtime, :resume)
     {:reply, :ok, %{state | paused: false}}
   end
@@ -304,11 +334,19 @@ defmodule Beamicom.Scenic.Player do
     end
   end
 
-  defp validate_options(scale, speed) do
+  defp validate_options(scale, speed, volume) do
     cond do
-      not is_number(scale) or scale < 1 -> {:error, {:invalid_option, :scale}}
-      not is_number(speed) or speed <= 0 -> {:error, {:invalid_option, :speed}}
-      true -> :ok
+      not is_number(scale) or scale < 1 ->
+        {:error, {:invalid_option, :scale}}
+
+      not is_number(speed) or speed <= 0 ->
+        {:error, {:invalid_option, :speed}}
+
+      not is_integer(volume) or volume < 0 or volume > 100 ->
+        {:error, {:invalid_option, :volume}}
+
+      true ->
+        :ok
     end
   end
 
@@ -547,7 +585,12 @@ defmodule Beamicom.Scenic.Player do
 
   defp start_audio(core, output, speed, options) do
     if Keyword.get(options, :audio, true) do
-      audio_options = [output: output, audio: core.capabilities.audio, speed: speed]
+      audio_options = [
+        output: output,
+        audio: core.capabilities.audio,
+        speed: speed,
+        volume: Keyword.get(options, :volume, 100)
+      ]
 
       audio_options =
         case Keyword.fetch(options, :audio_command) do
@@ -555,7 +598,7 @@ defmodule Beamicom.Scenic.Player do
           :error -> audio_options
         end
 
-      case Beamicom.Scenic.AudioSink.start_link(audio_options) do
+      case AudioSink.start_link(audio_options) do
         {:ok, pid} -> {:ok, pid}
         :ignore -> {:ok, nil}
         {:error, reason} -> {:error, {:audio_start_failed, reason}}
@@ -564,6 +607,15 @@ defmodule Beamicom.Scenic.Player do
       {:ok, nil}
     end
   end
+
+  defp pause_audio(nil), do: :ok
+  defp pause_audio(audio), do: AudioSink.pause(audio)
+
+  defp resume_audio(nil), do: :ok
+  defp resume_audio(audio), do: AudioSink.resume(audio)
+
+  defp set_audio_volume(nil, _volume), do: :ok
+  defp set_audio_volume(audio, volume), do: AudioSink.set_volume(audio, volume)
 
   defp start_runtime(%Core{runtime: :nes}, machine, _output, speed, options) do
     Beamicom.NES.Runtime.start_link(

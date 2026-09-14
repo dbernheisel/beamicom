@@ -1,7 +1,7 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.GB.Nx.APUBlockRenderer do
     @moduledoc """
-    Frame-block EXLA mixer for DMG/CGB stereo routing and master volume.
+    Frame-block Nx mixer for DMG/CGB stereo routing and master volume.
 
     The native APU retains oscillator, sequencer, length, envelope, sweep, wave
     RAM, and LFSR state. It emits compact channel-level rows which this module
@@ -16,7 +16,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     @impl true
     def prepare(%Beamicom.GB.APU{}) do
       # Compile while the machine is loading, before Scenic opens its audio
-      # stream. The first rendered frame can then mix without an EXLA cold stall.
+      # stream. The first rendered frame can then mix without an Nx cold stall.
       compiled([Nx.template({@capacity, 6}, :s16)])
       nil
     end
@@ -34,7 +34,13 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
         |> :lists.reverse()
         |> Enum.map(fn {chunk, size} ->
           padded = chunk <> :binary.copy(<<0::size(6 * 16)>>, @capacity - size)
-          input = padded |> Nx.from_binary(:s16) |> Nx.reshape({@capacity, 6})
+
+          input =
+            padded
+            |> Nx.from_binary(:s16)
+            |> Nx.reshape({@capacity, 6})
+            |> Nx.backend_copy(backend())
+
           args = [input]
           pcm = compiled(args) |> apply(args)
           pcm |> Nx.to_binary() |> binary_part(0, size * 4)
@@ -82,11 +88,11 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(args) do
-      key = {__MODULE__, :compiled}
+      key = {__MODULE__, :compiled, Beamicom.GB.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->
-          compiled = EXLA.compile(&mix/1, Enum.map(args, &Nx.to_template/1), client: :host)
+          compiled = Beamicom.GB.Nx.compile(&mix/1, args)
           :persistent_term.put(key, compiled)
           compiled
 
@@ -97,5 +103,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
 
     defnp(band(a, b), do: Nx.bitwise_and(a, b))
     defnp(shr(a, b), do: Nx.right_shift(a, b))
+
+    defp backend, do: Beamicom.GB.Nx.backend()
   end
 end

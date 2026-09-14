@@ -1,7 +1,7 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.GB.Nx.APUSynthRenderer do
     @moduledoc """
-    Event-block EXLA synthesizer for both Game Boy pulse channels, wave, and noise.
+    Event-block Nx synthesizer for both Game Boy pulse channels, wave, and noise.
 
     The core supplies control-state epochs bounded by register and frame-sequencer
     changes. Oscillator timers, phase, LFSR state, stereo routing, and PCM remain
@@ -98,7 +98,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
         noise_trigger: t4
       }
       |> tensor_state()
-      |> Nx.backend_copy({EXLA.Backend, client: :host})
+      |> Nx.backend_copy(backend())
     end
 
     @impl true
@@ -109,10 +109,11 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
         do: raise("Game Boy APU event timeline mismatch")
 
       padded = segments ++ List.duplicate(List.duplicate(0, @width), @capacity - length(segments))
-      rows = Nx.tensor(padded, type: :s32) |> Nx.backend_copy({EXLA.Backend, client: :host})
+      rows = Nx.tensor(padded, type: :s32) |> Nx.backend_copy(backend())
 
       count =
-        Nx.tensor(length(segments), type: :s32) |> Nx.backend_copy({EXLA.Backend, client: :host})
+        Nx.tensor(length(segments), type: :s32)
+        |> Nx.backend_copy(backend())
 
       args = [state, rows, count]
       kind = if expected_samples <= @steady_samples, do: :steady, else: :boot
@@ -126,7 +127,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     def snapshot(state), do: Nx.backend_copy(state, Nx.BinaryBackend)
 
     @impl true
-    def restore(state), do: Nx.backend_copy(state, {EXLA.Backend, client: :host})
+    def restore(state), do: Nx.backend_copy(state, backend())
 
     defn run(state, rows, row_count) do
       pcm = Nx.broadcast(Nx.tensor(0, type: :s16), {@steady_samples, 2})
@@ -352,12 +353,12 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
       do: Map.new(state, fn {key, value} -> {key, Nx.tensor(value, type: :s32)} end)
 
     defp compiled(kind, args) do
-      key = {__MODULE__, kind, :compiled}
+      key = {__MODULE__, kind, :compiled, Beamicom.GB.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->
           function = if kind == :steady, do: &run/3, else: &run_boot/3
-          compiled = EXLA.compile(function, Enum.map(args, &Nx.to_template/1), client: :host)
+          compiled = Beamicom.GB.Nx.compile(function, args)
           :persistent_term.put(key, compiled)
           compiled
 
@@ -365,5 +366,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           compiled
       end
     end
+
+    defp backend, do: Beamicom.GB.Nx.backend()
   end
 end

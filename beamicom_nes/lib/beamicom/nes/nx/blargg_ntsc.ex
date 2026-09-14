@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   # SPDX-License-Identifier: LGPL-2.1-or-later
 
   defmodule Beamicom.NES.Nx.BlarggNTSC do
@@ -7,7 +7,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
 
     The setup code builds the original phase/alignment lookup table once. Frames
     remain native NES palette indices until this module applies the selected table
-    in one fixed-shape EXLA call, producing 602x240 RGB24 output.
+    in one fixed-shape Nx call, producing 602x240 RGB24 output.
 
     The port is derived from nes_ntsc 0.2.2 and is LGPL-2.1-or-later.
     """
@@ -33,14 +33,14 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
 
     @type state :: %{preset: atom(), merge_fields: boolean(), table: Nx.Tensor.t()}
 
-    @doc "Prepare an EXLA-resident lookup table for a standard nes_ntsc preset."
+    @doc "Prepare a backend-resident lookup table for a standard nes_ntsc preset."
     @spec prepare(keyword()) :: state()
     def prepare(options \\ []) do
       preset = Keyword.get(options, :preset, :composite)
       overrides = options |> Keyword.delete(:preset) |> Map.new()
       setup = Map.merge(Table.preset(preset), overrides)
       merge_fields = setup.merge_fields
-      key = {__MODULE__, :table, @kernel_format, setup}
+      key = {__MODULE__, :table, @kernel_format, Beamicom.NES.Nx.backend(), setup}
 
       table =
         case :persistent_term.get(key, nil) do
@@ -50,7 +50,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
               |> Table.generate()
               |> compact_table()
               |> Nx.reshape({@table_size})
-              |> Nx.backend_copy({EXLA.Backend, client: :host})
+              |> Nx.backend_copy(Beamicom.NES.Nx.backend())
 
             :persistent_term.put(key, table)
             table
@@ -191,9 +191,11 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     end
 
     defp compiled(key, args) do
+      key = {key, Beamicom.NES.Nx.compiler_options()}
+
       case :persistent_term.get(key, nil) do
         nil ->
-          fun = EXLA.compile(&render/7, Enum.map(args, &Nx.to_template/1), client: :host)
+          fun = Beamicom.NES.Nx.compile(&render/7, args)
           :persistent_term.put(key, fun)
           fun
 

@@ -1,4 +1,4 @@
-if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
+if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.Lighting do
     @moduledoc """
     Verified, ROM-specific lighting profiles for the Nx NES renderers.
@@ -24,7 +24,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           tile_space: :ppu,
           tiles: [92, 93, 94, 95],
           subpalettes: [2],
-          color_slots: [2, 3],
+          color_slots: [1, 2, 3],
           intensity: 1.0,
           flicker: :organic
         ],
@@ -56,21 +56,21 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
           intensity: 0.6
         ],
         [
-          id: :clock_flash_link,
-          layer: :sprite,
-          tile_space: :ppu,
-          tiles: Enum.to_list(0..19),
-          subpalettes: [1, 2],
-          color_slots: [2, 3],
-          intensity: 1.0
-        ],
-        [
           id: :enemy_fireball,
           layer: :sprite,
           tile_space: :ppu,
           tiles: [68, 69],
           subpalettes: [0, 1, 2, 3],
           color_slots: [2, 3],
+          intensity: 1.0
+        ],
+        [
+          id: :enemy_death,
+          layer: :sprite,
+          tile_space: :ppu,
+          tiles: [98, 100],
+          subpalettes: [0, 1, 2, 3],
+          color_slots: [1, 2, 3],
           intensity: 1.0
         ],
         [
@@ -88,7 +88,7 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
     @doc "SHA-256 of parsed PRG plus CHR data for the verified Zelda ROM."
     def zelda_hash, do: @zelda_hash
 
-    @doc "The verified Zelda flame, sword, beam, and beam-particle profile."
+    @doc "The verified Zelda emissive-sprite profile."
     def zelda, do: @zelda
 
     @doc "Return the verified lighting profile for an iNES ROM binary."
