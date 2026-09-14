@@ -40,6 +40,10 @@ defmodule Beamicom.SNES.Machine do
     {frames, pcm, %{machine | bus: bus}}
   end
 
+  @doc "Sets one standard SNES joypad report without advancing emulated time."
+  def set_joypad(%__MODULE__{bus: bus} = machine, port, report),
+    do: %{machine | bus: Bus.set_joypad(bus, port, report)}
+
   defp next_frame(cpu, bus, _target, 0, machine),
     do: {:error, :frame_timeout, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
 

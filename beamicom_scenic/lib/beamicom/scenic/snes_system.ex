@@ -18,6 +18,20 @@ defmodule Beamicom.Scenic.SNESSystem do
   @width 256
   @height 224
   @audio_rate 32_000
+  @button_bits %{
+    b: 0x8000,
+    y: 0x4000,
+    select: 0x2000,
+    start: 0x1000,
+    up: 0x0800,
+    down: 0x0400,
+    left: 0x0200,
+    right: 0x0100,
+    a: 0x0080,
+    x: 0x0040,
+    l: 0x0020,
+    r: 0x0010
+  }
 
   defmodule State do
     @moduledoc false
@@ -67,6 +81,11 @@ defmodule Beamicom.Scenic.SNESSystem do
   end
 
   @impl true
+  def set_input(%State{} = state, %Input{port: 1, controls: controls}) do
+    report = Enum.reduce(controls, 0, &Bitwise.bor(&2, Map.get(@button_bits, &1, 0)))
+    %{state | machine: Machine.set_joypad(state.machine, 1, report)}
+  end
+
   def set_input(%State{} = state, %Input{}), do: state
 
   defp video_frame(frame, metadata \\ []) do

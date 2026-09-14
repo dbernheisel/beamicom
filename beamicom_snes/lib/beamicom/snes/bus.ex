@@ -3,8 +3,7 @@ defmodule Beamicom.SNES.Bus do
   Initial SNES CPU bus with master-clock-priced accesses.
 
   Implemented regions are 128 KiB S-WRAM and its low-bank mirrors, cartridge
-  ROM, open-bus MMIO, and MEMSEL (`$420D`). JOYSER reads are already assigned
-  their 12-master-clock speed even though controller serialization is pending.
+  ROM, controller ports, open-bus MMIO, and MEMSEL (`$420D`).
   """
 
   import Bitwise
@@ -25,7 +24,7 @@ defmodule Beamicom.SNES.Bus do
     hdma_do_transfer?: false
   }
 
-  @enforce_keys [:cartridge, :wram, :sram, :sram_size, :timing, :ppu, :apu]
+  @enforce_keys [:cartridge, :wram, :sram, :timing, :ppu, :apu]
   defstruct @enforce_keys ++
               [
                 fast_rom?: false,
@@ -42,6 +41,15 @@ defmodule Beamicom.SNES.Bus do
                 quotient: 0,
                 product_remainder: 0,
                 wmadd: 0,
+                joypad: %{
+                  buttons: {0, 0},
+                  shift: {0, 0},
+                  latch?: false,
+                  auto?: false,
+                  results: {0, 0, 0, 0},
+                  busy_from: 0,
+                  busy_until: 0
+                },
                 dma_channels: nil,
                 hdma_enable: 0,
                 apu_pending_clocks: 0,
@@ -61,7 +69,6 @@ defmodule Beamicom.SNES.Bus do
       cartridge: cartridge,
       wram: :array.new(@wram_size, default: 0, fixed: true),
       sram: :array.new(sram_size, default: 0xFF, fixed: true),
-      sram_size: sram_size,
       timing: timing,
       ppu: PPU.new(),
       apu: APU.new(),
@@ -89,6 +96,9 @@ defmodule Beamicom.SNES.Bus do
 
       {:wram_port, 0x2180} ->
         :array.get(bus.wmadd, bus.wram)
+
+      {:joy_serial, port} ->
+        joy_serial_value(bus, port)
 
       {:dma, channel, register} ->
         dma_register(elem(bus.dma_channels, channel), register)
@@ -137,6 +147,9 @@ defmodule Beamicom.SNES.Bus do
 
         {:wram_port, register} ->
           write_wram_port(bus, register, value)
+
+        {:joy_serial, 0} ->
+          write_joy_latch(bus, value)
 
         {:dma, channel, register} ->
           write_dma_register(bus, channel, register, value)
@@ -278,6 +291,9 @@ defmodule Beamicom.SNES.Bus do
         {:wram_port, register} ->
           write_wram_port(bus, register, value)
 
+        {:joy_serial, 0} ->
+          write_joy_latch(bus, value)
+
         {:dma, channel, register} ->
           write_dma_register(bus, channel, register, value)
 
@@ -348,6 +364,20 @@ defmodule Beamicom.SNES.Bus do
     {frames, pcm, %{bus | apu: apu}}
   end
 
+  @doc "Sets one standard controller's 16-bit SNES button report."
+  @spec set_joypad(t(), 1 | 2, non_neg_integer()) :: t()
+  def set_joypad(%__MODULE__{} = bus, port, report) when port in [1, 2] do
+    buttons = put_elem(bus.joypad.buttons, port - 1, report &&& 0xFFFF)
+    joypad = %{bus.joypad | buttons: buttons}
+    joypad = if joypad.latch?, do: %{joypad | shift: buttons}, else: joypad
+    %{bus | joypad: joypad}
+  end
+
+  @doc "Returns one standard controller's current 16-bit button report."
+  @spec joypad_report(t(), 1 | 2) :: non_neg_integer()
+  def joypad_report(%__MODULE__{} = bus, port) when port in [1, 2],
+    do: elem(bus.joypad.buttons, port - 1)
+
   @doc "Advances an arbitrary number of master clocks through all native devices."
   @spec advance_master(t(), non_neg_integer()) :: t()
   def advance_master(%__MODULE__{} = bus, clocks)
@@ -411,7 +441,11 @@ defmodule Beamicom.SNES.Bus do
         {:dma, div(offset - 0x4300, 0x10), rem(offset, 0x10)}
 
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset in 0x2000..0x5FFF ->
-        :mmio
+        case offset do
+          0x4016 -> {:joy_serial, 0}
+          0x4017 -> {:joy_serial, 1}
+          _other -> :mmio
+        end
 
       true ->
         :rom
@@ -440,6 +474,8 @@ defmodule Beamicom.SNES.Bus do
     {value, %{bus | wmadd: bus.wmadd + 1 &&& 0x1FFFF}}
   end
 
+  defp read_region(bus, {:joy_serial, port}, _address), do: read_joy_serial(bus, port)
+
   defp read_region(bus, :rom, address) do
     {Cartridge.read_or(bus.cartridge, address, bus.open_bus), bus}
   end
@@ -463,6 +499,19 @@ defmodule Beamicom.SNES.Bus do
     hblank? = bus.timing.hclock < 88 or bus.timing.hclock >= 1112
     value = if(Timing.vblank?(bus.timing), do: 0x80, else: 0)
     value = if(hblank?, do: value ||| 0x40, else: value)
+
+    auto_read? =
+      bus.timing.master_clocks >= bus.joypad.busy_from and
+        bus.timing.master_clocks < bus.joypad.busy_until
+
+    value = if(auto_read?, do: value ||| 0x01, else: value)
+    {value, bus}
+  end
+
+  defp read_region(bus, {:cpu_io, register}, _address) when register in 0x4218..0x421F do
+    index = div(register - 0x4218, 2)
+    report = elem(bus.joypad.results, index)
+    value = if(rem(register, 2) == 0, do: report &&& 0xFF, else: report >>> 8)
     {value, bus}
   end
 
@@ -483,6 +532,7 @@ defmodule Beamicom.SNES.Bus do
   defp sync_before_cpu_io(bus, {:ppu, _register}), do: flush_cpu_timing(bus)
   defp sync_before_cpu_io(bus, {:apu_port, _port}), do: flush_cpu_timing(bus)
   defp sync_before_cpu_io(bus, {:cpu_io, _register}), do: flush_cpu_timing(bus)
+  defp sync_before_cpu_io(bus, {:joy_serial, _port}), do: flush_cpu_timing(bus)
   defp sync_before_cpu_io(bus, _mapped), do: bus
 
   defp pending_h_irq?(%{irq_mode: mode} = bus) when mode in [:h, :hv] do
@@ -525,6 +575,7 @@ defmodule Beamicom.SNES.Bus do
 
   defp write_cpu_io(bus, 0x4200, value) do
     nmi_enable? = (value &&& 0x80) != 0
+    auto_joypad? = (value &&& 0x01) != 0
 
     irq_mode =
       case value >>> 4 &&& 0x03 do
@@ -538,7 +589,13 @@ defmodule Beamicom.SNES.Bus do
       bus.nmi_pending? or
         (nmi_enable? and not bus.nmi_enable? and Timing.vblank?(bus.timing) and bus.nmi_flag?)
 
-    %{bus | nmi_enable?: nmi_enable?, nmi_pending?: nmi_pending?, irq_mode: irq_mode}
+    %{
+      bus
+      | nmi_enable?: nmi_enable?,
+        nmi_pending?: nmi_pending?,
+        irq_mode: irq_mode,
+        joypad: %{bus.joypad | auto?: auto_joypad?}
+    }
   end
 
   defp write_cpu_io(bus, 0x4202, value), do: %{bus | multiplicand: value}
@@ -585,6 +642,46 @@ defmodule Beamicom.SNES.Bus do
 
   defp write_cpu_io(bus, 0x420D, value), do: %{bus | fast_rom?: (value &&& 1) != 0}
   defp write_cpu_io(bus, _register, _value), do: bus
+
+  defp write_joy_latch(bus, value) do
+    latch? = (value &&& 1) != 0
+
+    if latch? do
+      %{bus | joypad: %{bus.joypad | latch?: true, shift: bus.joypad.buttons}}
+    else
+      %{bus | joypad: %{bus.joypad | latch?: false}}
+    end
+  end
+
+  defp read_joy_serial(bus, port) do
+    value = joy_serial_value(bus, port)
+
+    bus =
+      if bus.joypad.latch? do
+        bus
+      else
+        shift = elem(bus.joypad.shift, port)
+
+        joypad = %{
+          bus.joypad
+          | shift: put_elem(bus.joypad.shift, port, (shift <<< 1 ||| 1) &&& 0xFFFF)
+        }
+
+        %{bus | joypad: joypad}
+      end
+
+    {value, bus}
+  end
+
+  defp joy_serial_value(bus, port) do
+    report =
+      if bus.joypad.latch?,
+        do: elem(bus.joypad.buttons, port),
+        else: elem(bus.joypad.shift, port)
+
+    data = report >>> 15 &&& 1
+    if port == 0, do: (bus.open_bus &&& 0xFC) ||| data, else: 0x1C ||| data
+  end
 
   defp write_dma_register(bus, channel, register, value) do
     dma = elem(bus.dma_channels, channel)
@@ -693,7 +790,9 @@ defmodule Beamicom.SNES.Bus do
     end
   end
 
-  defp sram_address?(%{sram_size: 0}, _bank, _offset), do: false
+  defp sram_address?(%{cartridge: %{header: %{declared_ram_size: size}}}, _bank, _offset)
+       when size in [nil, 0],
+       do: false
 
   defp sram_address?(%{cartridge: %{layout: :lorom}}, bank, offset),
     do: offset < 0x8000 and (bank in 0x70..0x7D or bank in 0xF0..0xFF)
@@ -859,10 +958,26 @@ defmodule Beamicom.SNES.Bus do
     entered_vblank? = not Timing.vblank?(before) and Timing.vblank?(bus.timing)
 
     if entered_vblank? do
-      %{bus | ppu: ppu, nmi_flag?: true, nmi_pending?: bus.nmi_pending? or bus.nmi_enable?}
+      bus = %{bus | ppu: ppu, nmi_flag?: true, nmi_pending?: bus.nmi_pending? or bus.nmi_enable?}
+      if bus.joypad.auto?, do: start_auto_joypad(bus), else: bus
     else
       %{bus | ppu: ppu}
     end
+  end
+
+  defp start_auto_joypad(bus) do
+    {first, second} = bus.joypad.buttons
+    busy_from = bus.timing.master_clocks + 128
+
+    joypad = %{
+      bus.joypad
+      | results: {first, second, 0, 0},
+        shift: {0xFFFF, 0xFFFF},
+        busy_from: busy_from,
+        busy_until: busy_from + 4224
+    }
+
+    %{bus | joypad: joypad}
   end
 
   defp maybe_line_irq(%{irq_mode: :v, timing: %{vline: line}, vtime: line} = bus),

@@ -29,7 +29,17 @@ defmodule Beamicom.Scenic.SNESSystemTest do
 
     assert {halted, [%VideoFrame{} = second]} = SNESSystem.run_slice(halted)
     assert second.number == first.number + 1
-    assert SNESSystem.set_input(halted, Input.new(1, [:a])) == halted
+
+    updated = SNESSystem.set_input(halted, Input.new(1, [:a]))
+    assert Beamicom.SNES.Bus.joypad_report(updated.machine.bus, 1) == 0x0080
+    assert updated.halted == halted.halted
+  end
+
+  test "maps Scenic controls to the standard SNES joypad report" do
+    assert {:ok, state} = SNESSystem.load(rom(<<0x80, 0xFE>>))
+
+    state = SNESSystem.set_input(state, Input.new(1, [:b, :start, :left, :a, :r]))
+    assert Beamicom.SNES.Bus.joypad_report(state.machine.bus, 1) == 0x9290
   end
 
   defp rom(program) do

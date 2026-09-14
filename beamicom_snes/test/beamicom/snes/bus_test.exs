@@ -1,6 +1,8 @@
 defmodule Beamicom.SNES.BusTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Beamicom.SNES.{Bus, Cartridge}
   alias Beamicom.SNESTestROM
 
@@ -103,5 +105,41 @@ defmodule Beamicom.SNES.BusTest do
     assert {0x01, bus, 6} = Bus.read(bus, 0x004215)
     assert {0x00, bus, 6} = Bus.read(bus, 0x004216)
     assert {0x00, _bus, 6} = Bus.read(bus, 0x004217)
+  end
+
+  test "reads standard joypads serially in hardware button order", %{bus: bus} do
+    report = 0xA510
+    bus = Bus.set_joypad(bus, 1, report)
+    {bus, 12} = Bus.write(bus, 0x004016, 1)
+    {bus, 12} = Bus.write(bus, 0x004016, 0)
+
+    {bits, bus} =
+      Enum.map_reduce(1..16, bus, fn _, bus ->
+        {value, bus, 12} = Bus.read(bus, 0x004016)
+        {value &&& 1, bus}
+      end)
+
+    assert bits == for(bit <- 15..0//-1, do: report >>> bit &&& 1)
+    assert {value, _bus, 12} = Bus.read(bus, 0x004016)
+    assert (value &&& 1) == 1
+  end
+
+  test "automatic vblank reads populate JOY registers and report busy", %{bus: bus} do
+    bus = Bus.set_joypad(bus, 1, 0xA510)
+    {bus, 6} = Bus.write(bus, 0x004200, 0x01)
+    bus = Bus.advance_master(bus, 225 * 1364 - 6)
+
+    assert {status, bus, 6} = Bus.read(bus, 0x004212)
+    assert (status &&& 1) == 0
+
+    bus = Bus.advance_master(bus, 122)
+    assert {0x10, bus, 6} = Bus.read(bus, 0x004218)
+    assert {0xA5, bus, 6} = Bus.read(bus, 0x004219)
+    assert {status, bus, 6} = Bus.read(bus, 0x004212)
+    assert (status &&& 1) == 1
+
+    bus = Bus.advance_master(bus, 4224)
+    assert {status, _bus, 6} = Bus.read(bus, 0x004212)
+    assert (status &&& 1) == 0
   end
 end
