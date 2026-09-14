@@ -150,6 +150,28 @@ defmodule Beamicom.GB.MachineTest do
     assert machine.bus.oam_dma == nil
   end
 
+  test "HRAM code continues while OAM DMA copies sprite attributes" do
+    sprite_page = <<32, 40, 1, 0>> <> :binary.copy(<<0>>, 0x9C)
+    program = <<0xCD, 0x80, 0xFF, 0x18, 0xFE>>
+    assert {:ok, machine} = Machine.load(dma_rom(program, sprite_page, 0))
+
+    hram_routine = <<0x3E, 0x02, 0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9>>
+
+    bus =
+      Enum.reduce(0..(byte_size(hram_routine) - 1), %{machine.bus | divider: 0}, fn offset, bus ->
+        Bus.write(bus, 0xFF80 + offset, :binary.at(hram_routine, offset))
+      end)
+
+    {machine, 6} = Machine.step(%{machine | bus: bus})
+    {machine, 2} = Machine.step(machine)
+    {machine, 3} = Machine.step(machine)
+
+    assert machine.cpu.pc == 0xFF84
+    assert machine.bus.divider == 44
+    assert binary_part(machine.bus.ppu.oam, 0, 4) == <<32, 40, 1, 0>>
+    assert machine.bus.oam_dma == nil
+  end
+
   test "CPU-triggered CGB general DMA targets the CPU-selected VRAM bank" do
     tile = for(value <- 0x90..0x9F, into: <<>>, do: <<value>>)
 

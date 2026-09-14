@@ -13,8 +13,9 @@ defmodule Beamicom.GB.Bus do
   dots (four per normal-speed M-cycle, two in double speed). `read_cycle/2`,
   `write_cycle/3`, and `idle/2` retain the CPU's ordered M-cycle contract. OAM
   DMA requests are executed in machine-sized batches: OAM DMA copies 160 bytes,
-  while CGB general/HBlank DMA copies 16-byte VRAM blocks. `run_dma/2` advances
-  the timer and LCD clock for CPU stalls and returns their M-cycle cost.
+  while CGB general/HBlank DMA copies 16-byte VRAM blocks. `run_dma/3` advances
+  the timer and LCD clock for CPU stalls and returns their M-cycle cost. OAM DMA
+  may instead run concurrently with the cartridge's HRAM-resident wait routine.
 
   A prepared CGB speed switch currently toggles at the STOP instruction
   boundary. The hardware's 2050-M-cycle oscillator pause and its mode-dependent
@@ -96,6 +97,7 @@ defmodule Beamicom.GB.Bus do
   @type model :: :dmg | :cgb
   @type interrupt :: :vblank | :lcd_stat | :timer | :serial | :joypad
   @type dma_mode :: :general | :hblank
+  @type oam_dma_mode :: :stall | :concurrent
   @type hdma_request :: {dma_mode(), 0..0xFFFF, 0x8000..0x9FF0, 1..128}
 
   @type t :: %__MODULE__{
@@ -563,20 +565,22 @@ defmodule Beamicom.GB.Bus do
     do: {request, %{bus | hdma_request: nil}}
 
   @doc "Executes pending DMA work and returns the CPU stall in M-cycles."
-  @spec run_dma(t(), boolean()) :: {t(), non_neg_integer()}
-  def run_dma(bus, allow_hblank \\ true)
+  @spec run_dma(t(), boolean(), oam_dma_mode()) :: {t(), non_neg_integer()}
+  def run_dma(bus, allow_hblank \\ true, oam_dma_mode \\ :stall)
 
-  def run_dma(%__MODULE__{mode: :flat} = bus, _allow_hblank), do: {bus, 0}
+  def run_dma(%__MODULE__{mode: :flat} = bus, _allow_hblank, _oam_dma_mode), do: {bus, 0}
 
   def run_dma(
         %__MODULE__{oam_dma: nil, hdma_request: nil, hblank_pending: 0} = bus,
-        allow_hblank
+        allow_hblank,
+        oam_dma_mode
       )
-      when is_boolean(allow_hblank),
+      when is_boolean(allow_hblank) and oam_dma_mode in [:stall, :concurrent],
       do: {bus, 0}
 
-  def run_dma(%__MODULE__{} = bus, allow_hblank) when is_boolean(allow_hblank) do
-    {bus, oam_cycles} = run_oam_dma(bus)
+  def run_dma(%__MODULE__{} = bus, allow_hblank, oam_dma_mode)
+      when is_boolean(allow_hblank) and oam_dma_mode in [:stall, :concurrent] do
+    {bus, oam_cycles} = run_oam_dma(bus, oam_dma_mode)
     {bus, general_cycles} = run_general_dma(bus)
     {bus, hblank_cycles} = run_hblank_dma(bus, allow_hblank, 0)
     {bus, oam_cycles + general_cycles + hblank_cycles}
@@ -698,15 +702,20 @@ defmodule Beamicom.GB.Bus do
     end
   end
 
-  # OAM DMA is intentionally a single immutable-memory batch. The CPU is
-  # stalled for the hardware's 160 M-cycles; in CGB double speed, tick/2 maps
-  # those same CPU cycles to half as many LCD dots.
-  defp run_oam_dma(%__MODULE__{oam_dma: nil} = bus), do: {bus, 0}
+  # OAM DMA is intentionally a single immutable-memory batch. Code outside
+  # HRAM cannot execute during the transfer, so its 160 M-cycles are a CPU
+  # stall. HRAM code runs concurrently and supplies those cycles itself. In
+  # CGB double speed, tick/2 maps a stall to half as many LCD dots.
+  defp run_oam_dma(%__MODULE__{oam_dma: nil} = bus, _mode), do: {bus, 0}
 
-  defp run_oam_dma(%__MODULE__{oam_dma: page, ppu: ppu} = bus) do
+  defp run_oam_dma(%__MODULE__{oam_dma: page, ppu: ppu} = bus, mode) do
     data = dma_bytes(bus, page <<< 8, 0xA0)
     bus = %{bus | oam_dma: nil, ppu: PPU.load_oam(ppu, 0, data)}
-    {tick(bus, 160 * 4), 160}
+
+    case mode do
+      :stall -> {tick(bus, 160 * 4), 160}
+      :concurrent -> {bus, 0}
+    end
   end
 
   defp run_general_dma(%__MODULE__{hdma_request: {:general, _, _, _}} = bus) do

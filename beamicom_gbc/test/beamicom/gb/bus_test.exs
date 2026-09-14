@@ -334,6 +334,19 @@ defmodule Beamicom.GB.BusTest do
       assert double.divider == 640
     end
 
+    test "OAM DMA can run alongside an HRAM wait routine" do
+      bus =
+        Enum.reduce(0..0x9F, mapped_bus(), fn offset, bus ->
+          Bus.write(bus, 0xC100 + offset, offset * 3 &&& 0xFF)
+        end)
+        |> Bus.write(0xFF46, 0xC1)
+
+      assert {bus, 0} = Bus.run_dma(bus, true, :concurrent)
+      assert bus.oam_dma == nil
+      assert bus.divider == 0
+      assert bus.ppu.oam == for(offset <- 0..0x9F, into: <<>>, do: <<offset * 3 &&& 0xFF>>)
+    end
+
     test "CGB general DMA copies complete blocks to the selected VRAM bank" do
       cgb =
         Enum.reduce(0..31, mapped_bus(model: :cgb), fn offset, bus ->
