@@ -11,8 +11,9 @@ defmodule Beamicom.GB.PPU do
   object priority are resolved in a separate rendering path so the DMG hot path
   stays compact.
 
-  This foundation uses the minimum 172-dot transfer period. FIFO stalls from
-  fine scrolling, the window, and objects are not yet timing-visible.
+  Mode 3 includes the documented FIFO penalties from fine scrolling, the
+  window, and objects. Pixel composition is still scanline-granular, so
+  mid-scanline register effects are not timing-visible.
   """
 
   import Bitwise
@@ -30,7 +31,7 @@ defmodule Beamicom.GB.PPU do
   @frame_dots @dots_per_line * @lines_per_frame
   @vblank_start @dots_per_line * @height
   @oam_dots 80
-  @transfer_end 252
+  @minimum_transfer_end 252
 
   @blank_page :binary.copy(<<0>>, 256)
   @blank_vram List.duplicate(@blank_page, 64) |> List.to_tuple()
@@ -80,6 +81,7 @@ defmodule Beamicom.GB.PPU do
             lines: [],
             registers: @default_registers,
             clock: 0,
+            transfer_end: @minimum_transfer_end,
             frame_number: 0,
             window_line: 0,
             stat_line: false,
@@ -104,6 +106,7 @@ defmodule Beamicom.GB.PPU do
           lines: [binary()],
           registers: tuple(),
           clock: non_neg_integer(),
+          transfer_end: 252..369,
           frame_number: non_neg_integer(),
           window_line: 0..144,
           stat_line: boolean(),
@@ -200,12 +203,25 @@ defmodule Beamicom.GB.PPU do
 
   def mode(%__MODULE__{clock: clock}) when clock >= @vblank_start, do: 1
 
-  def mode(%__MODULE__{clock: clock}) do
+  def mode(%__MODULE__{clock: clock} = ppu) do
     case rem(clock, @dots_per_line) do
       dot when dot < @oam_dots -> 2
-      dot when dot < @transfer_end -> 3
-      _dot -> 0
+      dot -> if dot < hblank_dot(ppu), do: 3, else: 0
     end
+  end
+
+  @doc false
+  @spec hblank_dot(t()) :: 252..369
+  def hblank_dot(%__MODULE__{} = ppu) do
+    if dot(ppu) >= @oam_dots,
+      do: ppu.transfer_end,
+      else: hblank_dot(ppu, ly(ppu))
+  end
+
+  @doc false
+  @spec hblank_dot(t(), 0..153) :: 252..369
+  def hblank_dot(%__MODULE__{} = ppu, line) when line in 0..153 do
+    min(@minimum_transfer_end + mode3_penalty(ppu, line), 369)
   end
 
   @doc "Most recently completed 160x144 framebuffer in pixel_format/1 format."
@@ -222,27 +238,17 @@ defmodule Beamicom.GB.PPU do
 
   @doc "Reads CPU-visible VRAM, OAM, or an LCD register."
   @spec read(t(), 0x8000..0x9FFF | 0xFE00..0xFE9F | 0xFF40..0xFF6B) :: byte()
-  def read(%__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock}, address)
-      when address in 0x8000..0x9FFF and (lcdc &&& 0x80) != 0 and
-             div(clock, @dots_per_line) < @height and
-             rem(clock, @dots_per_line) >= @oam_dots and
-             rem(clock, @dots_per_line) < @transfer_end,
-      do: 0xFF
+  def read(%__MODULE__{} = ppu, address) when address in 0x8000..0x9FFF do
+    cond do
+      mode(ppu) == 3 -> 0xFF
+      ppu.model == :dmg -> vram_byte(ppu.vram, address - 0x8000)
+      true -> vram_byte(ppu.vram, ppu.vram_bank * 0x2000 + address - 0x8000)
+    end
+  end
 
-  def read(%__MODULE__{model: :dmg, vram: vram}, address) when address in 0x8000..0x9FFF,
-    do: vram_byte(vram, address - 0x8000)
-
-  def read(%__MODULE__{vram: vram, vram_bank: bank}, address) when address in 0x8000..0x9FFF,
-    do: vram_byte(vram, bank * 0x2000 + address - 0x8000)
-
-  def read(%__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock}, address)
-      when address in 0xFE00..0xFE9F and (lcdc &&& 0x80) != 0 and
-             div(clock, @dots_per_line) < @height and
-             rem(clock, @dots_per_line) < @transfer_end,
-      do: 0xFF
-
-  def read(%__MODULE__{oam: oam}, address) when address in 0xFE00..0xFE9F,
-    do: :binary.at(oam, address - 0xFE00)
+  def read(%__MODULE__{oam: oam} = ppu, address) when address in 0xFE00..0xFE9F do
+    if mode(ppu) in [2, 3], do: 0xFF, else: :binary.at(oam, address - 0xFE00)
+  end
 
   def read(ppu, 0xFF40), do: register(ppu, 0)
 
@@ -279,50 +285,31 @@ defmodule Beamicom.GB.PPU do
   @doc "Writes CPU-visible VRAM, OAM, or an LCD register and returns any STAT edge."
   @spec write(t(), 0x8000..0x9FFF | 0xFE00..0xFE9F | 0xFF40..0xFF6B, byte()) ::
           {t(), [signal()]}
-  def write(
-        %__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock} = ppu,
-        address,
-        value
-      )
-      when address in 0x8000..0x9FFF and value in 0..0xFF and (lcdc &&& 0x80) != 0 and
-             div(clock, @dots_per_line) < @height and
-             rem(clock, @dots_per_line) >= @oam_dots and
-             rem(clock, @dots_per_line) < @transfer_end,
-      do: {ppu, []}
+  def write(%__MODULE__{} = ppu, address, value)
+      when address in 0x8000..0x9FFF and value in 0..0xFF do
+    if mode(ppu) == 3 do
+      {ppu, []}
+    else
+      offset =
+        if ppu.model == :dmg,
+          do: address - 0x8000,
+          else: ppu.vram_bank * 0x2000 + address - 0x8000
 
-  def write(%__MODULE__{model: :dmg, vram: vram} = ppu, address, value)
-      when address in 0x8000..0x9FFF and value in 0..0xFF,
-      do:
-        {put_renderer_byte(ppu, :vram, address - 0x8000, value, %{
-           ppu
-           | vram: put_vram_byte(vram, address - 0x8000, value)
-         }), []}
+      updated = %{ppu | vram: put_vram_byte(ppu.vram, offset, value)}
+      {put_renderer_byte(ppu, :vram, offset, value, updated), []}
+    end
+  end
 
-  def write(%__MODULE__{vram: vram, vram_bank: bank} = ppu, address, value)
-      when address in 0x8000..0x9FFF and value in 0..0xFF,
-      do:
-        {put_renderer_byte(ppu, :vram, bank * 0x2000 + address - 0x8000, value, %{
-           ppu
-           | vram: put_vram_byte(vram, bank * 0x2000 + address - 0x8000, value)
-         }), []}
-
-  def write(
-        %__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock} = ppu,
-        address,
-        value
-      )
-      when address in 0xFE00..0xFE9F and value in 0..0xFF and (lcdc &&& 0x80) != 0 and
-             div(clock, @dots_per_line) < @height and
-             rem(clock, @dots_per_line) < @transfer_end,
-      do: {ppu, []}
-
-  def write(%__MODULE__{oam: oam} = ppu, address, value)
-      when address in 0xFE00..0xFE9F and value in 0..0xFF,
-      do:
-        {put_renderer_byte(ppu, :oam, address - 0xFE00, value, %{
-           ppu
-           | oam: put_binary_byte(oam, address - 0xFE00, value)
-         }), []}
+  def write(%__MODULE__{} = ppu, address, value)
+      when address in 0xFE00..0xFE9F and value in 0..0xFF do
+    if mode(ppu) in [2, 3] do
+      {ppu, []}
+    else
+      offset = address - 0xFE00
+      updated = %{ppu | oam: put_binary_byte(ppu.oam, offset, value)}
+      {put_renderer_byte(ppu, :oam, offset, value, updated), []}
+    end
+  end
 
   def write(ppu, 0xFF40, value) when value in 0..0xFF do
     old_lcdc = lcdc(ppu)
@@ -331,11 +318,25 @@ defmodule Beamicom.GB.PPU do
     ppu =
       cond do
         (value &&& 0x80) == 0 ->
-          %{ppu | clock: 0, lines: [], window_line: 0, stat_line: false}
+          %{
+            ppu
+            | clock: 0,
+              transfer_end: @minimum_transfer_end,
+              lines: [],
+              window_line: 0,
+              stat_line: false
+          }
           |> reset_renderer_capture()
 
         (old_lcdc &&& 0x80) == 0 ->
-          %{ppu | clock: 0, lines: [], window_line: 0, stat_line: false}
+          %{
+            ppu
+            | clock: 0,
+              transfer_end: @minimum_transfer_end,
+              lines: [],
+              window_line: 0,
+              stat_line: false
+          }
           |> reset_renderer_capture()
 
         true ->
@@ -425,15 +426,15 @@ defmodule Beamicom.GB.PPU do
       do: {%{ppu | clock: clock + dots}, []}
 
   def tick(%__MODULE__{clock: clock} = ppu, dots)
-      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @oam_dots and
-             rem(clock, @dots_per_line) < @transfer_end and
-             rem(clock, @dots_per_line) + dots < @transfer_end,
-      do: {%{ppu | clock: clock + dots}, []}
+      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @oam_dots do
+    dot = rem(clock, @dots_per_line)
+    hblank = hblank_dot(ppu)
 
-  def tick(%__MODULE__{clock: clock} = ppu, dots)
-      when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @transfer_end and
-             rem(clock, @dots_per_line) + dots < @dots_per_line,
-      do: {%{ppu | clock: clock + dots}, []}
+    if (dot < hblank and dot + dots < hblank) or
+         (dot >= hblank and dot + dots < @dots_per_line),
+       do: {%{ppu | clock: clock + dots}, []},
+       else: advance(ppu, dots, [])
+  end
 
   def tick(%__MODULE__{clock: clock} = ppu, dots)
       when dots > 0 and clock >= @vblank_start and
@@ -445,7 +446,7 @@ defmodule Beamicom.GB.PPU do
   defp advance(ppu, 0, signals), do: {ppu, :lists.reverse(signals)}
 
   defp advance(ppu, dots, signals) do
-    {distance, event} = next_event(ppu.clock)
+    {distance, event} = next_event(ppu)
 
     if dots < distance do
       {%{ppu | clock: ppu.clock + dots}, :lists.reverse(signals)}
@@ -457,22 +458,26 @@ defmodule Beamicom.GB.PPU do
     end
   end
 
-  defp next_event(clock) when clock >= @vblank_start do
+  defp next_event(%__MODULE__{clock: clock}) when clock >= @vblank_start do
     dot = rem(clock, @dots_per_line)
     {@dots_per_line - dot, :line_end}
   end
 
-  defp next_event(clock) do
+  defp next_event(%__MODULE__{clock: clock} = ppu) do
     dot = rem(clock, @dots_per_line)
+    hblank = hblank_dot(ppu)
 
     cond do
       dot < @oam_dots -> {@oam_dots - dot, :transfer}
-      dot < @transfer_end -> {@transfer_end - dot, :hblank}
+      dot < hblank -> {hblank - dot, :hblank}
       true -> {@dots_per_line - dot, :line_end}
     end
   end
 
-  defp handle_event(ppu, :transfer), do: refresh_stat(ppu)
+  defp handle_event(ppu, :transfer) do
+    %{ppu | transfer_end: hblank_dot(ppu, ly(ppu))}
+    |> refresh_stat()
+  end
 
   defp handle_event(ppu, :hblank) do
     ppu = render_line(ppu)
@@ -480,7 +485,10 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp handle_event(%__MODULE__{clock: @frame_dots} = ppu, :line_end) do
-    ppu = %{ppu | clock: 0, lines: [], window_line: 0} |> reset_renderer_capture()
+    ppu =
+      %{ppu | clock: 0, transfer_end: @minimum_transfer_end, lines: [], window_line: 0}
+      |> reset_renderer_capture()
+
     refresh_stat(ppu)
   end
 
@@ -500,7 +508,8 @@ defmodule Beamicom.GB.PPU do
     {ppu, [{:frame, number, frame}, :vblank | stat]}
   end
 
-  defp handle_event(ppu, :line_end), do: refresh_stat(ppu)
+  defp handle_event(ppu, :line_end),
+    do: refresh_stat(%{ppu | transfer_end: @minimum_transfer_end})
 
   defp finish_frame(%__MODULE__{renderer: :native} = ppu),
     do: {ppu.lines |> :lists.reverse() |> IO.iodata_to_binary(), nil}
@@ -651,7 +660,7 @@ defmodule Beamicom.GB.PPU do
     end
 
     defp put_renderer_byte(old, kind, address, value, updated) do
-      effective_line = ly(old) + if(dot(old) >= @transfer_end, do: 1, else: 0)
+      effective_line = ly(old) + if(dot(old) >= hblank_dot(old), do: 1, else: 0)
 
       cond do
         memory_byte(old, kind, address) == memory_byte(updated, kind, address) ->
@@ -1129,57 +1138,127 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp read_color_data(
-         %__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock},
-         _palette
-       )
-       when (lcdc &&& 0x80) != 0 and div(clock, @dots_per_line) < @height and
-              rem(clock, @dots_per_line) >= @oam_dots and
-              rem(clock, @dots_per_line) < @transfer_end,
-       do: 0xFF
-
-  defp read_color_data(%__MODULE__{color_ram: ram, color_indexes: indexes}, palette) do
-    :binary.at(elem(ram, palette), elem(indexes, palette) &&& 0x3F)
+         %__MODULE__{color_ram: ram, color_indexes: indexes} = ppu,
+         palette
+       ) do
+    if mode(ppu) == 3,
+      do: 0xFF,
+      else: :binary.at(elem(ram, palette), elem(indexes, palette) &&& 0x3F)
   end
 
   # CGB hardware still advances an auto-incrementing palette index when a
   # mode-3 data write is blocked.
   defp write_color_data(
-         %__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}, clock: clock} = ppu,
-         palette,
-         _value
-       )
-       when (lcdc &&& 0x80) != 0 and div(clock, @dots_per_line) < @height and
-              rem(clock, @dots_per_line) >= @oam_dots and
-              rem(clock, @dots_per_line) < @transfer_end,
-       do: increment_color_index(ppu, palette)
-
-  defp write_color_data(
          %__MODULE__{color_ram: ram, color_cache: cache, color_indexes: indexes} = ppu,
          palette,
          value
        ) do
-    index = elem(indexes, palette)
-    offset = index &&& 0x3F
-    palette_ram = put_binary_byte(elem(ram, palette), offset, value)
-    color_offset = offset &&& 0x3E
-    low = :binary.at(palette_ram, color_offset)
-    high = :binary.at(palette_ram, color_offset + 1)
-    color = low ||| (high &&& 0x7F) <<< 8
+    if mode(ppu) == 3 do
+      increment_color_index(ppu, palette)
+    else
+      index = elem(indexes, palette)
+      offset = index &&& 0x3F
+      palette_ram = put_binary_byte(elem(ram, palette), offset, value)
+      color_offset = offset &&& 0x3E
+      low = :binary.at(palette_ram, color_offset)
+      high = :binary.at(palette_ram, color_offset + 1)
+      color = low ||| (high &&& 0x7F) <<< 8
 
-    rgb =
-      <<elem(@expand5, color &&& 0x1F), elem(@expand5, color >>> 5 &&& 0x1F),
-        elem(@expand5, color >>> 10 &&& 0x1F)>>
+      rgb =
+        <<elem(@expand5, color &&& 0x1F), elem(@expand5, color >>> 5 &&& 0x1F),
+          elem(@expand5, color >>> 10 &&& 0x1F)>>
 
-    palette_cache = put_elem(elem(cache, palette), color_offset >>> 1, rgb)
+      palette_cache = put_elem(elem(cache, palette), color_offset >>> 1, rgb)
 
-    ppu = %{
-      ppu
-      | color_ram: put_elem(ram, palette, palette_ram),
-        color_cache: put_elem(cache, palette, palette_cache)
-    }
+      ppu = %{
+        ppu
+        | color_ram: put_elem(ram, palette, palette_ram),
+          color_cache: put_elem(cache, palette, palette_cache)
+      }
 
-    increment_color_index(ppu, palette)
+      increment_color_index(ppu, palette)
+    end
   end
+
+  defp mode3_penalty(%__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}}, line)
+       when line >= @height or (lcdc &&& 0x80) == 0,
+       do: 0
+
+  defp mode3_penalty(
+         %__MODULE__{
+           registers: {lcdc, _, _, scx, _, _, _, _, wy, wx},
+           oam: oam,
+           model: model
+         },
+         line
+       ) do
+    window_x = wx - 7
+
+    window? =
+      (lcdc &&& 0x20) != 0 and (model == :cgb or (lcdc &&& 0x01) != 0) and
+        line >= wy and window_x < @width
+
+    height = if (lcdc &&& 0x04) == 0, do: 8, else: 16
+
+    sprites =
+      if (lcdc &&& 0x02) == 0 do
+        []
+      else
+        oam
+        |> penalty_sprites(line, height, 0, 0, [])
+        |> Enum.sort_by(fn {x, index} -> {x, index} end)
+      end
+
+    scroll_penalty = scx &&& 0x07
+    window_penalty = if window?, do: 6, else: 0
+
+    scroll_penalty + window_penalty +
+      object_penalty(sprites, scx, window?, window_x, MapSet.new(), 0)
+  end
+
+  defp penalty_sprites(_oam, _line, _height, 40, _count, sprites), do: sprites
+  defp penalty_sprites(_oam, _line, _height, _index, 10, sprites), do: sprites
+
+  defp penalty_sprites(oam, line, height, index, count, sprites) do
+    offset = index * 4
+    y = :binary.at(oam, offset) - 16
+
+    if line >= y and line < y + height do
+      x = :binary.at(oam, offset + 1)
+      penalty_sprites(oam, line, height, index + 1, count + 1, [{x, index} | sprites])
+    else
+      penalty_sprites(oam, line, height, index + 1, count, sprites)
+    end
+  end
+
+  defp object_penalty([], _scx, _window?, _window_x, _tiles, penalty), do: penalty
+
+  defp object_penalty([{0, _index} | sprites], scx, window?, window_x, tiles, penalty),
+    do: object_penalty(sprites, scx, window?, window_x, tiles, penalty + 11)
+
+  defp object_penalty([{x, _index} | sprites], scx, window?, window_x, tiles, penalty)
+       when x < 168 do
+    screen_x = x - 8
+
+    {layer, source_x} =
+      if window? and screen_x >= window_x,
+        do: {:window, screen_x - window_x},
+        else: {:background, screen_x + scx}
+
+    tile = {layer, Integer.floor_div(source_x, 8)}
+
+    {fetch_penalty, tiles} =
+      if MapSet.member?(tiles, tile) do
+        {0, tiles}
+      else
+        {max(5 - Integer.mod(source_x, 8), 0), MapSet.put(tiles, tile)}
+      end
+
+    object_penalty(sprites, scx, window?, window_x, tiles, penalty + fetch_penalty + 6)
+  end
+
+  defp object_penalty([_sprite | sprites], scx, window?, window_x, tiles, penalty),
+    do: object_penalty(sprites, scx, window?, window_x, tiles, penalty)
 
   defp increment_color_index(%__MODULE__{color_indexes: indexes} = ppu, palette) do
     index = elem(indexes, palette)

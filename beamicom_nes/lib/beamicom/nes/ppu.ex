@@ -341,7 +341,7 @@ defmodule Beamicom.NES.PPU do
     if (ppu.mask &&& 0x18) == 0 do
       # Rendering off: the line is the backdrop and the scroll registers freeze.
       line = if nx_renderer?(ppu), do: nx_blank_line(ppu), else: <<0::size(256 * 8)>>
-      %{ppu | fb: [line | ppu.fb]}
+      put_frame_line(ppu, line)
     else
       line_v = ppu.v
       atlas? = atlas_bg?(ppu)
@@ -356,7 +356,7 @@ defmodule Beamicom.NES.PPU do
           atlas? ->
             capture_nx_atlas_line(ppu, tiles, ppu.x)
 
-          renderer_atlas_state(ppu) != nil ->
+          nx_renderer?(ppu) and renderer_atlas_state(ppu) != nil ->
             capture_nx_hybrid_line(ppu, tiles, ppu.x, blank?)
 
           nx_renderer?(ppu) ->
@@ -366,12 +366,41 @@ defmodule Beamicom.NES.PPU do
             compose_line(ppu, tiles, ppu.x, blank?)
         end
 
-      ppu = %{ppu | fb: [line | ppu.fb], v: line_v}
+      ppu = ppu |> put_frame_line(line) |> Map.put(:v, line_v)
       copy_hori(inc_vert(ppu))
     end
   end
 
   defp nx_renderer?(ppu), do: ppu.renderer != :native and not ppu.unlimited_sprites
+
+  defp composed_renderer?(ppu), do: ppu.renderer != :native and ppu.unlimited_sprites
+
+  defp composed_lighting?(ppu) do
+    composed_renderer?(ppu) and function_exported?(ppu.renderer, :sprite_lighting?, 1) and
+      apply(ppu.renderer, :sprite_lighting?, [ppu.renderer_state])
+  end
+
+  defp put_frame_line(ppu, line) do
+    line =
+      cond do
+        composed_lighting?(ppu) ->
+          case line do
+            {pixels, provenance} when is_binary(pixels) and is_binary(provenance) ->
+              {pixels, ppu.mask, provenance}
+
+            pixels when is_binary(pixels) ->
+              {pixels, ppu.mask, <<0::size(256 * 16)>>}
+          end
+
+        composed_renderer?(ppu) ->
+          {line, ppu.mask}
+
+        true ->
+          line
+      end
+
+    %{ppu | fb: [line | ppu.fb]}
+  end
 
   defp atlas_bg?(ppu) do
     renderer_atlas_state(ppu) != nil and nx_renderer?(ppu) and ppu.chr_latch == nil and
@@ -398,7 +427,8 @@ defmodule Beamicom.NES.PPU do
 
   defp nx_byte_blank_line do
     {<<0::size(33 * 8)>>, <<0::size(33 * 8)>>, <<0::size(33 * 8)>>, 0, 0, <<0::size(8 * 8)>>,
-     <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+     <<0::size(8 * 16)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>,
+     <<0::size(8 * 8)>>}
   end
 
   defp nx_atlas_blank_line(ppu) do
@@ -409,18 +439,18 @@ defmodule Beamicom.NES.PPU do
       {zeros, zeros, zeros, refs, 1, 0, 0, <<0::size(8 * 8)>>, <<0::size(8 * 32)>>, <<>>,
        <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
     else
-      {zeros, zeros, zeros, refs, 0, 0, 0, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>,
-       <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
+      {zeros, zeros, zeros, refs, 0, 0, 0, <<0::size(8 * 8)>>, <<0::size(8 * 16)>>,
+       <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>, <<0::size(8 * 8)>>}
     end
   end
 
   # Keep the mapper-sensitive work on the BEAM and retain only the compact inputs
   # needed by the frame-wide pixel compositor: 33 background tiles and up to the
-  # hardware-visible eight sprites. This is 141 bytes per line instead of a live
+  # hardware-visible eight sprites. This is 157 bytes per line instead of a live
   # copy of ROM, VRAM, OAM, or the rest of the machine.
   defp capture_nx_line(ppu, tiles, fine_x, blank?) do
     {lo, hi, attr} = tile_planes(tiles, 0, [], [], [])
-    {sx, slo, shi, sattr, svalid} = sprite_planes(ppu.line_sprites)
+    {sx, stile, slo, shi, sattr, svalid} = sprite_planes(ppu.line_sprites)
     bg_on = bg_on?(ppu) and not blank?
 
     # Sprite-zero hit is observable before frame completion, so calculate that
@@ -433,7 +463,7 @@ defmodule Beamicom.NES.PPU do
         else: sprite0_hit(ppu, buf, tiles, fine_x, true)
 
     mask = if bg_on, do: ppu.mask, else: ppu.mask &&& bxor(0xFF, 0x08)
-    {{lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+    {{lo, hi, attr, fine_x, mask, sx, stile, slo, shi, sattr, svalid}, ppu}
   end
 
   defp capture_nx_atlas_line(ppu, tiles, fine_x) do
@@ -452,11 +482,11 @@ defmodule Beamicom.NES.PPU do
   end
 
   defp capture_nx_hybrid_line(ppu, tiles, fine_x, blank?) do
-    {{lo, hi, attr, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu} =
+    {{lo, hi, attr, fine_x, mask, sx, stile, slo, shi, sattr, svalid}, ppu} =
       capture_nx_line(ppu, tiles, fine_x, blank?)
 
     refs = <<0::size(33 * 32)>>
-    {{lo, hi, attr, refs, 0, fine_x, mask, sx, slo, shi, sattr, svalid}, ppu}
+    {{lo, hi, attr, refs, 0, fine_x, mask, sx, stile, slo, shi, sattr, svalid}, ppu}
   end
 
   defp tile_refs(_tiles, 33, refs, attrs),
@@ -482,17 +512,25 @@ defmodule Beamicom.NES.PPU do
   defp sprite_planes(sprites) do
     padded = Enum.take(sprites, 8) ++ List.duplicate(nil, max(8 - length(sprites), 0))
 
-    Enum.reduce(padded, {[], [], [], [], []}, fn
-      nil, {xs, los, his, attrs, valid} ->
-        {[0 | xs], [0 | los], [0 | his], [0 | attrs], [0 | valid]}
+    Enum.reduce(padded, {[], [], [], [], [], []}, fn
+      nil, {xs, tiles, los, his, attrs, valid} ->
+        {[0 | xs], [0 | tiles], [0 | los], [0 | his], [0 | attrs], [0 | valid]}
 
-      sp, {xs, los, his, attrs, valid} ->
-        {[sp.x | xs], [sp.lo | los], [sp.hi | his], [sp.attr | attrs], [1 | valid]}
+      sp, {xs, tiles, los, his, attrs, valid} ->
+        {[sp.x | xs], [sp.tile | tiles], [sp.lo | los], [sp.hi | his], [sp.attr | attrs],
+         [1 | valid]}
     end)
     |> then(fn planes ->
       planes
       |> Tuple.to_list()
-      |> Enum.map(&(&1 |> Enum.reverse() |> :erlang.list_to_binary()))
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {values, 1} ->
+          for value <- Enum.reverse(values), into: <<>>, do: <<value::native-unsigned-16>>
+
+        {values, _index} ->
+          values |> Enum.reverse() |> :erlang.list_to_binary()
+      end)
       |> List.to_tuple()
     end)
   end
@@ -741,12 +779,17 @@ defmodule Beamicom.NES.PPU do
         # Sprite line over a blank background (CV3's intro): every sprite pixel
         # wins over the all-backdrop line.
         bg_blank? ->
-          overlay_sprites(<<0::size(256 * 8)>>, buf, clip?)
+          overlay_sprites(<<0::size(256 * 8)>>, buf, clip?, composed_lighting?(ppu))
 
         # Sprite line over real background: overlay sprites onto the batched bg
         # line, touching only the columns a sprite covers.
         true ->
-          overlay_sprites(bg_line(tiles, fine_x, ppu.mask), buf, clip?)
+          overlay_sprites(
+            bg_line(tiles, fine_x, ppu.mask),
+            buf,
+            clip?,
+            composed_lighting?(ppu)
+          )
       end
 
     # Sprite-0 hit needs sprite 0 over an opaque background pixel — impossible with
@@ -764,17 +807,23 @@ defmodule Beamicom.NES.PPU do
   # runs between them — far cheaper than a 256-pixel Map-lookup walk. Front-most
   # opaque sprite wins unless a non-front sprite sits over an opaque bg pixel; the
   # left-8px sprite clip drops sprite columns 0..7.
-  defp overlay_sprites(bg, buf, clip?) do
+  defp overlay_sprites(bg, buf, clip?, false) do
     cols = buf |> Map.keys() |> Enum.sort()
     cols = if clip?, do: Enum.drop_while(cols, &(&1 < 8)), else: cols
     overlay(bg, buf, cols, 0, <<>>)
+  end
+
+  defp overlay_sprites(bg, buf, clip?, true) do
+    cols = buf |> Map.keys() |> Enum.sort()
+    cols = if clip?, do: Enum.drop_while(cols, &(&1 < 8)), else: cols
+    overlay_with_provenance(bg, buf, cols, 0, <<>>, <<>>)
   end
 
   defp overlay(bg, _buf, [], cursor, acc),
     do: <<acc::binary, binary_part(bg, cursor, 256 - cursor)::binary>>
 
   defp overlay(bg, buf, [c | rest], cursor, acc) do
-    {sp_addr, front?, _z} = Map.fetch!(buf, c)
+    {sp_addr, front?, _z, _provenance} = Map.fetch!(buf, c)
     bg_addr = :binary.at(bg, c)
     win = if bg_addr != 0 and not front?, do: bg_addr, else: sp_addr
 
@@ -784,6 +833,31 @@ defmodule Beamicom.NES.PPU do
       rest,
       c + 1,
       <<acc::binary, binary_part(bg, cursor, c - cursor)::binary, win>>
+    )
+  end
+
+  defp overlay_with_provenance(bg, _buf, [], cursor, pixels, provenance) do
+    remaining = 256 - cursor
+
+    {<<pixels::binary, binary_part(bg, cursor, remaining)::binary>>,
+     <<provenance::binary, 0::size(remaining * 16)>>}
+  end
+
+  defp overlay_with_provenance(bg, buf, [c | rest], cursor, pixels, provenance) do
+    {sp_addr, front?, _z, sprite_provenance} = Map.fetch!(buf, c)
+    bg_addr = :binary.at(bg, c)
+    sprite_wins? = bg_addr == 0 or front?
+    win = if sprite_wins?, do: sp_addr, else: bg_addr
+    gap = c - cursor
+    sprite_provenance = if sprite_wins?, do: sprite_provenance, else: 0
+
+    overlay_with_provenance(
+      bg,
+      buf,
+      rest,
+      c + 1,
+      <<pixels::binary, binary_part(bg, cursor, gap)::binary, win>>,
+      <<provenance::binary, 0::size(gap * 16), sprite_provenance::native-unsigned-16>>
     )
   end
 
@@ -842,7 +916,7 @@ defmodule Beamicom.NES.PPU do
   defp sprite0_hit(ppu, buf, tiles, fine_x, bg_on) do
     hit? =
       Enum.any?(buf, fn
-        {c, {_addr, _front?, true}} ->
+        {c, {_addr, _front?, true, _provenance}} ->
           c != 255 and not clipped?(ppu, c) and bg_at(tiles, fine_x, c, bg_on, ppu.mask) != 0
 
         _ ->
@@ -909,7 +983,13 @@ defmodule Beamicom.NES.PPU do
 
         if x <= 255 and pat != 0 and not Map.has_key?(buf, x) do
           addr = 0x10 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
-          Map.put(buf, x, {addr, (sp.attr &&& 0x20) == 0, sp.index == 0})
+          provenance = sp.tile <<< 4 ||| (sp.attr &&& 0x03) <<< 2 ||| pat
+
+          Map.put(
+            buf,
+            x,
+            {addr, (sp.attr &&& 0x20) == 0, sp.index == 0, provenance}
+          )
         else
           buf
         end
@@ -971,7 +1051,7 @@ defmodule Beamicom.NES.PPU do
     lo = read(ppu, addr ||| row)
     hi = read(ppu, addr ||| row + 8)
     {lo, hi} = if (attr &&& 0x40) != 0, do: {reverse_byte(lo), reverse_byte(hi)}, else: {lo, hi}
-    %{index: i, x: x, attr: attr, lo: lo, hi: hi}
+    %{index: i, x: x, tile: addr >>> 4, attr: attr, lo: lo, hi: hi}
   end
 
   defp build_sprite_ref(ppu, i, tile, attr, x, row, height) do
@@ -1198,6 +1278,32 @@ defmodule Beamicom.NES.PPU do
 
     {pixels, rgb, rgb_width, rgb_height, render} =
       cond do
+        composed_lighting?(ppu) ->
+          {pixel_lines, masks, provenance_lines} =
+            Enum.reduce(lines, {[], [], []}, fn {pixels, mask, provenance},
+                                                {pixel_lines, masks, provenance_lines} ->
+              {[pixels | pixel_lines], [<<mask>> | masks], [provenance | provenance_lines]}
+            end)
+
+          pixels = pixel_lines |> Enum.reverse() |> IO.iodata_to_binary()
+          masks = masks |> Enum.reverse() |> IO.iodata_to_binary()
+          provenance = provenance_lines |> Enum.reverse() |> IO.iodata_to_binary()
+          {width, height} = renderer_dimensions(ppu.renderer, ppu.renderer_state)
+
+          {pixels, nil, width, height,
+           {:composed_lit, ppu.renderer, pixels, masks, provenance, palette, edge_mask,
+            ppu.renderer_state, ppu.frame}}
+
+        composed_renderer?(ppu) ->
+          {pixel_lines, masks} = Enum.unzip(lines)
+          pixels = IO.iodata_to_binary(pixel_lines)
+          masks = IO.iodata_to_binary(masks)
+          {width, height} = renderer_dimensions(ppu.renderer, ppu.renderer_state)
+
+          {pixels, nil, width, height,
+           {:composed, ppu.renderer, pixels, masks, palette, edge_mask, ppu.renderer_state,
+            ppu.frame}}
+
         defer? ->
           {width, height} = renderer_dimensions(ppu.renderer, ppu.renderer_state)
 
@@ -1241,6 +1347,45 @@ defmodule Beamicom.NES.PPU do
 
   @doc false
   def resolve_frame(%Beamicom.NES.Framebuffer{render: nil} = frame), do: frame
+
+  def resolve_frame(
+        %Beamicom.NES.Framebuffer{
+          render:
+            {:composed_lit, renderer, pixels, masks, provenance, palette, edge_mask, state,
+             frame_number}
+        } = frame
+      ) do
+    {pixels, rgb} =
+      apply(renderer, :render_composed_lit, [
+        pixels,
+        palette,
+        masks,
+        provenance,
+        edge_mask,
+        state,
+        frame_number
+      ])
+
+    %{frame | pixels: pixels, rgb: rgb, render: nil}
+  end
+
+  def resolve_frame(
+        %Beamicom.NES.Framebuffer{
+          render: {:composed, renderer, pixels, masks, palette, edge_mask, state, frame_number}
+        } = frame
+      ) do
+    {pixels, rgb} =
+      apply(renderer, :render_composed, [
+        pixels,
+        palette,
+        masks,
+        edge_mask,
+        state,
+        frame_number
+      ])
+
+    %{frame | pixels: pixels, rgb: rgb, render: nil}
+  end
 
   def resolve_frame(
         %Beamicom.NES.Framebuffer{

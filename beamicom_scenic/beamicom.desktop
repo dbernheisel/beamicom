@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Beamicom
+GenericName=Console Emulator
+Comment=Play supported console games with Beamicom
+Exec=/usr/bin/env XDG_SESSION_TYPE=x11 /usr/bin/mise exec -- mix run --no-halt -e "Beamicom.Scenic.start()"
+Path=/home/dbern/beamicom/beamicom_scenic
+Icon=input-gaming
+Terminal=false
+Categories=Game;Emulator;
+Keywords=emulator;NES;Game Boy;Game Boy Color;SNES;
+StartupNotify=false
+StartupWMClass=beamicom

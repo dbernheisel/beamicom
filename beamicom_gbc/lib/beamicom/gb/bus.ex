@@ -39,7 +39,6 @@ defmodule Beamicom.GB.Bus do
   @dots_per_line 456
   @lines_per_frame 154
   @visible_lines 144
-  @hblank_dot 252
   @oam_dot 80
   @vblank_start @dots_per_line * @visible_lines
   @frame_dots @dots_per_line * @lines_per_frame
@@ -636,13 +635,14 @@ defmodule Beamicom.GB.Bus do
     dots = if double_speed?, do: div(total, 2), else: clocks
     phase = if double_speed?, do: rem(total, 2), else: 0
     dot = rem(clock, @dots_per_line)
+    hblank_dot = if dot < @oam_dot, do: @dots_per_line, else: PPU.hblank_dot(ppu)
 
     before_boundary? =
       (lcdc &&& 0x80) == 0 or
         (clock < @vblank_start and dot < @oam_dot and dot + dots < @oam_dot) or
-        (clock < @vblank_start and dot >= @oam_dot and dot < @hblank_dot and
-           dot + dots < @hblank_dot) or
-        (clock < @vblank_start and dot >= @hblank_dot and dot + dots < @dots_per_line) or
+        (clock < @vblank_start and dot >= @oam_dot and dot < hblank_dot and
+           dot + dots < hblank_dot) or
+        (clock < @vblank_start and dot >= hblank_dot and dot + dots < @dots_per_line) or
         (clock >= @vblank_start and dot + dots < @dots_per_line)
 
     if before_boundary? do
@@ -804,27 +804,38 @@ defmodule Beamicom.GB.Bus do
   defp hblank_entries(ppu, dots, limit) do
     if (PPU.read(ppu, 0xFF40) &&& 0x80) == 0,
       do: 0,
-      else: count_hblank_entries(ppu.clock, dots, limit, 0)
+      else: count_hblank_entries(ppu, ppu.clock, dots, limit, 0)
   end
 
-  defp count_hblank_entries(_clock, _dots, 0, count), do: count
+  defp count_hblank_entries(_ppu, _clock, _dots, 0, count), do: count
 
-  defp count_hblank_entries(clock, dots, limit, count) do
+  defp count_hblank_entries(ppu, clock, dots, limit, count) do
     line = div(clock, @dots_per_line)
     dot = rem(clock, @dots_per_line)
 
+    hblank_dot =
+      if line == PPU.ly(ppu),
+        do: PPU.hblank_dot(ppu),
+        else: PPU.hblank_dot(ppu, line)
+
     distance =
       cond do
-        line < @visible_lines and dot < @hblank_dot -> @hblank_dot - dot
-        line < @visible_lines - 1 -> @dots_per_line - dot + @hblank_dot
-        true -> @frame_dots - clock + @hblank_dot
+        line < @visible_lines and dot < hblank_dot ->
+          hblank_dot - dot
+
+        line < @visible_lines - 1 ->
+          next_hblank = PPU.hblank_dot(ppu, line + 1)
+          @dots_per_line - dot + next_hblank
+
+        true ->
+          @frame_dots - clock + PPU.hblank_dot(ppu, 0)
       end
 
     if dots < distance do
       count
     else
       next_clock = rem(clock + distance, @frame_dots)
-      count_hblank_entries(next_clock, dots - distance, limit - 1, count + 1)
+      count_hblank_entries(ppu, next_clock, dots - distance, limit - 1, count + 1)
     end
   end
 

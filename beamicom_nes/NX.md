@@ -25,6 +25,113 @@ The values are consumed while `beamicom_nes` is compiled. Changing these
 defaults requires recompilation; startup and frame execution never query the
 application environment for a backend.
 
+## Opt-in emissive sprite lighting
+
+The Nx PPU renderer can tag exact sprite pattern pixels as emitters and add a
+soft, source-colored halo to the resolved RGB frame. The light color comes from
+each winning sprite pixel's resolved NES palette entry, so palette animation and
+palette swaps automatically tint the halo. This is identity-driven: ordinary
+bright pixels never become lights.
+
+```elixir
+lighting = [
+  radius: 6,
+  sigma: 3.0,
+  strength: 1.25,
+  emitters: [
+    [
+      layer: :sprite,
+      tile_space: :ppu,
+      tiles: zelda_emissive_sprite_tiles,
+      subpalettes: [1, 2],
+      color_slots: [2, 3],
+      intensity: 1.0,
+      flicker: :organic
+    ]
+  ]
+]
+
+options = [
+  ppu_renderer: {Beamicom.NES.Nx.PPURenderer, lighting: lighting}
+]
+
+{:ok, console} = Beamicom.NES.System.load(rom, options)
+```
+
+Use `tile_space: :chr` for a physical tile number in immutable CHR ROM. Use
+`:ppu` for the logical PPU pattern-table tile number from 0 through 511; this is
+the useful identity for CHR-RAM games such as The Legend of Zelda. Rules can
+also constrain the two-bit sprite subpalette and the nontransparent pattern
+color slots 1 through 3. Several rules may target different object groups or
+use different intensities. Flicker is opt-in per rule: `flicker: :organic` uses
+a restrained 18% variation, while `flicker: [amount: 0.3]` or a numeric value
+from `0.0` through `1.0` controls its depth. The waveform combines three
+incommensurate temporal frequencies with a position-derived phase, so nearby
+pixels remain coherent while separate emitters do not pulse in lockstep. It is
+derived only from the emulated frame number and screen position, making replay
+and save-state output deterministic.
+
+`Beamicom.NES.Nx.Lighting` includes a verified profile for the US Zelda ROM with
+parsed PRG+CHR SHA-256
+`085e5397a3487357c263dfa159fb0fe20a5f3ea8ef82d7af6a7e848d3b9364e8`:
+
+```elixir
+rom = File.read!("roms/zelda.nes")
+{:ok, lighting} = Beamicom.NES.Nx.Lighting.for_rom(rom)
+
+native = [
+  ppu_renderer: {Beamicom.NES.Nx.PPURenderer, lighting: lighting}
+]
+
+composite = Beamicom.NES.Nx.video_options(:composite, lighting: lighting)
+```
+
+The observed CHR-RAM identities are tiles 92-95, subpalette 2, color slots 2-3
+for the flame's yellow/white core; tiles 130-133, every animated subpalette,
+color slot 3 for the sword blade and traveling beam; and tiles 48-49, every
+animated subpalette, color slot 3 for the four beam-burst particles. The flame
+uses deterministic organic flicker. Additional verified emitters are rupee tiles
+50-51 in flashing subpalettes 1-2 at 60% intensity; Link tiles 0-19 only in the clock-flash
+subpalettes 1-2; enemy-fireball tiles 68-69 across all four animated
+subpalettes; and heart-pickup tiles 498-499 in flashing subpalettes 1-2. These
+use color slots 2-3 except for the single-color heart pattern, which uses slot
+1. Normal Link uses subpalette 0 and therefore remains non-emitting. The other
+pixels in those sprites remain non-emitting, although they can still receive the
+nearby halo.
+
+The Blargg renderer keeps the identity-derived emissive plane at native
+resolution, applies the selected NTSC filter, and adds the resampled halo to the
+602x240 presentation. Lighting therefore composes with Composite, S-Video, RGB,
+and Monochrome instead of replacing them. Removing the sprite limit retains a
+compact winning-sprite provenance plane from native composition, so covered or
+lower-priority sprite pixels still cannot emit. Horizontal trimming masks both
+the filtered picture and the halo.
+
+Run the optional real-ROM checkpoint test with:
+
+```console
+BEAMICOM_NX=1 BEAMICOM_ZELDA_STATE=/path/to/zelda-state.png \
+  mix test nx_test/nes/zelda_lighting_e2e_test.exs
+```
+
+The test validates the ROM-content and checkpoint hashes, exercises all twenty
+filter/enhancement combinations, and advances the checkpoint through the sword,
+traveling beam, and four-particle burst. It is skipped when the external ROM or
+checkpoint is unavailable.
+
+Optional supplemental checkpoint coverage uses
+`BEAMICOM_ZELDA_RUPEE_STATE`, `BEAMICOM_ZELDA_CLOCK_STATE`,
+`BEAMICOM_ZELDA_FIREBALL_STATE`, and `BEAMICOM_ZELDA_HEART_STATE`. When all four
+are present, the suite verifies their hashes, sprite identities, unchanged
+palette-address planes, and localized RGB emission.
+
+Lighting changes only the optional RGB presentation. The native 256×240
+palette-address plane, PPU priority, sprite clipping, and emulation state remain
+unchanged. With no matching emitter, RGB output is byte-for-byte identical to
+the unlit Nx renderer. The active RGB field is averaged to half resolution and
+blurred as one batched, dense, separable Gaussian, so its cost is bounded by
+frame size and radius rather than growing with the number of emitting pixels.
+
 ## Runtime Blargg NTSC filter
 
 The Blargg-compatible Nx filter can instead be selected for each loaded console,

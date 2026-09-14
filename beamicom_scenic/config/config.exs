@@ -16,12 +16,13 @@ end
 # Static asset library (fonts/images) — needed by Scenic text/button components.
 config :scenic, :assets, module: Beamicom.Scenic.Assets
 
-# Scenic viewport for local verification. The core-specific size and default
-# scene are filled in by `Beamicom.Scenic.play/2`.
+# Long-lived Scenic viewport. Replaceable emulator sessions are rendered by a
+# child component without recreating the root scene or native window.
 # The local driver needs native GLFW — see the README.
 config :beamicom_scenic, :viewport,
   name: :beamicom_viewport,
-  default_scene: Beamicom.Scenic.Screen,
+  size: {960, 800},
+  default_scene: Beamicom.Scenic.Shell,
   drivers: [
     [
       module: Scenic.Driver.Local,
@@ -29,8 +30,13 @@ config :beamicom_scenic, :viewport,
       # roughly 34 FPS. The output hub and driver busy flag already coalesce
       # frames, so request each new NES frame without an extra timer throttle.
       limit_ms: 0,
-      position: [scaled: true, centered: true],
+      # Window dimensions drive Shell layout directly. Driver-level scaling
+      # would interpolate the complete viewport between integer stages.
+      position: [scaled: false, centered: false],
       window: [title: "beamicom", resizeable: true],
-      on_close: :stop_system
+      # The local driver's custom-callback validator and dispatcher disagree on
+      # the callback tuple format in 0.11. Stop the viewport through its supported
+      # option; Host monitors it, tears down emulation, and then stops the BEAM.
+      on_close: :stop_viewport
     ]
   ]

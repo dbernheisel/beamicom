@@ -36,8 +36,11 @@ brew install ffmpeg
 ### Linux (Debian/Ubuntu)
 
 ```sh
-sudo apt install pkg-config libglfw3-dev libglew-dev ffmpeg
+sudo apt install pkg-config libglfw3-dev libglew-dev zenity ffmpeg
 ```
+
+The native ROM and save-state selectors use Zenity in an isolated process, so a
+GTK dialog failure cannot crash or block the BEAM VM.
 
 ### Fetch and compile
 
@@ -129,6 +132,16 @@ mise exec -- mix compile --force
 ```sh
 iex -S mix
 ```
+
+Open the long-lived Scenic shell without loading media:
+
+```elixir
+Beamicom.Scenic.start()
+```
+
+The same window remains open while emulator sessions are loaded and stopped.
+The existing `play/2` calls start the shell automatically when needed:
+
 ```elixir
 Beamicom.Scenic.play("../beamicom_nes/roms/game.nes")
 Beamicom.Scenic.play("/path/to/game.nes", video_filter: :composite, scale: 1)
@@ -136,7 +149,66 @@ Beamicom.Scenic.play("/path/to/open-source-game.gbc")
 Beamicom.Scenic.play("/path/to/game.gbc", video_filter: :pixel_transparency, scale: 3)
 Beamicom.Scenic.play("/path/to/game.gb", scale: 4)   # integer scale, default 3
 Beamicom.Scenic.play("/path/to/game.gbc", speed: 0.5) # half speed, default 1.0
+Beamicom.Scenic.play("../beamicom_snes/roms/Super Mario World.sfc")
 ```
+
+`.sfc` and `.smc` files can be loaded through a temporary Scenic adapter for
+checking the progress of the in-development SNES core. Its current frame and
+audio boundaries use the same host runtime and `GameSurface` as the other
+cores. Controller input and save states are disabled until the core supports
+them. If an unimplemented CPU instruction is reached, the adapter freezes at
+that point and continues displaying the current PPU state for inspection.
+
+### Persistent configuration
+
+The in-window Config menu writes JSON to
+`$XDG_CONFIG_HOME/beamicom/config.json`, falling back to
+`~/.config/beamicom/config.json`. It stores:
+
+- The initial folder for save-state open/save dialogs.
+- The default NES filter: None, Blargg Composite, S-Video, or RGB.
+- ROM-specific NES sprite lighting for verified light-source profiles.
+- NES enhancements for removing the eight-sprites-per-scanline limit and trimming the horizontal borders.
+- The default Game Boy/Game Boy Color filter: None or Pixel Transparency.
+- Whether framebuffer presentation is constrained to whole-number scaling stages.
+- Whether audio is enabled for newly loaded sessions.
+
+```json
+{
+  "version": 1,
+  "save_state_folder": "/home/player/.local/share/beamicom/states",
+  "nes_video_filter": "composite",
+  "nes_lighting": false,
+  "nes_remove_sprite_limit": false,
+  "nes_trim_borders": false,
+  "gbc_video_filter": "pixel_transparency",
+  "integer_scaling": true,
+  "audio": true
+}
+```
+
+Integer scaling applies immediately. It renders directly at the largest complete
+stage that fits the current gameplay or paused-HUD area, then jumps to the next
+stage only when enough room is available. For example, native NES progresses
+through 256×240, 512×480, 768×720, and 1024×960 without intermediate sizes.
+This keeps the final Scenic transform at 1× with pixel-aligned placement, so no
+bilinear resampling is used. The local driver does not scale the viewport itself;
+window resize events instead trigger a fresh layout at the real window size.
+Turning integer scaling off restores flexible fractional fitting.
+
+Filter and sprite-lighting changes apply immediately to a matching active system
+while preserving the current emulation state and paused/running mode. Lighting
+activates only when the loaded ROM has a verified profile. NES enhancement
+changes also apply immediately to the active runtime and survive Reset and
+video-filter changes. Audio changes apply on the next load or reset. Explicit
+options passed to `play/2` or `replace/2` take precedence over persisted defaults
+at startup.
+The save-state folder defaults to `$XDG_DATA_HOME/beamicom/states`, falling back
+to `~/.local/share/beamicom/states`.
+
+Enable the effect from **Config → NES → Sprite lighting**. The player status
+field `lighting` is `true` when the requested setting matched and activated a ROM
+profile, and `false` for unsupported ROMs or an explicitly native renderer.
 
 For the Nx Blargg NTSC filter, `:video_filter` accepts `:composite`, `:svideo`,
 `:rgb`, or `:monochrome`; `:native` explicitly disables it. The filtered image
@@ -186,8 +258,10 @@ Any positive speed is accepted. Values below 1 slow emulation and values above
 match the selected rate.
 
 The existing `Beamicom.NES.Scenic.play/2` entry point remains available and now
-selects either core too. NES save PNGs are supported as before. Game Boy save
-states are not yet implemented.
+selects either core too. The in-window Game menu can load media, reset or resume
+the current session, and save or load the self-contained PNG states supported by
+both cores. File selection uses an Objective-C NIF on macOS and an isolated
+Zenity process on Linux; it does not require Rust.
 
 The multi-system scene, audio sink, and asset library live under
 `Beamicom.Scenic`. Their former `Beamicom.NES` module names remain available as
@@ -195,19 +269,29 @@ compatibility wrappers, so existing entry points and custom viewport
 configuration continue to work.
 
 Only one local Scenic player runs at a time. A second `play/2` call is rejected
-without starting more emulator or output processes. Inspect or stop the owner
-explicitly when driving it from a long-lived IEx session:
+without starting more emulator or output processes. `replace/2` intentionally
+swaps the session while preserving the shell and window. Inspect, pause, reset,
+unload, or stop the owner explicitly when driving it from a long-lived IEx
+session:
 
 ```elixir
 Beamicom.Scenic.status()
+Beamicom.Scenic.pause()
+Beamicom.Scenic.resume()
+Beamicom.Scenic.reset()
+Beamicom.Scenic.unload()
 Beamicom.Scenic.stop()
 ```
 
-Without an NTSC filter, the viewport uses the core's native dimensions before
-integer scaling: 256×240 for NES and 160×144 for Game Boy. CGB RGB24 is displayed directly; original Game
-Boy shade indices use the core's green display palette. Resizing the window
-scales and centers the display while preserving its aspect ratio. NES audio is
-44.1 kHz mono and Game Boy audio is 44.1 kHz stereo.
+Closing the native window follows the owner-controlled shutdown path: it stops
+active emulation, audio, input, streamed assets, Scenic, and its task supervisor
+before requesting an orderly BEAM shutdown.
+
+Without an NTSC filter, the viewport uses 256×240 as the NES 1× stage and
+160×144 as the Game Boy 1× stage. CGB RGB24 is displayed directly; original
+Game Boy shade indices use the core's green display palette. Resizing centers
+the display and selects a new whole-number stage only after it fully fits. NES
+audio is 44.1 kHz mono and Game Boy audio is 44.1 kHz stereo.
 
 ### Controls (player 1)
 
@@ -218,7 +302,17 @@ scales and centers the display while preserving its aspect ratio. NES audio is
 | `Z` | B |
 | Enter | Start |
 | Right Shift | Select |
+| `F5` | Quick-save state |
+| `F8` | Quick-load state |
 
-Debug keys: `Space` pause/resume, `.` step one frame while paused, `g` toggle the
-raw palette-address grayscale view. The grayscale toggle and the in-window Save
-button are NES-only; pause and step work with either core.
+Gameplay displays only the framebuffer on a black field, with no menu, status
+bar, or animated background. `Escape` pauses gameplay and opens the Game menu;
+pressing `Escape` again resumes and restores the HUD-free game view. The arrow
+keys and Enter navigate an open menu. During gameplay, `.` requests a
+debug step and `g` toggles the NES raw palette-address grayscale view. `F5`
+quick-saves and `F8` quick-loads while running or paused. The quick slot is
+`<rom-sha256>.png` in the configured save-state folder; NES hashes its parsed
+PRG+CHR data, while Game Boy hashes the cartridge ROM. Save and load state
+actions remain available from the Game menu. Load State opens a horizontal,
+ROM-specific preview browser; use Left/Right or the scroll wheel, Enter to load,
+`O` or Open... for the native picker, and Escape to close it.

@@ -23,7 +23,10 @@ defmodule Beamicom.NES.ShareImage do
   """
   def to_png(console, framebuffer) do
     {state_bin, rom_blob} = SaveState.split(console)
-    ss_rgb = Palette.to_rgb(framebuffer)
+    # VisualCode's preview is always the native 256x240 image. Presentation
+    # renderers may attach a differently sized RGB plane (for example, Blargg's
+    # 602x240 output), so resolve the canonical palette-address plane here.
+    ss_rgb = Palette.to_rgb(%{framebuffer | rgb: nil, rgb_width: nil, rgb_height: nil})
     {w, h, rgb} = VisualCode.encode(state_bin, ss_rgb, framebuffer.width, framebuffer.height)
 
     PNG.encode(w, h, rgb) |> PNG.put_trailer(rom_blob)

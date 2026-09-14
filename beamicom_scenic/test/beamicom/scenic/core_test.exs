@@ -14,7 +14,12 @@ defmodule Beamicom.Scenic.CoreTest do
                Core.resolve("game.#{extension}")
     end
 
-    assert {:error, {:unsupported_media_extension, ".smc"}} = Core.resolve("game.smc")
+    for extension <- ["sfc", "smc", "SFC"] do
+      assert {:ok, %Core{id: :snes, runtime: :host, system: Beamicom.Scenic.SNESSystem}} =
+               Core.resolve("game.#{extension}")
+    end
+
+    assert {:error, {:unsupported_media_extension, ".fig"}} = Core.resolve("game.fig")
   end
 
   test "reports each core's native dimensions and audio layout" do
@@ -28,6 +33,11 @@ defmodule Beamicom.Scenic.CoreTest do
     assert gbc.capabilities.video.width == 160
     assert gbc.capabilities.video.height == 144
     assert gbc.capabilities.audio.channels == 2
+
+    {:ok, snes} = Core.resolve("game.sfc")
+    assert snes.capabilities.video.width == 256
+    assert snes.capabilities.video.height == 224
+    assert snes.capabilities.audio.channels == 2
   end
 
   test "reports the runtime NTSC filter's presentation geometry" do
@@ -47,6 +57,7 @@ defmodule Beamicom.Scenic.CoreTest do
       |> Enum.find(&(Keyword.get(&1, :module) == Scenic.Driver.Local))
 
     assert local_driver[:limit_ms] == 0
+    assert local_driver[:position] == [scaled: false, centered: false]
   end
 
   test "routes and loads an iNES ROM by magic with a nonstandard extension" do

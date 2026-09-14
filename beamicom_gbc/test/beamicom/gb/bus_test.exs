@@ -393,6 +393,25 @@ defmodule Beamicom.GB.BusTest do
                List.duplicate(0, 32)
     end
 
+    test "CGB HBlank DMA waits for a scroll-extended mode 3" do
+      cgb =
+        mapped_bus(model: :cgb)
+        |> Bus.write(0xFF40, 0x80)
+        |> Bus.write(0xFF43, 5)
+        |> Bus.write(0xFF51, 0xC0)
+        |> Bus.write(0xFF52, 0)
+        |> Bus.write(0xFF53, 0)
+        |> Bus.write(0xFF54, 0)
+        |> Bus.write(0xFF55, 0x80)
+        |> Bus.tick(252)
+
+      assert {cgb, 0} = Bus.run_dma(cgb)
+      assert Bus.read(cgb, 0xFF55) == 0
+
+      assert {cgb, 8} = cgb |> Bus.tick(5) |> Bus.run_dma()
+      assert Bus.read(cgb, 0xFF55) == 0xFF
+    end
+
     test "VRAM DMA keeps an eight-dot-domain M-cycle duration in double speed" do
       cgb =
         mapped_bus(model: :cgb)

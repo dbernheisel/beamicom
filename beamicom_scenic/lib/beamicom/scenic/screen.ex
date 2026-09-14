@@ -1,4 +1,4 @@
-defmodule Beamicom.Scenic.Screen do
+defmodule Beamicom.Scenic.Component.GameSurface do
   @moduledoc """
   Scenic scene for local verification. It consumes the active core's typed
   video frames, converts its native pixel format to RGB24, applies the selected
@@ -9,22 +9,17 @@ defmodule Beamicom.Scenic.Screen do
 
   ## Sources
 
-    * Scenic `Assets.Stream` (hand-built `{Bitmap, {w,h,:rgb}, bin}` tuple) and
-      `scenic_driver_local` linear sampling — spec §7.
+    * Scenic `Assets.Stream` (hand-built `{Bitmap, {w,h,:rgb}, bin}` tuple) — spec §7.
   """
-  use Scenic.Scene
+  use Scenic.Component, has_children: false
 
-  import Scenic.Primitives, only: [rect: 3, text: 2, text: 3]
-  import Scenic.Components, only: [button: 3]
+  import Scenic.Primitives, only: [rect: 3]
   alias Beamicom.Host.{Output, VideoFrame}
-  alias Beamicom.NES.ShareImage
   alias Beamicom.NES.Output, as: NESOutput
   alias Beamicom.Scenic.{Runtime, Video}
   alias Scenic.Assets.Stream
   alias Scenic.Assets.Stream.Bitmap
   alias Scenic.Graph
-
-  @stream "beamicom_screen"
 
   # Player-1 key → button.
   @buttons %{
@@ -38,15 +33,22 @@ defmodule Beamicom.Scenic.Screen do
     key_rightshift: :select
   }
 
-  # Height (px) of the control bar below the game screen (holds the Save button
-  # and the "saved …" confirmation label). The viewport is sized game-height +
-  # this, so the controls never overlap the game.
-  @controls_h 76
+  @impl Scenic.Component
+  def validate(params) when is_list(params) do
+    required = [:system, :runtime_kind, :runtime, :output, :video, :output_size]
 
-  @doc "Extra viewport height reserved for the control bar below the screen."
-  def controls_height, do: @controls_h
-  def controls_height(:nes), do: @controls_h
-  def controls_height(:gbc), do: 0
+    if Enum.all?(required, &Keyword.has_key?(params, &1)),
+      do: {:ok, params},
+      else: {:error, "game surface is missing required session options"}
+  end
+
+  def validate(params), do: {:error, "expected game surface options, got: #{inspect(params)}"}
+
+  @impl Scenic.Component
+  def bounds(params, _styles) do
+    {width, height} = Keyword.fetch!(params, :output_size)
+    {0, 0, width, height}
+  end
 
   @impl true
   def init(scene, params, _opts) do
@@ -65,13 +67,16 @@ defmodule Beamicom.Scenic.Screen do
       end)
 
     Stream.start_link(nil)
-    Stream.put(@stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
+    stream = "beamicom_screen_#{System.unique_integer([:positive])}"
+    ensure_stream(stream, {w, h})
     subscribe_video(runtime_kind, output)
 
-    graph =
-      Graph.build()
-      |> rect({w, h}, fill: {:stream, @stream})
-      |> add_nes_controls(system, w, h)
+    styles =
+      if Keyword.get(params, :border?, true),
+        do: [fill: {:stream, stream}, stroke: {2, {105, 213, 255}}],
+        else: [fill: {:stream, stream}]
+
+    graph = Graph.build() |> rect({w, h}, styles)
 
     scene =
       scene
@@ -83,15 +88,32 @@ defmodule Beamicom.Scenic.Screen do
         runtime: runtime,
         output: output,
         video_filter: video_filter,
+        native_size: {video.width, video.height},
         pressed: MapSet.new(),
         gray: false,
         paused: false,
+        stream: stream,
+        fps_started_at: now_ms(),
+        fps_frames: 0,
         graph: graph
       )
       |> push_graph(graph)
 
-    request_input(scene, [:key])
+    scene = render_latest_scene(scene)
+
     {:ok, scene}
+  end
+
+  @impl Scenic.Scene
+  def handle_update(params, opts, scene) do
+    Stream.delete(scene.assigns.stream)
+    init(scene, params, opts)
+  end
+
+  @impl true
+  def terminate(_reason, scene) do
+    if stream = scene.assigns[:stream], do: Stream.delete(stream)
+    :ok
   end
 
   @impl true
@@ -108,45 +130,12 @@ defmodule Beamicom.Scenic.Screen do
   def handle_info({:audio, _sample_count, _pcm}, scene), do: {:noreply, scene}
   def handle_info({:audio_chunk, _chunk}, scene), do: {:noreply, scene}
 
-  # A background save finished: show the file name under the Save button.
-  def handle_info({:saved, path}, scene) do
-    graph = Graph.modify(scene.assigns.graph, :saved_label, &text(&1, "saved #{path}"))
-    {:noreply, scene |> assign(graph: graph) |> push_graph(graph)}
-  end
+  @impl Scenic.Scene
+  def handle_put({:key, key, down?}, scene) when is_boolean(down?),
+    do: {:noreply, key(key, down?, scene)}
 
-  @impl true
-  def handle_input({:key, {key, action, _mods}}, _id, scene) when action in [0, 1] do
-    {:noreply, key(key, action == 1, scene)}
-  end
-
-  def handle_input(_input, _id, scene), do: {:noreply, scene}
-
-  # The "Save" button snapshots the live console and writes a share PNG.
-  @impl true
-  def handle_event({:click, :save}, _from, scene) do
-    if scene.assigns.system == :nes, do: save_snapshot(scene.assigns.runtime)
-    {:noreply, scene}
-  end
-
-  def handle_event(_event, _from, scene), do: {:noreply, scene}
-
-  defp save_snapshot(runtime) do
-    case Beamicom.NES.Runtime.snapshot(runtime) do
-      {console, fb} when not is_nil(fb) ->
-        stamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S")
-        path = "beamicom-save-#{stamp}.png"
-
-        me = self()
-
-        Task.start(fn ->
-          File.write!(path, ShareImage.to_png(console, fb))
-          send(me, {:saved, path})
-        end)
-
-      _ ->
-        IO.puts("no frame rendered yet — nothing to save")
-    end
-  end
+  def handle_put(:reset_fps, scene),
+    do: {:noreply, assign(scene, fps_started_at: now_ms(), fps_frames: 0)}
 
   # Controller keys update the pressed set and push it to player 1.
   defp key(k, down?, scene) when is_map_key(@buttons, k) do
@@ -157,12 +146,6 @@ defmodule Beamicom.Scenic.Screen do
 
     Beamicom.EI.Client.set_buttons(Beamicom.Scenic.EIClient, 1, MapSet.to_list(pressed))
     assign(scene, pressed: pressed)
-  end
-
-  # Debug keys act on key-down only.
-  defp key(:key_space, true, scene) do
-    runtime_action(scene, if(scene.assigns.paused, do: :resume, else: :pause))
-    assign(scene, paused: not scene.assigns.paused)
   end
 
   defp key(:key_period, true, scene) do
@@ -178,8 +161,9 @@ defmodule Beamicom.Scenic.Screen do
   defp render_latest(scene) do
     assigns = scene.assigns
 
-    case latest_video(assigns.runtime_kind, assigns.output) do
-      %VideoFrame{} = frame ->
+    case safe_latest_video(assigns.runtime_kind, assigns.output) do
+      %VideoFrame{width: width, height: height} = frame
+      when {width, height} == scene.assigns.native_size ->
         rgb = Video.rgb_payload(frame, grayscale: assigns.gray)
         {w, h} = assigns.output_size
 
@@ -191,46 +175,106 @@ defmodule Beamicom.Scenic.Screen do
             assigns.video_filter
           )
 
-        Stream.put(@stream, {Bitmap, {w, h, :rgb}, pixels})
-        {:noreply, scene}
+        Stream.put(assigns.stream, {Bitmap, {w, h, :rgb}, pixels})
+        {:noreply, record_frame(scene)}
 
       nil ->
         {:noreply, scene}
+
+      _incompatible_frame ->
+        {:noreply, scene}
+    end
+  end
+
+  defp safe_latest_video(runtime_kind, output) do
+    latest_video(runtime_kind, output)
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp render_latest_scene(scene) do
+    case render_latest(scene) do
+      {:noreply, scene} -> scene
     end
   end
 
   defp latest_video(:nes, _output), do: NESOutput.latest_video()
   defp latest_video(:host, output), do: Output.latest_video(output)
 
-  defp subscribe_video(:nes, _output), do: NESOutput.subscribe_video()
-  defp subscribe_video(:host, output), do: Output.subscribe_video(output)
+  defp subscribe_video(:nes, _output), do: safe_subscribe(&NESOutput.subscribe_video/0)
+
+  defp subscribe_video(:host, output),
+    do: safe_subscribe(fn -> Output.subscribe_video(output) end)
+
+  defp safe_subscribe(subscribe) do
+    subscribe.()
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp ensure_stream(stream, {w, h}) do
+    case Stream.fetch(stream) do
+      {:ok, {Bitmap, {^w, ^h, :rgb}, _pixels}} ->
+        :ok
+
+      _other ->
+        Stream.put(stream, {Bitmap, {w, h, :rgb}, :binary.copy(<<0, 0, 0>>, w * h)})
+    end
+  end
+
+  defp record_frame(scene) do
+    frames = scene.assigns.fps_frames + 1
+    elapsed = now_ms() - scene.assigns.fps_started_at
+
+    if elapsed >= 1_000 do
+      send_parent_event(scene, {:render_fps, frames * 1_000 / elapsed})
+      assign(scene, fps_started_at: now_ms(), fps_frames: 0)
+    else
+      assign(scene, fps_frames: frames)
+    end
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   defp capabilities(:nes), do: Beamicom.NES.System.capabilities()
   defp capabilities(:gbc), do: Beamicom.GB.System.capabilities()
-
-  defp add_nes_controls(graph, :gbc, _width, _height), do: graph
-
-  defp add_nes_controls(graph, :nes, width, height) do
-    graph
-    |> button("Save",
-      id: :save,
-      theme: :dark,
-      width: 120,
-      height: 28,
-      t: {div(width - 120, 2), height + 10}
-    )
-    |> text("",
-      id: :saved_label,
-      text_align: :center,
-      font_size: 16,
-      fill: :white,
-      t: {div(width, 2), height + 60}
-    )
-  end
+  defp capabilities(:snes), do: Beamicom.Scenic.SNESSystem.capabilities()
 
   defp runtime_action(%{assigns: %{runtime_kind: :nes, runtime: runtime}}, action),
     do: apply(Beamicom.NES.Runtime, action, [runtime])
 
   defp runtime_action(%{assigns: %{runtime_kind: :host, runtime: runtime}}, action),
     do: apply(Runtime, action, [runtime])
+end
+
+defmodule Beamicom.Scenic.Screen do
+  @moduledoc "Compatibility root scene backed by the shell game-surface component."
+
+  use Scenic.Scene
+
+  alias Beamicom.Scenic.Component.GameSurface
+
+  def controls_height, do: 0
+  def controls_height(_system), do: 0
+
+  @impl Scenic.Scene
+  def init(scene, params, opts), do: GameSurface.init(scene, params, opts)
+
+  @impl Scenic.Scene
+  def handle_update(params, opts, scene), do: GameSurface.handle_update(params, opts, scene)
+
+  @impl true
+  def handle_info(message, scene), do: GameSurface.handle_info(message, scene)
+
+  @impl Scenic.Scene
+  def handle_input({:key, {key, action, _mods}}, _id, scene) when action in [0, 1],
+    do: GameSurface.handle_put({:key, key, action == 1}, scene)
+
+  def handle_input(_input, _id, scene), do: {:noreply, scene}
+
+  @impl Scenic.Scene
+  def handle_event(_event, _from, scene), do: {:noreply, scene}
+
+  @impl true
+  def terminate(reason, scene), do: GameSurface.terminate(reason, scene)
 end

@@ -88,7 +88,8 @@ defmodule Beamicom.NES.Runtime do
       epoch: now(),
       pace: pace,
       speed: speed,
-      paused: false
+      paused: false,
+      pending_enhancements: []
     }
 
     {:ok, schedule(state)}
@@ -108,8 +109,8 @@ defmodule Beamicom.NES.Runtime do
   end
 
   def handle_call({:set_enhancement, enhancement, enabled}, _from, state) do
-    console = Console.set_enhancement(state.console, enhancement, enabled)
-    {:reply, :ok, %{state | console: console}}
+    pending_enhancements = Keyword.put(state.pending_enhancements, enhancement, enabled)
+    {:reply, :ok, %{state | pending_enhancements: pending_enhancements}}
   end
 
   @impl true
@@ -141,12 +142,16 @@ defmodule Beamicom.NES.Runtime do
     console = %{console | bus: bus}
     Output.publish(frame)
     Output.publish_audio(sample_count, pcm)
-    %{state | console: console, frame: frame.number, published: state.published + 1}
+
+    state
+    |> Map.merge(%{console: console, frame: frame.number, published: state.published + 1})
+    |> apply_pending_enhancements()
   end
 
   # A sub-frame slice: run a fraction of a frame's cycles, publish a video frame
   # if one became ready, then drain and publish just this slice's audio.
   defp run_slice(state) do
+    previous_published = state.published
     target = state.console.cpu.cycles + state.cycles_per_slice
     console = run_cycles(state.console, target)
     fb = console.bus.ppu.frame_ready
@@ -164,7 +169,23 @@ defmodule Beamicom.NES.Runtime do
       end
 
     Output.publish_audio(sample_count, pcm)
-    %{state | console: console, frame: frame, published: published}
+
+    state
+    |> Map.merge(%{console: console, frame: frame, published: published})
+    |> then(fn state ->
+      if published > previous_published, do: apply_pending_enhancements(state), else: state
+    end)
+  end
+
+  defp apply_pending_enhancements(%{pending_enhancements: []} = state), do: state
+
+  defp apply_pending_enhancements(state) do
+    console =
+      Enum.reduce(state.pending_enhancements, state.console, fn {enhancement, enabled}, console ->
+        Console.set_enhancement(console, enhancement, enabled)
+      end)
+
+    %{state | console: console, pending_enhancements: []}
   end
 
   # Deferred Nx video and block audio are independent computations over the same

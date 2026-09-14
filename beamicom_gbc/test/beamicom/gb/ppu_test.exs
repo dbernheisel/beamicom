@@ -33,6 +33,25 @@ defmodule Beamicom.GB.PPUTest do
     assert (PPU.read(same, 0xFF41) &&& 0x03) == 0
   end
 
+  test "extends mode 3 for scrolling, the window, and object fetches" do
+    scrolled = PPU.new(lcdc: 0x81, scx: 5)
+    assert PPU.hblank_dot(scrolled) == 257
+
+    windowed = PPU.new(lcdc: 0xA1, scx: 5, wy: 0, wx: 87)
+    assert PPU.hblank_dot(windowed) == 263
+
+    objects =
+      PPU.new(lcdc: 0x83)
+      |> PPU.load_oam(0, <<16, 8, 0, 0, 16, 10, 0, 0>>)
+
+    # The first object pays five alignment dots plus six fetch dots. The
+    # overlapping object shares its background tile and pays only the fetch.
+    assert PPU.hblank_dot(objects) == 269
+
+    {objects_disabled, []} = PPU.write(objects, 0xFF40, 0x81)
+    assert PPU.hblank_dot(objects_disabled) == 252
+  end
+
   test "reports LYC and VBlank interrupt edges and completed frames explicitly" do
     ppu = PPU.new(lcdc: 0x80, stat: 0x40, lyc: 1)
     {ppu, [:lcd_stat]} = PPU.tick(ppu, @line_dots)
@@ -215,6 +234,23 @@ defmodule Beamicom.GB.PPUTest do
     dmg = PPU.new(lcdc: 0)
     assert PPU.read(dmg, 0xFF68) == 0xFF
     assert {^dmg, []} = PPU.write(dmg, 0xFF69, 0x12)
+  end
+
+  test "CGB palette RAM stays inaccessible through a scroll-extended mode 3" do
+    ppu = PPU.new(model: :cgb, lcdc: 0x81, scx: 5)
+    {ppu, []} = PPU.tick(ppu, 252)
+    assert PPU.mode(ppu) == 3
+
+    {ppu, []} = PPU.write(ppu, 0xFF68, 0x80)
+    {ppu, []} = PPU.write(ppu, 0xFF69, 0)
+    assert PPU.read(ppu, 0xFF68) == 0x81
+    assert PPU.read(ppu, 0xFF69) == 0xFF
+
+    {ppu, []} = PPU.tick(ppu, 5)
+    assert PPU.mode(ppu) == 0
+    {ppu, []} = PPU.write(ppu, 0xFF68, 0)
+    {ppu, []} = PPU.write(ppu, 0xFF69, 0)
+    assert PPU.read(ppu, 0xFF69) == 0
   end
 
   test "CGB background and window use bank, palette, and flip attributes" do

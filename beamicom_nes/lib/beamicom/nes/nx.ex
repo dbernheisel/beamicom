@@ -20,6 +20,8 @@ if Code.ensure_loaded?(Nx.Defn) and Code.ensure_loaded?(EXLA) do
         Beamicom.NES.System.load(media, Beamicom.NES.Nx.video_options(:composite))
 
     The standard presets are `:composite`, `:svideo`, `:rgb`, and `:monochrome`.
+    Pass `lighting: profile` to composite ROM-specific sprite lighting after the
+    selected NTSC filter.
     """
     def video_options(preset \\ :composite, options \\ []) do
       renderer_options = Keyword.put(options, :preset, preset)

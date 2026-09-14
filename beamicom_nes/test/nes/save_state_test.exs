@@ -14,13 +14,15 @@ defmodule Beamicom.NES.SaveStateTest do
     c = loaded_console()
     {state_bin, rom_blob} = SaveState.split(c)
     assert {:ok, c2} = SaveState.merge(state_bin, rom_blob)
-    # frame_ready + buffered audio are dropped on split (regenerated on resume).
+    # frame_ready, renderer caches, and buffered audio are regenerated on resume.
     expected =
       c
       |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:renderer_state)], nil)
       |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
 
-    assert :erlang.term_to_binary(expected) == :erlang.term_to_binary(c2)
+    actual = put_in(c2.bus.ppu.renderer_state, nil)
+    assert :erlang.term_to_binary(expected) == :erlang.term_to_binary(actual)
   end
 
   test "split zeroes out prg, chr, and transient output buffers in the saved state_bin" do
@@ -30,6 +32,7 @@ defmodule Beamicom.NES.SaveStateTest do
     assert stripped.bus.prg == <<>>
     assert stripped.bus.ppu.chr == <<>>
     assert stripped.bus.ppu.frame_ready == nil
+    assert stripped.bus.ppu.renderer_state == nil
     assert stripped.bus.apu.samples == []
   end
 

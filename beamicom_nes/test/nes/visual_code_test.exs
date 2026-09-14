@@ -90,6 +90,28 @@ defmodule Beamicom.NES.VisualCodeTest do
       assert same_state?(c, c2)
     end
 
+    test "to_png/2 uses the native plane when a renderer attaches wider RGB" do
+      c = run_frames(Console.load(@nestest), 60)
+      frame = c.bus.ppu.frame_ready
+      native_rgb = Palette.to_rgb(%{frame | rgb: nil})
+
+      filtered = %{
+        frame
+        | rgb: :binary.copy(<<255, 0, 255>>, 602 * 240),
+          rgb_width: 602,
+          rgb_height: 240
+      }
+
+      {width, _height, image} = c |> ShareImage.to_png(filtered) |> PNG.decode()
+      inset = div(width - 256 * 4, 2)
+
+      for {x, y} <- [{0, 0}, {80, 120}, {255, 239}] do
+        native = binary_part(native_rgb, (y * 256 + x) * 3, 3)
+        preview = binary_part(image, ((inset + y * 4) * width + inset + x * 4) * 3, 3)
+        assert preview == native
+      end
+    end
+
     test "round-trips through a PNG file on disk" do
       c = run_frames(Console.load(@nestest), 60)
       {state_bin, rom_blob} = SaveState.split(c)

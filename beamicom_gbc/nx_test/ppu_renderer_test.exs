@@ -178,7 +178,7 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
       |> PPU.load_vram(0x1800, :binary.copy(<<0>>, 0x400))
       |> PPU.load_oam(0, <<56, 24, 1, 0>>)
 
-    {ppu, _signals} = PPU.tick(ppu, 40 * 456 + 252)
+    {ppu, _signals} = PPU.tick(ppu, 40 * 456 + PPU.hblank_dot(ppu, 40))
     {ppu, []} = PPU.write(ppu, 0x8000, 0xFF)
     {ppu, []} = PPU.write(ppu, 0xFE00, 72)
 

@@ -4,6 +4,17 @@ defmodule Beamicom.NES.PPUSpriteTest do
   import Bitwise
   alias Beamicom.NES.PPU
 
+  defmodule ComposedRenderer do
+    def prepare_chr(_chr, options), do: Keyword.fetch!(options, :owner)
+    def atlas_state(owner), do: owner
+    def output_dimensions(_state), do: {300, 240}
+
+    def render_composed(pixels, _palette, masks, _edge_mask, owner, _frame_number) do
+      send(owner, {:rendered_composed, byte_size(pixels), byte_size(masks)})
+      {pixels, :binary.copy(<<1, 2, 3>>, 300 * 240)}
+    end
+  end
+
   @moduledoc """
   Deterministic sprite tests (spec §5.2 item 4): OAM evaluation, pattern fetch,
   priority compositing, and sprite-0 hit — verified against a controlled scene,
@@ -91,5 +102,23 @@ defmodule Beamicom.NES.PPUSpriteTest do
     assert :binary.at(enhanced.frame_ready.pixels, ninth) == 0x11
     assert (hardware.status &&& 0x20) != 0
     assert (enhanced.status &&& 0x20) != 0
+  end
+
+  test "unlimited sprites are composed before a configured presentation renderer" do
+    visible = for i <- 0..8, into: <<>>, do: <<30, 1, 0, i * 10>>
+    oam = visible <> <<0::size((256 - byte_size(visible)) * 8)>>
+
+    ppu =
+      PPU.new(chr(), :horizontal, ppu_renderer: {ComposedRenderer, owner: self()})
+      |> PPU.set_enhancement(:unlimited_sprites, true)
+      |> then(&%{&1 | mask: 0x14, oam: oam})
+      |> run_to_post_render()
+
+    assert match?({:composed, ComposedRenderer, _, _, _, _, _, _}, ppu.frame_ready.render)
+
+    frame = PPU.resolve_frame(ppu.frame_ready)
+    assert_receive {:rendered_composed, 61_440, 240}
+    assert byte_size(frame.rgb) == 300 * 240 * 3
+    assert :binary.at(frame.pixels, 32 * 256 + 82) == 0x11
   end
 end

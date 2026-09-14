@@ -7,6 +7,10 @@
 # The directory Mix downloads your dependencies sources to.
 /deps/
 
+# Native build outputs.
+/priv/__scenic/
+/priv/native/
+
 # Where third-party dependencies like ExDoc output generated docs.
 /doc/
 

@@ -115,6 +115,7 @@ defmodule Beamicom.NES.OutputTest do
 
     assert :ok = Runtime.set_enhancement(:test_runtime, :hide_horizontal_overscan, true)
     assert :ok = Runtime.set_enhancement(:test_runtime, :unlimited_sprites, true)
+    assert_receive {:frame, _n}, 2000
     {console, _frame} = Runtime.snapshot(:test_runtime)
     assert console.bus.ppu.hide_horizontal_overscan
     assert console.bus.ppu.unlimited_sprites

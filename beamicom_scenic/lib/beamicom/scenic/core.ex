@@ -4,7 +4,8 @@ defmodule Beamicom.Scenic.Core do
   use Beamicom.Host.Registry,
     systems: [
       {Beamicom.NES.System, :nes},
-      {Beamicom.GB.System, :host}
+      {Beamicom.GB.System, :host},
+      {Beamicom.Scenic.SNESSystem, :host}
     ],
     extra_extensions: [{".png", Beamicom.NES.System}],
     signatures: [

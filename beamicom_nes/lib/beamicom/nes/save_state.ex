@@ -18,6 +18,11 @@ defmodule Beamicom.NES.SaveState do
       # Drop the last rendered frame: it's transient output, re-rendered on resume,
       # and the biggest chunk of the payload.
       |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:frame_ready)], nil)
+      # Renderer state is a derived cache. Nx/EXLA states can contain process-local
+      # device-buffer references, so serializing them makes a save larger without
+      # making those references reusable in the loading VM. `restore_renderers/1`
+      # rebuilds the cache from renderer_options after the state is decoded.
+      |> put_in([Access.key!(:bus), Access.key!(:ppu), Access.key!(:renderer_state)], nil)
       # Drop the buffered audio samples for the same reason (the audio analog of
       # frame_ready): a drained, regenerated output buffer, ~1KB compressed.
       |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
@@ -67,8 +72,15 @@ defmodule Beamicom.NES.SaveState do
   end
 
   defp ensure_atoms_loaded do
-    Application.load(:beamicom_nes)
-    for mod <- Application.spec(:beamicom_nes, :modules) || [], do: Code.ensure_loaded(mod)
+    # A save can contain renderer option atoms and legacy derived renderer state.
+    # Load optional renderer applications before binary_to_term(..., [:safe]) so
+    # saves made with Nx/EXLA remain readable in a fresh VM. Missing optional apps
+    # simply expose no module list and are handled by restore_renderers/1 later.
+    for app <- [:beamicom_nes, :nx, :exla] do
+      Application.load(app)
+      for mod <- Application.spec(app, :modules) || [], do: Code.ensure_loaded(mod)
+    end
+
     :ok
   end
 

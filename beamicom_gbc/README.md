@@ -129,12 +129,13 @@ matching `.gb` or `.gbc` files in explicitly supplied search directories.
 
 ## Known timing limitations
 
-PPU mode 3 currently uses the fixed minimum 172-dot duration; FIFO stalls and
-mid-scanline register effects are not timing-visible. CGB STOP speed switching
-toggles speed immediately at the instruction boundary. Hardware pauses the CPU
-for roughly 2050 M-cycles and freezes parts of the PPU differently by LCD mode;
-that oscillator transition is intentionally deferred until those clock-domain
-effects can be represented together.
+PPU mode 3 includes the documented fine-scroll, window, and object-fetch FIFO
+penalties. Pixel composition remains scanline-granular, so mid-scanline register
+effects are not timing-visible. CGB STOP speed switching toggles speed immediately
+at the instruction boundary. Hardware pauses the CPU for roughly 2050 M-cycles
+and freezes parts of the PPU differently by LCD mode; that oscillator transition
+is intentionally deferred until those clock-domain effects can be represented
+together.
 
 The APU models digital register/channel behavior but not the analog high-pass
 filter, capacitor state, DAC pops, envelope zombie behavior, sweep-negate
