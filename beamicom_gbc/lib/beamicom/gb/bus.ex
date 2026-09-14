@@ -646,7 +646,13 @@ defmodule Beamicom.GB.Bus do
         (clock >= @vblank_start and dot + dots < @dots_per_line)
 
     if before_boundary? do
-      ppu = if (lcdc &&& 0x80) == 0, do: ppu, else: %{ppu | clock: clock + dots}
+      ppu =
+        if (lcdc &&& 0x80) == 0 do
+          {ppu, []} = PPU.tick(ppu, dots)
+          ppu
+        else
+          %{ppu | clock: clock + dots}
+        end
 
       %{
         bus

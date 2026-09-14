@@ -84,6 +84,14 @@ defmodule Beamicom.GB.BusTest do
     end
   end
 
+  test "timer-off cycle fast path advances LCD panel decay while its raster is stopped" do
+    bus = mapped_bus(model: :cgb) |> Bus.write(0xFF40, 0)
+    bus = Bus.tick(bus, 2_000)
+
+    assert bus.ppu.clock == 0
+    assert bus.ppu.lcd_off_dots == 1_821
+  end
+
   test "each TAC clock selection increments TIMA on the selected falling edge" do
     for {select, period} <- [{0, 1024}, {1, 16}, {2, 64}, {3, 256}] do
       bus = Bus.new() |> Bus.write(0xFF07, 0x04 ||| select)

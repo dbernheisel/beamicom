@@ -61,6 +61,42 @@ defmodule Beamicom.GB.SaveStateTest do
     assert actual_machine == expected_machine
   end
 
+  test "loads version-one states saved before recent APU and PPU fields were modeled" do
+    rom = DiagnosticROM.build_cgb()
+    {:ok, machine} = Machine.load(rom)
+    {state, rom_blob} = SaveState.split(machine)
+
+    payload = state |> :zlib.uncompress() |> :erlang.binary_to_term()
+    apu = payload.machine.bus.apu
+
+    legacy_apu =
+      apu
+      |> Map.delete(:sample_dacs)
+      |> Map.delete(:capacitor_left)
+      |> Map.delete(:capacitor_right)
+
+    legacy_ppu =
+      payload.machine.bus.ppu
+      |> Map.delete(:lcd_frame_state)
+      |> Map.delete(:lcd_off_dots)
+
+    legacy_machine =
+      %{payload.machine | bus: %{payload.machine.bus | apu: legacy_apu, ppu: legacy_ppu}}
+
+    legacy_state =
+      payload
+      |> Map.put(:machine, legacy_machine)
+      |> :erlang.term_to_binary()
+      |> :zlib.compress()
+
+    assert {:ok, restored} = SaveState.merge(legacy_state, rom_blob)
+    assert restored.bus.apu.sample_dacs == []
+    assert restored.bus.apu.capacitor_left == 0.0
+    assert restored.bus.apu.capacitor_right == 0.0
+    assert restored.bus.ppu.lcd_frame_state == :steady
+    assert restored.bus.ppu.lcd_off_dots == 0
+  end
+
   test "rejects a different ROM, corrupt payload, and unsupported version" do
     rom = DiagnosticROM.build_cgb()
     {:ok, machine} = Machine.load(rom)

@@ -59,6 +59,7 @@ defmodule Beamicom.GB.SaveState do
     ensure_atoms_loaded()
 
     with {:ok, payload} <- decode_state(state_blob),
+         payload = migrate_payload(payload),
          :ok <- validate_envelope(payload),
          {:ok, rom} <- decode_rom(rom_blob),
          :ok <- validate_rom(rom, payload.rom),
@@ -73,6 +74,7 @@ defmodule Beamicom.GB.SaveState do
     ensure_atoms_loaded()
 
     with {:ok, payload} <- decode_state(state_blob),
+         payload = migrate_payload(payload),
          :ok <- validate_envelope(payload) do
       {:ok, %{version: payload.version, rom: payload.rom}}
     end
@@ -97,6 +99,26 @@ defmodule Beamicom.GB.SaveState do
   end
 
   defp decode_state(_blob), do: {:error, :state_too_large}
+
+  defp migrate_payload(
+         %{version: 1, machine: %{bus: %{apu: apu, ppu: ppu} = bus} = machine} = payload
+       )
+       when is_map(apu) and is_map(ppu) do
+    apu =
+      apu
+      |> Map.put_new(:sample_dacs, [])
+      |> Map.put_new(:capacitor_left, 0.0)
+      |> Map.put_new(:capacitor_right, 0.0)
+
+    ppu =
+      ppu
+      |> Map.put_new(:lcd_frame_state, :steady)
+      |> Map.put_new(:lcd_off_dots, 0)
+
+    %{payload | machine: %{machine | bus: %{bus | apu: apu, ppu: ppu}}}
+  end
+
+  defp migrate_payload(payload), do: payload
 
   defp validate_envelope(
          %{
@@ -226,6 +248,8 @@ defmodule Beamicom.GB.SaveState do
         sized_binary?(ppu.oam, 160) and ppu.frame == blank_frame(model) and
         valid_binary_list_sizes?(ppu.lines, 144, line_sizes) and byte_tuple?(ppu.registers, 10) and
         integer_between?(ppu.clock, 0, @frame_dots) and non_negative_integer?(ppu.frame_number) and
+        ppu.lcd_frame_state in [:steady, :suppress, :suppressed] and
+        integer_between?(ppu.lcd_off_dots, 0, 1_821) and
         integer_between?(ppu.window_line, 0, 144) and is_boolean(ppu.stat_line) and
         ppu.vram_bank in [0, 1] and pair_of_binaries?(ppu.color_ram, 64) and
         pair_of_color_caches?(ppu.color_cache) and valid_color_indexes?(ppu.color_indexes)

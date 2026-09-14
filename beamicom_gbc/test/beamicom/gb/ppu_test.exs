@@ -28,7 +28,8 @@ defmodule Beamicom.GB.PPUTest do
 
     {ppu, []} = PPU.write(ppu, 0xFF40, 0)
     {same, []} = PPU.tick(ppu, 10_000)
-    assert same == ppu
+    assert %{same | lcd_off_dots: ppu.lcd_off_dots} == ppu
+    assert same.lcd_off_dots == 1_821
     assert PPU.read(same, 0xFF44) == 0
     assert (PPU.read(same, 0xFF41) &&& 0x03) == 0
   end
@@ -70,6 +71,55 @@ defmodule Beamicom.GB.PPUTest do
     assert PPU.ly(ppu) == 0
     assert PPU.mode(ppu) == 2
     assert signals == []
+  end
+
+  test "suppresses the first frame after the LCD is enabled" do
+    previous_cgb_frame = :binary.copy(<<0x42>>, 160 * 144 * 3)
+
+    cgb = %{PPU.new(model: :cgb, lcdc: 0) | frame: previous_cgb_frame}
+    {cgb, []} = PPU.write(cgb, 0xFF40, 0x80)
+    assert cgb.lcd_frame_state == :suppress
+
+    {cgb, signals} = PPU.tick(cgb, @line_dots * 144)
+    assert [{:frame, 0, ^previous_cgb_frame}, :vblank] = signals
+    assert cgb.lcd_frame_state == :suppressed
+
+    previous_dmg_frame = :binary.copy(<<3>>, 160 * 144)
+    dmg = %{PPU.new(lcdc: 0) | frame: previous_dmg_frame}
+    {dmg, []} = PPU.write(dmg, 0xFF40, 0x80)
+
+    {dmg, signals} = PPU.tick(dmg, @line_dots * 144)
+    assert [{:frame, 0, frame}, :vblank] = signals
+    assert frame == :binary.copy(<<0>>, 160 * 144)
+    assert dmg.lcd_frame_state == :suppressed
+  end
+
+  test "blanks a CGB startup frame after the LCD has been off long enough" do
+    previous_frame = :binary.copy(<<0x42>>, 160 * 144 * 3)
+    cgb = %{PPU.new(model: :cgb, lcdc: 0) | frame: previous_frame}
+    {cgb, []} = PPU.tick(cgb, 1_821)
+    {cgb, []} = PPU.write(cgb, 0xFF40, 0x80)
+
+    {cgb, signals} = PPU.tick(cgb, @line_dots * 144)
+    assert [{:frame, 0, frame}, :vblank] = signals
+    assert frame == :binary.copy(<<255>>, 160 * 144 * 3)
+    assert cgb.lcd_frame_state == :suppressed
+    assert cgb.lcd_off_dots == 0
+  end
+
+  test "does not suppress consecutive CGB LCD startup frames" do
+    previous_frame = :binary.copy(<<0x42>>, 160 * 144 * 3)
+    cgb = %{PPU.new(model: :cgb, lcdc: 0) | frame: previous_frame}
+    {cgb, []} = PPU.write(cgb, 0xFF40, 0x80)
+    {cgb, _signals} = PPU.tick(cgb, @line_dots * 144)
+
+    {cgb, []} = PPU.write(cgb, 0xFF40, 0)
+    {cgb, []} = PPU.write(cgb, 0xFF40, 0x80)
+    assert cgb.lcd_frame_state == :steady
+
+    {_cgb, signals} = PPU.tick(cgb, @line_dots * 144)
+    assert [{:frame, 1, frame}, :vblank] = signals
+    refute frame == previous_frame
   end
 
   test "small in-mode tick fast paths match one exact full-frame batch" do

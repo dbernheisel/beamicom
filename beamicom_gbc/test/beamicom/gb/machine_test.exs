@@ -17,7 +17,11 @@ defmodule Beamicom.GB.MachineTest do
     assert Bus.read(machine.bus, 0x8000) == 0xFF
     assert Bus.read(machine.bus, 0xFF47) == 0xE4
 
-    assert {:ok, machine, 0, frame} = Machine.run_until_frame(machine)
+    assert {:ok, machine, 0, startup_frame} = Machine.run_until_frame(machine)
+    assert startup_frame == :binary.copy(<<0>>, 160 * 144)
+    assert machine.bus.ppu.lcd_frame_state == :suppressed
+
+    assert {:ok, machine, 1, frame} = Machine.run_until_frame(machine)
     assert byte_size(frame) == 160 * 144
     assert PPU.frame(machine.bus.ppu) == frame
     assert binary_part(frame, 0, 160) == :binary.copy(<<1>>, 160)

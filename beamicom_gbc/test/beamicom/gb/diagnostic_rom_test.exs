@@ -10,7 +10,10 @@ defmodule Beamicom.GB.DiagnosticROMTest do
 
     # The machine starts with blank VRAM; only execution of the ROM can alter it.
     assert PPU.read(machine.bus.ppu, 0x8000) == 0
-    assert {:ok, machine, 0, frame} = Machine.run_until_frame(machine)
+    assert {:ok, machine, 0, startup_frame} = Machine.run_until_frame(machine)
+    assert startup_frame == :binary.copy(<<0>>, 160 * 144)
+    assert machine.bus.ppu.lcd_frame_state == :suppressed
+    assert {:ok, machine, 1, frame} = Machine.run_until_frame(machine)
 
     assert byte_size(frame) == 160 * 144
     assert MapSet.new(:binary.bin_to_list(frame)) == MapSet.new(0..3)
@@ -43,7 +46,10 @@ defmodule Beamicom.GB.DiagnosticROMTest do
     assert machine.bus.ppu.color_ram == PPU.new(model: :cgb).color_ram
     assert machine.bus.ppu.frame == :binary.copy(<<255>>, 160 * 144 * 3)
 
-    assert {:ok, machine, 0, frame} = Machine.run_until_frame(machine)
+    assert {:ok, machine, 0, startup_frame} = Machine.run_until_frame(machine)
+    assert startup_frame == :binary.copy(<<255>>, 160 * 144 * 3)
+    assert machine.bus.ppu.lcd_frame_state == :suppressed
+    assert {:ok, machine, 1, frame} = Machine.run_until_frame(machine)
     assert byte_size(frame) == 160 * 144 * 3
     assert length(Enum.uniq(for <<rgb::binary-size(3) <- frame>>, do: rgb)) == 26
     assert :erlang.crc32(frame) == 642_352_328
