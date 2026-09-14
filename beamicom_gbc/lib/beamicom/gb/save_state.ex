@@ -45,6 +45,7 @@ defmodule Beamicom.GB.SaveState do
         blank_frame(machine.model)
       )
       |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:samples)], [])
+      |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:sample_dacs)], [])
       |> put_in([Access.key!(:bus), Access.key!(:apu), Access.key!(:sample_count)], 0)
       |> put_in([Access.key!(:bus), Access.key!(:serial_output)], [])
 
@@ -242,13 +243,18 @@ defmodule Beamicom.GB.SaveState do
         valid_noise?(apu.ch4) and integer_between?(apu.sequencer_phase, 0, 8_191) and
         integer_between?(apu.sequencer_step, 0, 7) and
         integer_between?(apu.sample_phase, 0, @apu_clock_rate - 1) and apu.pending_dots == 0 and
-        apu.samples == [] and apu.sample_count == 0 and apu.render_events == [] and
-        apu.render_dots == 0 and valid_render_triggers?(apu.render_triggers)
+        apu.samples == [] and apu.sample_dacs == [] and apu.sample_count == 0 and
+        valid_capacitor?(apu.capacitor_left) and valid_capacitor?(apu.capacitor_right) and
+        apu.render_events == [] and apu.render_dots == 0 and
+        valid_render_triggers?(apu.render_triggers)
 
     if valid, do: :ok, else: {:error, :corrupt}
   end
 
   defp validate_apu(_apu, _model), do: {:error, :corrupt}
+
+  defp valid_capacitor?(value),
+    do: is_float(value) and value >= -32_768.0 and value <= 32_768.0
 
   defp valid_pulse?(%Pulse{} = pulse) do
     exact_struct?(pulse, Pulse) and

@@ -97,6 +97,21 @@ defmodule Beamicom.Host.OutputTest do
     assert_receive {:video_frame, :test, 101}
   end
 
+  test "latest audio subscribers skip stale chunks and acknowledge notifications" do
+    output = start_supervised!({Output, name: nil})
+    assert :ok = Output.subscribe_latest_audio(output)
+
+    Enum.each(1..100, fn frame_count -> Output.publish_audio(output, chunk(frame_count)) end)
+
+    assert_receive {:audio_available, :test}
+    assert %AudioChunk{frame_count: 100} = Output.latest_audio(output)
+    refute_receive {:audio_available, :test}
+
+    Output.publish_audio(output, chunk(101))
+    assert_receive {:audio_available, :test}
+    assert %AudioChunk{frame_count: 101} = Output.latest_audio(output)
+  end
+
   defp frame(number) do
     %VideoFrame{
       system: :test,
@@ -105,6 +120,17 @@ defmodule Beamicom.Host.OutputTest do
       height: 1,
       pixel_format: :rgb24,
       data: <<number::24>>
+    }
+  end
+
+  defp chunk(frame_count) do
+    %AudioChunk{
+      system: :test,
+      sample_rate: 48_000,
+      channels: 1,
+      sample_format: :s16le,
+      frame_count: frame_count,
+      data: :binary.copy(<<0::signed-little-16>>, frame_count)
     }
   end
 end

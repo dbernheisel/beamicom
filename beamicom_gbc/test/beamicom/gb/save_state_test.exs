@@ -3,7 +3,7 @@ defmodule Beamicom.GB.SaveStateTest do
 
   import Bitwise
 
-  alias Beamicom.GB.{Bus, DiagnosticROM, Machine, SaveState, System}
+  alias Beamicom.GB.{APU, Bus, DiagnosticROM, Machine, SaveState, System}
   alias Beamicom.GB.Cartridge
   alias Beamicom.GB.Cartridge.{MBC1, MBC2, MBC3, MBC5}
 
@@ -33,12 +33,11 @@ defmodule Beamicom.GB.SaveStateTest do
 
     assert machine.bus.apu_pending == 4_194_305
 
-    canonical_apu =
+    {_count, _pcm, canonical_apu} =
       machine.bus
       |> Bus.sync_apu()
       |> Map.fetch!(:apu)
-      |> Map.put(:samples, [])
-      |> Map.put(:sample_count, 0)
+      |> APU.take_samples()
 
     canonical =
       machine

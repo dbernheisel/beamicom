@@ -7,11 +7,12 @@ defmodule Beamicom.GB.APU do
   sample and 512 Hz frame-sequencer boundaries; pulse and wave periods are
   advanced arithmetically rather than one dot at a time.
 
-  The digital channel behavior, length, envelope, sweep, routing, and volume
-  units are modeled. Analog high-pass filtering, capacitor behavior, DAC pop,
-  zombie envelope quirks, and active wave-RAM access/corruption differences
-  between hardware revisions are not yet modeled. CGB PCM amplitude registers
-  FF76 and FF77 are deferred until the model exposes its internal mixer levels.
+  The digital channel behavior, length, envelope, sweep, routing, volume units,
+  and model-specific analog high-pass capacitors are modeled. DAC attack and
+  discharge, zombie envelope quirks, and active wave-RAM access/corruption
+  differences between hardware revisions are not yet modeled. CGB PCM amplitude
+  registers FF76 and FF77 are deferred until the model exposes its internal
+  mixer levels.
   """
 
   import Bitwise
@@ -44,7 +45,7 @@ defmodule Beamicom.GB.APU do
   @dac_levels {15, 13, 11, 9, 7, 5, 3, 1, -1, -3, -5, -7, -9, -11, -13, -15}
   @noise_divisors {8, 16, 32, 48, 64, 80, 96, 112}
 
-  alias __MODULE__.{Noise, Pulse, Wave}
+  alias __MODULE__.{HighPass, Noise, Pulse, Wave}
 
   defstruct model: :dmg,
             master: false,
@@ -59,7 +60,10 @@ defmodule Beamicom.GB.APU do
             sample_phase: 0,
             pending_dots: 0,
             samples: [],
+            sample_dacs: [],
             sample_count: 0,
+            capacitor_left: 0.0,
+            capacitor_right: 0.0,
             render_events: [],
             render_dots: 0,
             render_triggers: {0, 0, 0, 0},
@@ -90,6 +94,7 @@ defmodule Beamicom.GB.APU do
       | renderer: :native,
         renderer_state: nil,
         samples: [],
+        sample_dacs: [],
         sample_count: 0,
         render_events: [],
         render_dots: 0
@@ -103,6 +108,7 @@ defmodule Beamicom.GB.APU do
       apu
       | renderer: renderer,
         samples: [],
+        sample_dacs: [],
         sample_count: 0,
         render_events: [],
         render_dots: 0
@@ -344,7 +350,8 @@ defmodule Beamicom.GB.APU do
   @doc "Returns and clears accumulated PCM without changing synthesis state."
   @spec take_samples(t()) :: {non_neg_integer(), binary(), t()}
   def take_samples(%__MODULE__{} = apu) do
-    %__MODULE__{samples: samples, sample_count: count} = apu = flush(apu)
+    %__MODULE__{samples: samples, sample_dacs: sample_dacs, sample_count: count} =
+      apu = flush(apu)
 
     {rendered_count, pcm, renderer_state} =
       cond do
@@ -369,11 +376,24 @@ defmodule Beamicom.GB.APU do
     unless rendered_count == count,
       do: raise("Game Boy APU renderer sample count mismatch: #{rendered_count} != #{count}")
 
+    dac_samples = sample_dacs |> :lists.reverse() |> IO.iodata_to_binary()
+
+    {pcm, {capacitor_left, capacitor_right}} =
+      HighPass.filter(
+        pcm,
+        dac_samples,
+        apu.model,
+        {apu.capacitor_left, apu.capacitor_right}
+      )
+
     {count, pcm,
      %{
        apu
        | samples: [],
+         sample_dacs: [],
          sample_count: 0,
+         capacitor_left: capacitor_left,
+         capacitor_right: capacitor_right,
          render_events: [],
          render_dots: 0,
          renderer_state: renderer_state
@@ -399,6 +419,7 @@ defmodule Beamicom.GB.APU do
           apu
           | sample_phase: sample_phase - @clock_rate,
             samples: [sample | apu.samples],
+            sample_dacs: [dac_sample(apu) | apu.sample_dacs],
             sample_count: apu.sample_count + 1
         }
       else
@@ -429,6 +450,7 @@ defmodule Beamicom.GB.APU do
         apu
         | sample_phase: sample_total - emitted * @clock_rate,
           sample_count: apu.sample_count + emitted,
+          sample_dacs: append_dac_samples(apu.sample_dacs, emitted, dac_sample(apu)),
           sequencer_phase: sequence_phase
       }
 
@@ -606,12 +628,30 @@ defmodule Beamicom.GB.APU do
       elem(apu.registers, 21)::little-signed-16>>
   end
 
-  defp append_silence(apu, 0), do: apu.samples
+  defp append_silence(apu, 0), do: {apu.samples, apu.sample_dacs}
 
   defp append_silence(%__MODULE__{renderer: :native} = apu, count),
-    do: [:binary.copy(@silence, count) | apu.samples]
+    do: {
+      [:binary.copy(@silence, count) | apu.samples],
+      append_dac_samples(apu.sample_dacs, count, 0)
+    }
 
-  defp append_silence(apu, count), do: [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples]
+  defp append_silence(apu, count),
+    do: {
+      [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples],
+      append_dac_samples(apu.sample_dacs, count, 0)
+    }
+
+  defp append_dac_samples(samples, 0, _enabled), do: samples
+
+  defp append_dac_samples(samples, count, enabled),
+    do: [:binary.copy(<<enabled>>, count) | samples]
+
+  defp dac_sample(%__MODULE__{master: false}), do: 0
+
+  defp dac_sample(apu) do
+    if apu.ch1.dac or apu.ch2.dac or apu.ch3.dac or apu.ch4.dac, do: 1, else: 0
+  end
 
   if @dynamic_renderers do
     defp event_renderer?(:native), do: false
@@ -665,10 +705,13 @@ defmodule Beamicom.GB.APU do
     seq_ticks = div(seq_total, @sequencer_period)
     seq_phase = seq_total - seq_ticks * @sequencer_period
 
+    {samples, sample_dacs} = append_silence(apu, count)
+
     %{
       apu
       | sample_phase: phase,
-        samples: append_silence(apu, count),
+        samples: samples,
+        sample_dacs: sample_dacs,
         sample_count: apu.sample_count + count,
         sequencer_phase: seq_phase,
         sequencer_step: apu.sequencer_step + seq_ticks &&& 7
@@ -760,16 +803,16 @@ defmodule Beamicom.GB.APU do
     end
   end
 
-  defp pulse_output(%Pulse{enabled: false}), do: 0
   defp pulse_output(%Pulse{dac: false}), do: 0
+  defp pulse_output(%Pulse{enabled: false}), do: 15
 
   defp pulse_output(ch) do
     bit = elem(elem(@duty_rows, ch.duty), ch.duty_pos)
     elem(@dac_levels, bit * ch.volume)
   end
 
-  defp wave_output(%Wave{enabled: false}, _wave), do: 0
   defp wave_output(%Wave{dac: false}, _wave), do: 0
+  defp wave_output(%Wave{enabled: false}, _wave), do: 15
   defp wave_output(%Wave{level: 0}, _wave), do: 15
 
   defp wave_output(ch, _wave) do
@@ -777,8 +820,8 @@ defmodule Beamicom.GB.APU do
     elem(@dac_levels, ch.sample_buffer >>> shift)
   end
 
-  defp noise_output(%Noise{enabled: false}), do: 0
   defp noise_output(%Noise{dac: false}), do: 0
+  defp noise_output(%Noise{enabled: false}), do: 15
   defp noise_output(ch), do: elem(@dac_levels, (bxor(ch.lfsr, 1) &&& 1) * ch.volume)
 
   if @dynamic_renderers or @renderer == :native do

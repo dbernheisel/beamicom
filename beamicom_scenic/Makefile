@@ -3,6 +3,14 @@ BUILD = $(MIX_APP_PATH)/obj
 NIF = $(PREFIX)/file_dialog.so
 SOURCE = c_src/file_dialog.c
 TARGETS = $(NIF)
+AUDIO_PLAYER = $(PREFIX)/audio_player
+AUDIO_SOURCE = c_src/audio_player.c
+SDL_CFLAGS := $(shell (pkg-config --cflags sdl2 || sdl2-config --cflags) 2>/dev/null)
+SDL_LIBS := $(shell (pkg-config --libs sdl2 || sdl2-config --libs) 2>/dev/null)
+
+ifneq ($(strip $(SDL_LIBS)),)
+TARGETS += $(AUDIO_PLAYER)
+endif
 
 CFLAGS ?= -O2 -Wall -Wextra -Werror
 CFLAGS += -fPIC -std=c11 -I$(ERL_EI_INCLUDE_DIR)
@@ -31,6 +39,10 @@ $(NIF): $(SOURCE) Makefile
 	mkdir -p $(PREFIX) $(BUILD)
 	$(CC) $(CFLAGS) $(SOURCE) $(LDFLAGS) -o $(NIF)
 
+$(AUDIO_PLAYER): $(AUDIO_SOURCE) Makefile
+	mkdir -p $(PREFIX)
+	$(CC) -O2 -Wall -Wextra -Werror -std=c11 $(SDL_CFLAGS) $(AUDIO_SOURCE) $(SDL_LIBS) -o $(AUDIO_PLAYER)
+
 ifeq ($(UNAME_S),Darwin)
 $(MAC_HELPER): $(MAC_HELPER_SOURCE) $(MAC_HELPER_PLIST) Makefile
 	mkdir -p $(MAC_HELPER_BUNDLE)/Contents/MacOS
@@ -40,6 +52,7 @@ endif
 
 clean:
 	$(RM) $(NIF)
+	$(RM) $(AUDIO_PLAYER)
 ifeq ($(UNAME_S),Darwin)
 	$(RM) -r $(MAC_HELPER_BUNDLE)
 endif

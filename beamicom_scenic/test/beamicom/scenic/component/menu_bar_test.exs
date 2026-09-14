@@ -5,17 +5,35 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
   alias Beamicom.Scenic.{Menu, Settings}
 
   test "the menu model derives session-only action availability" do
-    idle = Menu.model(false)
-    running = Menu.model(true)
+    settings = %{
+      Settings.defaults()
+      | recent_roms: ["/roms/Chrono Trigger.sfc", "/roms/Metroid.nes"]
+    }
+
+    idle = Menu.model(false, settings)
+    running = Menu.model(true, settings)
 
     idle_game = Enum.find(idle, &(&1.id == :game))
     running_game = Enum.find(running, &(&1.id == :game))
 
     assert enabled?(idle_game, :load)
-    refute enabled?(idle_game, :run)
     refute enabled?(idle_game, :reset)
-    assert enabled?(running_game, :run)
+    assert item(idle_game, :run) == nil
+    assert item(idle_game, :save_state) == nil
+    assert item(idle_game, :load_state) == nil
+
+    assert Enum.map(Enum.filter(idle_game.items, &is_map/1), &{&1.label, &1.action}) == [
+             {"Load", :load},
+             {"Reset", :reset},
+             {"Chrono Trigger.sfc", {:load_recent, "/roms/Chrono Trigger.sfc"}},
+             {"Metroid.nes", {:load_recent, "/roms/Metroid.nes"}}
+           ]
+
     assert enabled?(running_game, :reset)
+    assert enabled?(running_game, :save_state)
+    assert enabled?(running_game, :load_state)
+    assert item(running_game, :save_state).label == "Save State"
+    assert item(running_game, :load_state).label == "Load State"
   end
 
   test "the Config menu exposes persisted settings and their selected values" do
@@ -128,10 +146,10 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
     assert MenuBar.next_enabled(items, 0, -1) == 3
   end
 
-  test "unfinished systems can run and reset without exposing unsupported save states" do
+  test "unfinished systems can reset while showing disabled save-state actions" do
     game = Menu.model(true, Settings.defaults(), false) |> Enum.find(&(&1.id == :game))
 
-    assert enabled?(game, :run)
+    assert item(game, :run) == nil
     assert enabled?(game, :reset)
     refute enabled?(game, :save_state)
     refute enabled?(game, :load_state)

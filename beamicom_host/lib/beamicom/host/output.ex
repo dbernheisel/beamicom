@@ -5,9 +5,11 @@ defmodule Beamicom.Host.Output do
   Video is coalesced: each subscriber has at most one notification outstanding
   and asks for the latest frame when it handles that notification. Reading the
   frame acknowledges the notification so a later publish can wake the
-  subscriber again. Audio is lossless and every chunk is delivered. The
-  `:legacy` notification option exists for adapters that are preserving an
-  older client protocol during migration.
+  subscriber again. Audio is lossless by default, while realtime presenters
+  may opt into the same latest-value acknowledgement contract so a slow audio
+  device cannot accumulate stale sound. The `:legacy` notification option
+  exists for adapters that are preserving an older client protocol during
+  migration.
   """
 
   use GenServer
@@ -49,6 +51,10 @@ defmodule Beamicom.Host.Output do
   def subscribe_audio(server, notification \\ :envelope),
     do: GenServer.call(server, {:subscribe, :audio, notification})
 
+  @doc "Subscribe to bounded audio notifications for a realtime presenter."
+  @spec subscribe_latest_audio(GenServer.server()) :: :ok
+  def subscribe_latest_audio(server), do: GenServer.call(server, :subscribe_latest_audio)
+
   @spec subscribe(GenServer.server(), notification()) :: :ok
   def subscribe(server, notification \\ :envelope),
     do: GenServer.call(server, {:subscribe, :both, notification})
@@ -56,6 +62,10 @@ defmodule Beamicom.Host.Output do
   @doc "Read the latest frame and acknowledge the caller's pending notification."
   @spec latest_video(GenServer.server()) :: VideoFrame.t() | nil
   def latest_video(server), do: GenServer.call(server, :latest_video)
+
+  @doc "Read the latest audio chunk and acknowledge the caller's pending notification."
+  @spec latest_audio(GenServer.server()) :: AudioChunk.t() | nil
+  def latest_audio(server), do: GenServer.call(server, :latest_audio)
 
   @doc "Read and acknowledge the latest frame directly through a public ETS table."
   @spec latest_video_from_table(atom()) :: VideoFrame.t() | nil
@@ -82,10 +92,13 @@ defmodule Beamicom.Host.Output do
     {:ok,
      %{
        latest_video: nil,
+       latest_audio: nil,
        table: table,
        video: %{},
        audio: %{},
-       video_notifications: MapSet.new()
+       latest_audio_subscribers: MapSet.new(),
+       video_notifications: MapSet.new(),
+       audio_notifications: MapSet.new()
      }}
   end
 
@@ -94,10 +107,21 @@ defmodule Beamicom.Host.Output do
     {:reply, state.latest_video, acknowledge_video(state, pid)}
   end
 
+  def handle_call(:latest_audio, {pid, _tag}, state) do
+    {:reply, state.latest_audio,
+     %{state | audio_notifications: MapSet.delete(state.audio_notifications, pid)}}
+  end
+
+  def handle_call(:subscribe_latest_audio, {pid, _tag}, state) do
+    monitor_subscriber(state, pid)
+
+    {:reply, :ok,
+     %{state | latest_audio_subscribers: MapSet.put(state.latest_audio_subscribers, pid)}}
+  end
+
   def handle_call({:subscribe, kind, notification}, {pid, _tag}, state)
       when kind in [:video, :audio, :both] and notification in [:envelope, :legacy] do
-    unless Map.has_key?(state.video, pid) or Map.has_key?(state.audio, pid),
-      do: Process.monitor(pid)
+    monitor_subscriber(state, pid)
 
     video =
       if kind in [:video, :both], do: Map.put(state.video, pid, notification), else: state.video
@@ -125,7 +149,9 @@ defmodule Beamicom.Host.Output do
       end
     end)
 
-    {:noreply, state}
+    state = Enum.reduce(state.latest_audio_subscribers, state, &notify_audio(&1, chunk, &2))
+
+    {:noreply, %{state | latest_audio: chunk}}
   end
 
   @impl true
@@ -137,8 +163,16 @@ defmodule Beamicom.Host.Output do
        state
        | video: Map.delete(state.video, pid),
          audio: Map.delete(state.audio, pid),
-         video_notifications: MapSet.delete(state.video_notifications, pid)
+         latest_audio_subscribers: MapSet.delete(state.latest_audio_subscribers, pid),
+         video_notifications: MapSet.delete(state.video_notifications, pid),
+         audio_notifications: MapSet.delete(state.audio_notifications, pid)
      }}
+  end
+
+  defp monitor_subscriber(state, pid) do
+    unless Map.has_key?(state.video, pid) or Map.has_key?(state.audio, pid) or
+             MapSet.member?(state.latest_audio_subscribers, pid),
+           do: Process.monitor(pid)
   end
 
   defp notify_video({pid, notification}, frame, %{table: nil} = state) do
@@ -161,6 +195,15 @@ defmodule Beamicom.Host.Output do
     do: send(pid, {:video_frame, frame.system, frame.number})
 
   defp send_video_notification(pid, :legacy, frame), do: send(pid, {:frame, frame.number})
+
+  defp notify_audio(pid, chunk, state) do
+    if MapSet.member?(state.audio_notifications, pid) do
+      state
+    else
+      send(pid, {:audio_available, chunk.system})
+      %{state | audio_notifications: MapSet.put(state.audio_notifications, pid)}
+    end
+  end
 
   defp acknowledge_video(%{table: nil} = state, pid) do
     %{state | video_notifications: MapSet.delete(state.video_notifications, pid)}

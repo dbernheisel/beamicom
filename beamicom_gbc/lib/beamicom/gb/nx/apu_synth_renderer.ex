@@ -278,10 +278,10 @@ if Code.ensure_loaded?(Nx.Defn) do
     end
 
     defnp mix(state, row) do
-      p1 = pulse_output(state.p1_position, row[6], row[8], row[4] != 0 and row[5] != 0)
-      p2 = pulse_output(state.p2_position, row[12], row[14], row[10] != 0 and row[11] != 0)
-      wave = wave_output(state.wave_sample, row[18], row[16] != 0 and row[17] != 0)
-      noise = noise_output(state.noise_lfsr, row[39], row[37] != 0 and row[38] != 0)
+      p1 = pulse_output(state.p1_position, row[6], row[8], row[4] != 0, row[5] != 0)
+      p2 = pulse_output(state.p2_position, row[12], row[14], row[10] != 0, row[11] != 0)
+      wave = wave_output(state.wave_sample, row[18], row[16] != 0, row[17] != 0)
+      noise = noise_output(state.noise_lfsr, row[39], row[37] != 0, row[38] != 0)
       route = row[3]
       right = routed(p1, p2, wave, noise, band(route, 15)) * (band(row[2], 7) + 1) * 64
       left = routed(p1, p2, wave, noise, shr(route, 4)) * (band(shr(row[2], 4), 7) + 1) * 64
@@ -291,20 +291,22 @@ if Code.ensure_loaded?(Nx.Defn) do
       Nx.stack([left, right], axis: 1) |> Nx.clip(-32_768, 32_767) |> Nx.as_type(:s16)
     end
 
-    defnp pulse_output(position, duty, volume, enabled) do
+    defnp pulse_output(position, duty, volume, enabled, dac) do
       bit = Nx.take(Nx.tensor(@duty, type: :s32), duty * 8 + position)
-      Nx.select(enabled and position >= 0, Nx.take(Nx.tensor(@dac, type: :s32), bit * volume), 0)
+      output = Nx.take(Nx.tensor(@dac, type: :s32), bit * volume)
+      Nx.select(dac, Nx.select(enabled and position >= 0, output, 15), 0)
     end
 
-    defnp wave_output(sample, level, enabled) do
+    defnp wave_output(sample, level, enabled, dac) do
       shifted = Nx.select(level == 0, 0, shr(sample, Nx.max(level - 1, 0)))
       value = Nx.select(level == 0, 15, Nx.take(Nx.tensor(@dac, type: :s32), shifted))
-      Nx.select(enabled and sample >= 0, value, 0)
+      Nx.select(dac, Nx.select(enabled and sample >= 0, value, 15), 0)
     end
 
-    defnp noise_output(lfsr, volume, enabled) do
+    defnp noise_output(lfsr, volume, enabled, dac) do
       index = band(Nx.bitwise_xor(lfsr, 1), 1) * volume
-      Nx.select(enabled and lfsr >= 0, Nx.take(Nx.tensor(@dac, type: :s32), index), 0)
+      output = Nx.take(Nx.tensor(@dac, type: :s32), index)
+      Nx.select(dac, Nx.select(enabled and lfsr >= 0, output, 15), 0)
     end
 
     defnp routed(p1, p2, wave, noise, route) do

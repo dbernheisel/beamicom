@@ -11,14 +11,7 @@ defmodule Beamicom.Scenic.Menu do
       %{
         id: :game,
         label: "Game",
-        items: [
-          item(:load, "Load..."),
-          item(:run, "Run", session?),
-          item(:reset, "Reset", session?),
-          :separator,
-          item(:save_state, "Save state...", session? and state_actions?),
-          item(:load_state, "Load state...", session? and state_actions?)
-        ]
+        items: game_menu(session?, state_actions?, settings.recent_roms)
       },
       %{
         id: :config,
@@ -39,6 +32,27 @@ defmodule Beamicom.Scenic.Menu do
           )
         ]
       }
+    ]
+  end
+
+  defp game_menu(session?, state_actions?, recent_roms) do
+    [item(:load, "Load"), item(:reset, "Reset", session?)] ++
+      recent_rom_items(recent_roms) ++ state_items(session?, state_actions?)
+  end
+
+  defp recent_rom_items([]), do: []
+
+  defp recent_rom_items(recent_roms) do
+    [:separator | Enum.map(recent_roms, &item({:load_recent, &1}, Path.basename(&1)))]
+  end
+
+  defp state_items(false, _state_actions?), do: []
+
+  defp state_items(true, state_actions?) do
+    [
+      :separator,
+      item(:save_state, "Save State", state_actions?),
+      item(:load_state, "Load State", state_actions?)
     ]
   end
 

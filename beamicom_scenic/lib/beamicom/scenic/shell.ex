@@ -25,6 +25,7 @@ defmodule Beamicom.Scenic.Shell do
     {"Beamicom saves", ["png"]}
   ]
   @save_filters [{"Beamicom save image", ["png"]}]
+  @rom_extensions [".nes", ".gb", ".gbc", ".sfc", ".smc"]
 
   @impl true
   def init(scene, _params, _opts) do
@@ -48,6 +49,7 @@ defmodule Beamicom.Scenic.Shell do
        pending_snapshot: nil,
        state_browser: nil,
        load_ref: nil,
+       pending_rom_path: nil,
        resize_timer: nil,
        resize_token: nil,
        pending_size: nil,
@@ -115,6 +117,10 @@ defmodule Beamicom.Scenic.Shell do
   @impl Scenic.Scene
   def handle_event({:menu_action, :load}, _from, scene) do
     {:noreply, start_open_dialog(scene, :load, @media_filters, "selecting media...")}
+  end
+
+  def handle_event({:menu_action, {:load_recent, path}}, _from, scene) when is_binary(path) do
+    {:noreply, scene |> enter_loading() |> start_load(path, :remember_rom)}
   end
 
   def handle_event({:menu_action, :load_state}, _from, scene) do
@@ -231,13 +237,6 @@ defmodule Beamicom.Scenic.Shell do
 
   def handle_event({:render_fps, _fps}, _from, scene), do: {:noreply, scene}
 
-  def handle_event({:menu_action, :run}, _from, scene) do
-    case Beamicom.Scenic.Host.resume() do
-      :ok -> {:noreply, scene}
-      {:error, reason} -> {:noreply, put_message(scene, "run failed: #{inspect(reason)}")}
-    end
-  end
-
   def handle_event({:menu_action, :reset}, _from, scene) do
     owner = self()
 
@@ -265,7 +264,10 @@ defmodule Beamicom.Scenic.Shell do
       )
 
     case result do
-      {:ok, path} when kind in [:load, :load_state] ->
+      {:ok, path} when kind == :load ->
+        {:noreply, start_load(scene, path, :remember_rom)}
+
+      {:ok, path} when kind == :load_state ->
         {:noreply, start_load(scene, path)}
 
       {:ok, path} when kind == :save_state ->
@@ -301,12 +303,14 @@ defmodule Beamicom.Scenic.Shell do
      |> put_message("file selector exited: #{inspect(reason)}")}
   end
 
-  def handle_info({:load_result, :ok, _path}, scene), do: {:noreply, scene}
+  def handle_info({:load_result, :ok, path}, scene) do
+    {:noreply, remember_loaded_rom(scene, path)}
+  end
 
   def handle_info({:load_result, {:error, reason}, _path}, scene) do
     {:noreply,
      scene
-     |> assign(load_ref: nil)
+     |> assign(load_ref: nil, pending_rom_path: nil)
      |> restore_mode()
      |> put_message("load failed: #{inspect(reason)}")}
   end
@@ -739,7 +743,7 @@ defmodule Beamicom.Scenic.Shell do
     |> put_message("selecting save-state folder...")
   end
 
-  defp start_load(scene, path) do
+  defp start_load(scene, path, remember \\ :skip_history) do
     owner = self()
 
     {:ok, task} =
@@ -748,9 +752,37 @@ defmodule Beamicom.Scenic.Shell do
       end)
 
     scene
-    |> assign(load_ref: task, initial_directory: Path.dirname(path))
+    |> assign(
+      load_ref: task,
+      initial_directory: Path.dirname(path),
+      pending_rom_path: recent_rom_path(path, remember)
+    )
     |> put_message("loading #{Path.basename(path)}...")
   end
+
+  defp remember_loaded_rom(%{assigns: %{pending_rom_path: path}} = scene, _loaded_path)
+       when is_binary(path) do
+    settings = Settings.remember_rom(scene.assigns.settings, path)
+
+    case Settings.save(settings) do
+      :ok ->
+        assign(scene, settings: settings, load_ref: nil, pending_rom_path: nil)
+
+      {:error, reason} ->
+        scene
+        |> assign(load_ref: nil, pending_rom_path: nil)
+        |> put_message("config save failed: #{inspect(reason)}")
+    end
+  end
+
+  defp remember_loaded_rom(scene, _path),
+    do: assign(scene, load_ref: nil, pending_rom_path: nil)
+
+  defp recent_rom_path(path, :remember_rom) do
+    if String.downcase(Path.extname(path)) in @rom_extensions, do: Path.expand(path)
+  end
+
+  defp recent_rom_path(_path, :skip_history), do: nil
 
   defp start_save(scene, path) do
     owner = self()

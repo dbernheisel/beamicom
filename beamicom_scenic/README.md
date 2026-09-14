@@ -15,7 +15,7 @@ installed before fetching dependencies.
 ### macOS
 
 ```sh
-brew install glfw glew pkg-config
+brew install glfw glew pkg-config sdl2
 ```
 
 `scenic_driver_local`'s native build finds them via `pkg-config`. If compilation
@@ -25,8 +25,8 @@ can't locate GLFW/GLEW, point `PKG_CONFIG_PATH` at Homebrew's `.pc` files:
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/glew/lib/pkgconfig"
 ```
 
-Audio playback uses ffplay on macOS and Linux with the same low-buffer raw PCM
-path for every supported core:
+Normal-speed audio uses a bounded SDL2 device queue on macOS and Linux. ffplay
+remains the fallback and provides pitch-preserving playback at other speeds:
 
 ```sh
 brew install ffmpeg
@@ -35,7 +35,7 @@ brew install ffmpeg
 ### Linux (Debian/Ubuntu)
 
 ```sh
-sudo apt install pkg-config libglfw3-dev libglew-dev zenity ffmpeg
+sudo apt install pkg-config libglfw3-dev libglew-dev libsdl2-dev zenity ffmpeg
 ```
 
 The native ROM and save-state selectors use Zenity in an isolated process, so a
@@ -169,6 +169,7 @@ The in-window Config menu writes JSON to
 `~/.config/beamicom/config.json`. It stores:
 
 - The initial folder for save-state open/save dialogs.
+- The five most recently loaded ROM paths shown in the Game menu.
 - The default NES filter: None, Composite, S-Video, or RGB.
 - ROM-specific NES sprite lighting for verified light-source profiles.
 - NES enhancements for removing the eight-sprites-per-scanline limit and trimming the horizontal borders.
@@ -179,8 +180,12 @@ The in-window Config menu writes JSON to
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "save_state_folder": "/home/player/.local/share/beamicom/states",
+  "recent_roms": [
+    "/home/player/roms/Metroid.nes",
+    "/home/player/roms/Tetris.gb"
+  ],
   "nes_video_filter": "composite",
   "nes_lighting": false,
   "nes_remove_sprite_limit": false,
@@ -320,6 +325,7 @@ debug step and `g` toggles the NES raw palette-address grayscale view. `F5`
 quick-saves and `F8` quick-loads while running or paused. The quick slot is
 `<rom-sha256>.png` in the configured save-state folder; NES hashes its parsed
 PRG+CHR data, while Game Boy hashes the cartridge ROM. Save and load state
-actions remain available from the Game menu. Load State opens a horizontal,
+actions appear in the Game menu only while a game is loaded. The Game menu also
+lists the five most recently loaded ROMs by filename. Load State opens a horizontal,
 ROM-specific preview browser; use Left/Right or the scroll wheel, Enter to load,
 `O` or Open... for the native picker, and Escape to close it.

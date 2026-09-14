@@ -22,10 +22,10 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert Process.alive?(pid)
   end
 
-  test "defaults to a short prebuffer for stable realtime playback" do
+  test "does not add a default startup delay" do
     pid = start_supervised!({AudioSink, command: @discard_command, name: :buffered_audio_sink})
 
-    assert %{ready?: false, prebuffer_frames: 4_410} = :sys.get_state(pid)
+    assert %{ready?: true, prebuffer_frames: 0} = :sys.get_state(pid)
   end
 
   test "scales signed 16-bit PCM independently of channel layout" do
@@ -157,20 +157,41 @@ defmodule Beamicom.Scenic.AudioSinkTest do
              :sys.get_state(pid)
   end
 
-  test "builds mono and stereo player commands from core capabilities" do
-    assert ["ffplay" | mono_command] = AudioSink.default_command(1.0)
+  test "uses the bounded native player for normal-speed playback when it was built" do
+    audio = %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
+    command = AudioSink.default_command(1.0, audio, {:unix, :darwin})
+    native = Application.app_dir(:beamicom_scenic, "priv/native/audio_player")
+
+    if File.regular?(native) do
+      assert command == [native, "44100", "1", "40"]
+    else
+      assert ["ffplay" | _args] = command
+    end
+  end
+
+  test "builds low-buffer ffplay fallback commands from core capabilities" do
+    assert ["ffplay" | mono_command] = AudioSink.ffplay_command(1.0)
     assert "mono" in mono_command
 
     assert ["ffplay" | macos_command] =
-             AudioSink.default_command(
+             AudioSink.ffplay_command(
                1.0,
-               %{sample_rate: 44_100, channels: 2, sample_format: :s16le},
-               {:unix, :darwin}
+               %{sample_rate: 44_100, channels: 2, sample_format: :s16le}
              )
 
     assert "stereo" in macos_command
-    refute "direct" in macos_command
+    assert "direct" in macos_command
     assert "nobuffer" in macos_command
+    assert Enum.at(macos_command, Enum.find_index(macos_command, &(&1 == "-ar")) + 1) == "8000"
+    assert "asetrate=44100,asetpts=N/SR/TB" in macos_command
+
+    assert ["ffplay" | snes_command] =
+             AudioSink.ffplay_command(
+               1.0,
+               %{sample_rate: 32_000, channels: 2, sample_format: :s16le}
+             )
+
+    assert "asetrate=32000,asetpts=N/SR/TB" in snes_command
 
     assert ["ffplay" | slow_command] =
              AudioSink.default_command(
@@ -181,8 +202,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
 
     assert "stereo" in slow_command
 
-    assert Enum.find(slow_command, &String.starts_with?(&1, "atempo=")) ==
-             "atempo=0.5,atempo=0.5,atempo=0.5,atempo=0.8"
+    assert "asetrate=44100,asetpts=N/SR/TB,atempo=0.5,atempo=0.5,atempo=0.5,atempo=0.8" in slow_command
 
     assert ["ffplay" | fast_command] =
              AudioSink.default_command(
@@ -191,7 +211,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
                {:unix, :linux}
              )
 
-    assert "atempo=100,atempo=2.0" in fast_command
+    assert "asetrate=44100,asetpts=N/SR/TB,atempo=100,atempo=2.0" in fast_command
   end
 
   test "retains legacy audio and Scenic module APIs" do

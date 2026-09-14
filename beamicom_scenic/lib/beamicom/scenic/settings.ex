@@ -1,12 +1,14 @@
 defmodule Beamicom.Scenic.Settings do
   @moduledoc "Persistent user settings for the Scenic application shell."
 
-  @version 2
+  @version 3
+  @recent_rom_limit 5
   @nes_video_filters [:none, :composite, :svideo, :rgb]
   @gbc_video_filters [:none, :pixel_transparency]
 
   @type t :: %{
           save_state_folder: String.t(),
+          recent_roms: [String.t()],
           nes_video_filter: :none | :composite | :svideo | :rgb,
           nes_lighting: boolean(),
           nes_remove_sprite_limit: boolean(),
@@ -24,6 +26,7 @@ defmodule Beamicom.Scenic.Settings do
   def defaults do
     %{
       save_state_folder: Path.join([data_home(), "beamicom", "states"]),
+      recent_roms: [],
       nes_video_filter: :none,
       nes_lighting: false,
       nes_remove_sprite_limit: false,
@@ -72,6 +75,19 @@ defmodule Beamicom.Scenic.Settings do
   @spec next_gbc_video_filter(atom()) :: atom()
   def next_gbc_video_filter(current), do: next(@gbc_video_filters, current)
 
+  @doc "Moves a ROM path to the front of the five-item recent history."
+  def remember_rom(settings, path) when is_map(settings) and is_binary(path) do
+    path = Path.expand(path)
+
+    recent_roms =
+      settings.recent_roms
+      |> Enum.reject(&(&1 == path))
+      |> then(&[path | &1])
+      |> Enum.take(@recent_rom_limit)
+
+    %{settings | recent_roms: recent_roms}
+  end
+
   @spec player_options(:nes | :gbc | :snes, keyword(), t()) :: keyword()
   def player_options(system, options, settings \\ load_or_defaults())
 
@@ -112,6 +128,7 @@ defmodule Beamicom.Scenic.Settings do
          true <- is_map(decoded) || {:error, :invalid_root},
          settings <- %{
            save_state_folder: Map.get(decoded, "save_state_folder"),
+           recent_roms: Map.get(decoded, "recent_roms"),
            nes_video_filter: Map.get(decoded, "nes_video_filter"),
            nes_lighting: Map.get(decoded, "nes_lighting"),
            nes_remove_sprite_limit: Map.get(decoded, "nes_remove_sprite_limit"),
@@ -138,6 +155,7 @@ defmodule Beamicom.Scenic.Settings do
     json = %{
       "version" => @version,
       "save_state_folder" => settings.save_state_folder,
+      "recent_roms" => settings.recent_roms,
       "nes_video_filter" => Atom.to_string(settings.nes_video_filter),
       "nes_lighting" => settings.nes_lighting,
       "nes_remove_sprite_limit" => settings.nes_remove_sprite_limit,
@@ -156,6 +174,8 @@ defmodule Beamicom.Scenic.Settings do
   defp normalize(settings, fallbacks \\ nil) do
     with {:ok, save_state_folder} <-
            setting(settings, :save_state_folder, fallbacks, &normalize_folder/1),
+         {:ok, recent_roms} <-
+           setting(settings, :recent_roms, fallbacks, &normalize_recent_roms/1),
          {:ok, nes_video_filter} <-
            setting(settings, :nes_video_filter, fallbacks, &normalize_nes_filter/1),
          {:ok, nes_lighting} <-
@@ -173,6 +193,7 @@ defmodule Beamicom.Scenic.Settings do
       {:ok,
        %{
          save_state_folder: save_state_folder,
+         recent_roms: recent_roms,
          nes_video_filter: nes_video_filter,
          nes_lighting: nes_lighting,
          nes_remove_sprite_limit: nes_remove_sprite_limit,
@@ -199,6 +220,19 @@ defmodule Beamicom.Scenic.Settings do
     do: {:ok, Path.expand(folder)}
 
   defp normalize_folder(_folder), do: {:error, {:invalid_setting, :save_state_folder}}
+
+  defp normalize_recent_roms(paths) when is_list(paths) do
+    if Enum.all?(paths, &(is_binary(&1) and byte_size(&1) > 0)) do
+      recent_roms =
+        paths |> Enum.map(&Path.expand/1) |> Enum.uniq() |> Enum.take(@recent_rom_limit)
+
+      {:ok, recent_roms}
+    else
+      {:error, {:invalid_setting, :recent_roms}}
+    end
+  end
+
+  defp normalize_recent_roms(_paths), do: {:error, {:invalid_setting, :recent_roms}}
 
   defp normalize_nes_filter(filter) when filter in @nes_video_filters, do: {:ok, filter}
 

@@ -590,7 +590,7 @@ defmodule Beamicom.Scenic.Player do
         audio: core.capabilities.audio,
         speed: speed,
         volume: Keyword.get(options, :volume, 100),
-        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 100)
+        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 0)
       ]
 
       audio_options =
