@@ -41,6 +41,7 @@ defmodule Beamicom.SNES.SPC700 do
             timer_phase: {0, 0, 0},
             timer_last_cycles: {0, 0, 0},
             cycles: 0,
+            bus_cycle: 0,
             cycle_credit: 0,
             stopped?: false,
             error: nil
@@ -73,11 +74,12 @@ defmodule Beamicom.SNES.SPC700 do
   defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles), do: {spc, 0}
 
   defp run_cycles(spc, cycles) do
-    {opcode, spc} = fetch(spc)
+    start_cycles = spc.cycles
+    {opcode, spc} = fetch(%{spc | bus_cycle: 0})
 
     case execute(opcode, spc) do
       {:ok, next_spc, used} ->
-        spc = %{next_spc | cycles: next_spc.cycles + used}
+        spc = %{next_spc | cycles: start_cycles + used, bus_cycle: 0}
 
         run_cycles(spc, cycles - used)
 
@@ -129,7 +131,9 @@ defmodule Beamicom.SNES.SPC700 do
   defp execute(0x00, spc), do: {:ok, spc, 2}
 
   defp execute(0x0F, spc) do
+    {_discard, spc} = read(spc, spc.pc)
     spc = spc |> push(spc.pc >>> 8) |> push(spc.pc) |> push(spc.psw)
+    spc = advance_bus_cycle(spc)
     {target, spc} = read_word(spc, 0xFFDE)
     psw = spc.psw |> bor(@b) |> band(bnot(@i))
     {:ok, %{spc | pc: target, psw: psw}, 8}
@@ -161,59 +165,70 @@ defmodule Beamicom.SNES.SPC700 do
   defp execute(op, spc)
        when op in [0xE4, 0xF4, 0xE5, 0xF5, 0xF6, 0xE6, 0xE7, 0xF7] do
     {address, spc} = address_for(op, spc)
-    {value, spc} = read(spc, address)
-    {:ok, %{spc | a: value} |> set_nz(value), load_cycles(op)}
+    cycles = load_cycles(op)
+    {value, spc} = read_at(spc, address, cycles)
+    {:ok, %{spc | a: value} |> set_nz(value), cycles}
   end
 
   defp execute(op, spc) when op in [0xF8, 0xF9, 0xE9] do
     {address, spc} = address_for(op, spc)
-    {value, spc} = read(spc, address)
-    {:ok, %{spc | x: value} |> set_nz(value), if(op == 0xF8, do: 3, else: 4)}
+    cycles = if(op == 0xF8, do: 3, else: 4)
+    {value, spc} = read_at(spc, address, cycles)
+    {:ok, %{spc | x: value} |> set_nz(value), cycles}
   end
 
   defp execute(op, spc) when op in [0xEB, 0xFB, 0xEC] do
     {address, spc} = address_for(op, spc)
-    {value, spc} = read(spc, address)
-    {:ok, %{spc | y: value} |> set_nz(value), if(op == 0xEB, do: 3, else: 4)}
+    cycles = if(op == 0xEB, do: 3, else: 4)
+    {value, spc} = read_at(spc, address, cycles)
+    {:ok, %{spc | y: value} |> set_nz(value), cycles}
   end
 
   # MOV stores.
   defp execute(op, spc)
        when op in [0xC4, 0xD4, 0xC5, 0xD5, 0xD6, 0xC6, 0xC7, 0xD7] do
     {address, spc} = address_for(op, spc)
-    {:ok, write(spc, address, spc.a), store_cycles(op)}
+    cycles = store_cycles(op)
+    {_discard, spc} = read_at(spc, address, cycles - 1)
+    {:ok, write_at(spc, address, spc.a, cycles), cycles}
   end
 
   defp execute(op, spc) when op in [0xD8, 0xD9, 0xC9] do
     {address, spc} = address_for(op, spc)
-    {:ok, write(spc, address, spc.x), if(op == 0xD8, do: 4, else: 5)}
+    cycles = if(op == 0xD8, do: 4, else: 5)
+    {_discard, spc} = read_at(spc, address, cycles - 1)
+    {:ok, write_at(spc, address, spc.x, cycles), cycles}
   end
 
   defp execute(op, spc) when op in [0xCB, 0xDB, 0xCC] do
     {address, spc} = address_for(op, spc)
-    {:ok, write(spc, address, spc.y), if(op == 0xCB, do: 4, else: 5)}
+    cycles = if(op == 0xCB, do: 4, else: 5)
+    {_discard, spc} = read_at(spc, address, cycles - 1)
+    {:ok, write_at(spc, address, spc.y, cycles), cycles}
   end
 
   defp execute(0x8F, spc) do
     {value, spc} = fetch(spc)
     {dp, spc} = fetch(spc)
-    {:ok, write(spc, direct(spc, dp), value), 5}
+    address = direct(spc, dp)
+    {_discard, spc} = read_at(spc, address, 4)
+    {:ok, write_at(spc, address, value, 5), 5}
   end
 
   defp execute(0xFA, spc) do
     {source, spc} = fetch(spc)
-    {destination, spc} = fetch(spc)
     {value, spc} = read(spc, direct(spc, source))
+    {destination, spc} = fetch(spc)
     {:ok, write(spc, direct(spc, destination), value), 5}
   end
 
   defp execute(0xAF, spc) do
-    spc = write(spc, direct(spc, spc.x), spc.a)
+    spc = write_at(spc, direct(spc, spc.x), spc.a, 4)
     {:ok, %{spc | x: spc.x + 1 &&& 0xFF}, 4}
   end
 
   defp execute(0xBF, spc) do
-    {value, spc} = read(spc, direct(spc, spc.x))
+    {value, spc} = read_at(spc, direct(spc, spc.x), 3)
     {:ok, %{spc | a: value, x: spc.x + 1 &&& 0xFF} |> set_nz(value), 4}
   end
 
@@ -229,8 +244,9 @@ defmodule Beamicom.SNES.SPC700 do
         {value, spc, 2}
       else
         {address, spc} = address_for(op, spc)
-        {value, spc} = read(spc, address)
-        {value, spc, load_cycles(op)}
+        cycles = load_cycles(op)
+        {value, spc} = read_at(spc, address, cycles)
+        {value, spc, cycles}
       end
 
     {:ok, alu_a(spc, operation, value), cycles}
@@ -240,16 +256,18 @@ defmodule Beamicom.SNES.SPC700 do
        when (op &&& 0x1F) in [0x04, 0x05, 0x06, 0x07] and
               (op &&& 0xE0) in [0xC0, 0xE0] do
     {address, spc} = address_for(op, spc)
-    {value, spc} = read(spc, address)
-    {:ok, compare(spc, spc.a, value), load_cycles(op)}
+    cycles = load_cycles(op)
+    {value, spc} = read_at(spc, address, cycles)
+    {:ok, compare(spc, spc.a, value), cycles}
   end
 
   defp execute(op, spc)
        when (op &&& 0x1F) in [0x14, 0x15, 0x16, 0x17] and
               (op &&& 0xE0) in [0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0] do
     {address, spc} = address_for(op, spc)
-    {value, spc} = read(spc, address)
-    {:ok, alu_a(spc, alu_operation(op), value), load_cycles(op)}
+    cycles = load_cycles(op)
+    {value, spc} = read_at(spc, address, cycles)
+    {:ok, alu_a(spc, alu_operation(op), value), cycles}
   end
 
   # Memory destination ALU forms: immediate,dp and source-dp,destination-dp.
@@ -274,8 +292,9 @@ defmodule Beamicom.SNES.SPC700 do
               (op &&& 0xE0) in [0x00, 0x20, 0x40, 0x60, 0x80, 0xA0] do
     x_address = direct(spc, spc.x)
     y_address = direct(spc, spc.y)
-    {left, spc} = read(spc, x_address)
+    spc = advance_bus_cycle(spc)
     {right, spc} = read(spc, y_address)
+    {left, spc} = read(spc, x_address)
     operation = alu_operation(op)
 
     if operation == :cmp do
@@ -342,10 +361,10 @@ defmodule Beamicom.SNES.SPC700 do
               0xBB
             ] do
     {address, spc} = rmw_address(op, spc)
-    {value, spc} = read(spc, address)
-    {value, spc} = rmw_value(spc, op, value)
     cycles = if (op &&& 0x0F) == 0x0C or (op &&& 0x1F) == 0x1B, do: 5, else: 4
-    {:ok, write(spc, address, value), cycles}
+    {value, spc} = read_at(spc, address, cycles - 1)
+    {value, spc} = rmw_value(spc, op, value)
+    {:ok, write_at(spc, address, value, cycles), cycles}
   end
 
   defp execute(op, spc) when op in [0x1C, 0x3C, 0x5C, 0x7C] do
@@ -356,25 +375,41 @@ defmodule Beamicom.SNES.SPC700 do
   # Word moves/arithmetic.
   defp execute(0xBA, spc) do
     {dp, spc} = fetch(spc)
-    {word, spc} = read_dp_word(spc, dp)
+    {low, spc} = read(spc, direct(spc, dp))
+    spc = advance_bus_cycle(spc)
+    {high, spc} = read(spc, direct(spc, dp + 1 &&& 0xFF))
+    word = low ||| high <<< 8
     {:ok, %{spc | a: word &&& 0xFF, y: word >>> 8} |> set_nz16(word), 5}
   end
 
   defp execute(0xDA, spc) do
     {dp, spc} = fetch(spc)
-    {:ok, write_dp_word(spc, dp, spc.a ||| spc.y <<< 8), 5}
+    address = direct(spc, dp)
+    {_discard, spc} = read(spc, address)
+    spc = write(spc, address, spc.a)
+    {:ok, write(spc, direct(spc, dp + 1 &&& 0xFF), spc.y), 5}
   end
 
   defp execute(op, spc) when op in [0x1A, 0x3A] do
     {dp, spc} = fetch(spc)
-    {word, spc} = read_dp_word(spc, dp)
-    word = word + if(op == 0x3A, do: 1, else: -1) &&& 0xFFFF
-    {:ok, write_dp_word(set_nz16(spc, word), dp, word), 6}
+    low_address = direct(spc, dp)
+    high_address = direct(spc, dp + 1 &&& 0xFF)
+    {low, spc} = read(spc, low_address)
+    adjusted_low = low + if(op == 0x3A, do: 1, else: -1)
+    spc = write(spc, low_address, adjusted_low)
+    {high, spc} = read(spc, high_address)
+    carry = if(adjusted_low < 0, do: -1, else: if(adjusted_low > 0xFF, do: 1, else: 0))
+    word = (adjusted_low &&& 0xFF) ||| (high + carry &&& 0xFF) <<< 8
+    spc = write(spc, high_address, word >>> 8)
+    {:ok, set_nz16(spc, word), 6}
   end
 
   defp execute(op, spc) when op in [0x5A, 0x7A, 0x9A] do
     {dp, spc} = fetch(spc)
-    {right, spc} = read_dp_word(spc, dp)
+    {low, spc} = read(spc, direct(spc, dp))
+    spc = if op == 0x5A, do: spc, else: advance_bus_cycle(spc)
+    {high, spc} = read(spc, direct(spc, dp + 1 &&& 0xFF))
+    right = low ||| high <<< 8
     left = spc.a ||| spc.y <<< 8
 
     case op do
@@ -483,11 +518,18 @@ defmodule Beamicom.SNES.SPC700 do
   defp execute(op, spc) when (op &&& 0x0F) in [0x03, 0x13] do
     bit = op >>> 5
     {dp, spc} = fetch(spc)
-    {offset, spc} = fetch(spc)
     {value, spc} = read(spc, direct(spc, dp))
+    spc = advance_bus_cycle(spc)
+    {offset, spc} = fetch(spc)
     set? = (value &&& 1 <<< bit) != 0
     taken? = if((op &&& 0x10) == 0, do: set?, else: not set?)
-    {:ok, if(taken?, do: branch(spc, offset), else: spc), if(taken?, do: 7, else: 5)}
+
+    spc =
+      if taken?,
+        do: spc |> advance_bus_cycle() |> advance_bus_cycle() |> branch(offset),
+        else: spc
+
+    {:ok, spc, if(taken?, do: 7, else: 5)}
   end
 
   # TSET1/TCLR1.
@@ -496,6 +538,7 @@ defmodule Beamicom.SNES.SPC700 do
     {value, spc} = read(spc, address)
     psw = spc |> set_nz(spc.a - value &&& 0xFF) |> Map.fetch!(:psw)
     value = if(op == 0x0E, do: value ||| spc.a, else: value &&& bnot(spc.a))
+    {_discard, spc} = read(spc, address)
     {:ok, %{write(spc, address, value) | psw: psw}, 6}
   end
 
@@ -529,7 +572,7 @@ defmodule Beamicom.SNES.SPC700 do
 
       0xCA ->
         value = if(carry?, do: value ||| 1 <<< bit, else: value &&& bnot(1 <<< bit))
-        {:ok, write(spc, address, value), 6}
+        {:ok, write_at(spc, address, value, 6), 6}
 
       0xEA ->
         {:ok, write(spc, address, bxor(value, 1 <<< bit)), 5}
@@ -598,6 +641,7 @@ defmodule Beamicom.SNES.SPC700 do
       x when x in [0x07, 0x17] ->
         {dp, spc} = fetch(spc)
         pointer = dp + if(x == 0x07, do: spc.x, else: 0) &&& 0xFF
+        spc = advance_bus_cycle(spc)
         {address, spc} = read_dp_word(spc, pointer)
         {address + if(x == 0x17, do: spc.y, else: 0) &&& 0xFFFF, spc}
 
@@ -660,8 +704,8 @@ defmodule Beamicom.SNES.SPC700 do
       {value, direct(spc, dp), spc}
     else
       {source, spc} = fetch(spc)
-      {destination, spc} = fetch(spc)
       {value, spc} = read(spc, direct(spc, source))
+      {destination, spc} = fetch(spc)
       {value, direct(spc, destination), spc}
     end
   end
@@ -825,6 +869,7 @@ defmodule Beamicom.SNES.SPC700 do
   defp direct(spc, byte), do: if((spc.psw &&& @p) != 0, do: 0x100, else: 0) ||| (byte &&& 0xFF)
 
   defp fetch(spc) do
+    spc = advance_bus_cycle(spc)
     value = memory_get(spc, spc.pc)
     {value, %{spc | pc: spc.pc + 1 &&& 0xFFFF}}
   end
@@ -841,12 +886,6 @@ defmodule Beamicom.SNES.SPC700 do
     {low ||| high <<< 8, spc}
   end
 
-  defp write_dp_word(spc, dp, value) do
-    spc
-    |> write(direct(spc, dp), value)
-    |> write(direct(spc, dp + 1 &&& 0xFF), value >>> 8)
-  end
-
   defp read_word(spc, address) do
     {low, spc} = read(spc, address)
     {high, spc} = read(spc, address + 1 &&& 0xFFFF)
@@ -854,6 +893,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp read(spc, address) do
+    spc = advance_bus_cycle(spc)
     address = address &&& 0xFFFF
 
     case address do
@@ -884,6 +924,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp write(spc, address, value) do
+    spc = advance_bus_cycle(spc)
     address = address &&& 0xFFFF
     value = value &&& 0xFF
     ram = :array.set(address, value, spc.ram)
@@ -903,7 +944,7 @@ defmodule Beamicom.SNES.SPC700 do
           %{
             spc
             | dsp: DSP.write(spc.dsp, address, value),
-              dsp_events: [{spc.cycles, address, value} | spc.dsp_events]
+              dsp_events: [{current_cycle(spc), address, value} | spc.dsp_events]
           }
         else
           spc
@@ -932,16 +973,16 @@ defmodule Beamicom.SNES.SPC700 do
     spc = spc |> sync_timer(0) |> sync_timer(1) |> sync_timer(2)
     newly_enabled = value &&& bnot(spc.control) &&& 0x07
 
-    {stages, outputs, phases, last_cycles} =
+    {stages, outputs, last_cycles} =
       Enum.reduce(
         0..2,
-        {spc.timer_stages, spc.timer_outputs, spc.timer_phase, spc.timer_last_cycles},
-        fn index, {stages, outputs, phases, last_cycles} ->
+        {spc.timer_stages, spc.timer_outputs, spc.timer_last_cycles},
+        fn index, {stages, outputs, last_cycles} ->
           if (newly_enabled &&& 1 <<< index) != 0 do
-            {put_elem(stages, index, 0), put_elem(outputs, index, 0), put_elem(phases, index, 0),
-             put_elem(last_cycles, index, spc.cycles)}
+            {put_elem(stages, index, 0), put_elem(outputs, index, 0),
+             put_elem(last_cycles, index, current_cycle(spc))}
           else
-            {stages, outputs, phases, put_elem(last_cycles, index, spc.cycles)}
+            {stages, outputs, put_elem(last_cycles, index, current_cycle(spc))}
           end
         end
       )
@@ -961,36 +1002,39 @@ defmodule Beamicom.SNES.SPC700 do
         input_ports: inputs,
         timer_stages: stages,
         timer_outputs: outputs,
-        timer_phase: phases,
         timer_last_cycles: last_cycles
     }
   end
 
   defp sync_timer(spc, index) do
     last = elem(spc.timer_last_cycles, index)
-    elapsed = spc.cycles - last
-    last_cycles = put_elem(spc.timer_last_cycles, index, spc.cycles)
+    now = current_cycle(spc)
+    elapsed = now - last
+    last_cycles = put_elem(spc.timer_last_cycles, index, now)
 
-    if elapsed > 0 and (spc.control &&& 1 <<< index) != 0 do
+    if elapsed > 0 do
       divider = if index == 2, do: 16, else: 128
       phase_total = elem(spc.timer_phase, index) + elapsed
       ticks = div(phase_total, divider)
       phase = rem(phase_total, divider)
-      target_value = elem(spc.timer_targets, index)
-      target = if target_value == 0, do: 256, else: target_value
-      stage_total = elem(spc.timer_stages, index) + ticks
-      output_ticks = div(stage_total, target)
+
+      {stage, output} =
+        if (spc.control &&& 1 <<< index) != 0 do
+          target_value = elem(spc.timer_targets, index)
+          target = if target_value == 0, do: 256, else: target_value
+          stage_total = elem(spc.timer_stages, index) + ticks
+          output_ticks = div(stage_total, target)
+
+          {rem(stage_total, target), elem(spc.timer_outputs, index) + output_ticks &&& 0x0F}
+        else
+          {elem(spc.timer_stages, index), elem(spc.timer_outputs, index)}
+        end
 
       %{
         spc
         | timer_phase: put_elem(spc.timer_phase, index, phase),
-          timer_stages: put_elem(spc.timer_stages, index, rem(stage_total, target)),
-          timer_outputs:
-            put_elem(
-              spc.timer_outputs,
-              index,
-              elem(spc.timer_outputs, index) + output_ticks &&& 0x0F
-            ),
+          timer_stages: put_elem(spc.timer_stages, index, stage),
+          timer_outputs: put_elem(spc.timer_outputs, index, output),
           timer_last_cycles: last_cycles
       }
     else
@@ -1009,14 +1053,34 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp push(spc, value) do
+    spc = advance_bus_cycle(spc)
     ram = :array.set(0x100 ||| spc.sp, value &&& 0xFF, spc.ram)
     %{spc | ram: ram, sp: spc.sp - 1 &&& 0xFF}
   end
 
   defp pop(spc) do
+    spc = advance_bus_cycle(spc)
     sp = spc.sp + 1 &&& 0xFF
     {:array.get(0x100 ||| sp, spc.ram), %{spc | sp: sp}}
   end
+
+  defp advance_bus_cycle(spc), do: %{spc | bus_cycle: spc.bus_cycle + 1}
+  defp current_cycle(spc), do: spc.cycles + spc.bus_cycle
+
+  defp read_at(spc, address, cycle) do
+    spc = advance_to_before_cycle(spc, cycle)
+    read(spc, address)
+  end
+
+  defp write_at(spc, address, value, cycle) do
+    spc = advance_to_before_cycle(spc, cycle)
+    write(spc, address, value)
+  end
+
+  defp advance_to_before_cycle(spc, cycle) when spc.bus_cycle < cycle - 1,
+    do: %{spc | bus_cycle: cycle - 1}
+
+  defp advance_to_before_cycle(spc, _cycle), do: spc
 
   defp branch(spc, offset), do: %{spc | pc: spc.pc + signed(offset) &&& 0xFFFF}
   defp signed(value) when value >= 0x80, do: value - 0x100

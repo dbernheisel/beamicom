@@ -170,6 +170,29 @@ defmodule Beamicom.SNES.APUTest do
     assert fragmented.pending_spc_cycles == batched.pending_spc_cycles
   end
 
+  test "SPC timestamps DSP writes at the memory-access cycle" do
+    ram = spc_ram([{0, 0x8F}, {1, 0x4C}, {2, 0xF2}, {3, 0x8F}, {4, 0x01}, {5, 0xF3}])
+    spc = SPC700.new(ram, 0) |> SPC700.run(10)
+
+    assert spc.dsp_events == [{10, 0x4C, 0x01}]
+    assert spc.bus_cycle == 0
+    assert spc.cycles == 10
+  end
+
+  test "SPC timer divider phase free-runs while disabled and survives enable" do
+    ram = spc_ram([{0, 0x8F}, {1, 0x01}, {2, 0xF1}])
+
+    spc =
+      %{SPC700.new(ram, 0) | cycles: 127}
+      |> SPC700.run(5)
+
+    assert spc.control == 0x01
+    assert spc.timer_phase == {4, 4, 4}
+    assert spc.timer_stages == {0, 0, 0}
+    assert spc.timer_outputs == {0, 0, 0}
+    assert spc.timer_last_cycles == {132, 132, 132}
+  end
+
   test "lazy SPC timers synchronize and clear when their output register is read" do
     ram =
       Enum.reduce(

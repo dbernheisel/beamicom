@@ -185,9 +185,12 @@ dispatch but only lightly validated.
 | Halt | SLEEP, STOP |
 
 The dispatch starts at
-[`spc700.ex:80`](lib/beamicom/snes/spc700.ex#L80). SLEEP and STOP cycle counts
-are inaccurate, instruction memory effects are not cycle-positioned, opcode
-fetch bypasses the MMIO-aware read path, and the test suite is not exhaustive.
+[`spc700.ex:80`](lib/beamicom/snes/spc700.ex#L80). Common load, store, ALU,
+read-modify-write, stack, and word operations now position their bus effects
+within the instruction so DSP writes and timer/MMIO reads carry a meaningful
+access-cycle timestamp. SLEEP and STOP cycle counts remain inaccurate, opcode
+fetch bypasses the MMIO-aware read path, other instruction bus sequences still
+need auditing, and the test suite is not exhaustive.
 
 ### SPC fragmented-cycle accounting
 
@@ -202,7 +205,7 @@ executes. Fragmented-versus-batched SPC and APU tests now cover this behavior.
 | Register | Status | Notes |
 |---|---|---|
 | `$F0` TEST | Missing | Clock scaling, RAM-write disable, and timer controls ignored. |
-| `$F1` CONTROL | Partial | Timer enables, input-port clear, and IPL visibility exist; enabling incorrectly resets timer stage-one phase. |
+| `$F1` CONTROL | Partial | Timer enables, input-port clear, and IPL visibility exist; enable resets stage two/output while preserving the free-running divider phase. Exact write-edge behavior remains lightly validated. |
 | `$F2` DSPADDR | Implemented | Address latch. |
 | `$F3` DSPDATA | Partial | Reads mask bit 7 and writes ignore addresses `$80-$FF`; exact access timing remains approximate. |
 | `$F4-$F7` CPUIO | Partial | Directional latches and clear controls work; same-cycle collision behavior absent. |
@@ -240,11 +243,12 @@ Per-voice register groups `$x0-$x9` apply to voices 0-7.
 | Echo RAM writes and eight-tap FIR | Missing |
 | Exact 32-cycle DSP pipeline | Missing |
 
-`APU.advance/3` now timestamps DSP writes against SPC cycles and renders blocks
-between those events. Intermediate KON/KOFF, pitch, volume, directory, and
-mixer changes therefore no longer collapse into the final register state at
-`take_pcm/1`. Instruction-internal DSP timing, RAM-write timestamps, the exact
-32-cycle pipeline, and the synthesis features listed above remain approximate.
+`APU.advance/3` now timestamps DSP writes at the SPC instruction's memory-access
+cycle and renders blocks between those events. Intermediate KON/KOFF, pitch,
+volume, directory, and mixer changes therefore no longer collapse into the
+final register state at `take_pcm/1`. Remaining instruction bus sequences,
+RAM-write timestamps, the exact 32-cycle pipeline, and the synthesis features
+listed above remain approximate.
 
 ## Cartridge coprocessor inventory
 
