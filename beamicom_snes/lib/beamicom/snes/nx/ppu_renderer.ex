@@ -674,10 +674,10 @@ if Code.ensure_loaded?(Nx.Defn) do
       x = Nx.iota({1, @width}, type: :s32)
       w1_inside = x >= column(controls, 24) and x <= column(controls, 25)
       w2_inside = x >= column(controls, 26) and x <= column(controls, 27)
-      w1 = Nx.select(band(config, 2) != 0, not w1_inside, w1_inside)
-      w2 = Nx.select(band(config, 8) != 0, not w2_inside, w2_inside)
-      w1_enabled = band(config, 1) != 0
-      w2_enabled = band(config, 4) != 0
+      w1 = Nx.select(band(config, 1) != 0, not w1_inside, w1_inside)
+      w2 = Nx.select(band(config, 4) != 0, not w2_inside, w2_inside)
+      w1_enabled = band(config, 2) != 0
+      w2_enabled = band(config, 8) != 0
 
       combined =
         Nx.select(

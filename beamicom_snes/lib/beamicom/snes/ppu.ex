@@ -1023,10 +1023,12 @@ defmodule Beamicom.SNES.PPU do
   defp window_masked?(ppu, layer, x) do
     {config, logic} = window_config(ppu, layer)
     {w1_left, w1_right, w2_left, w2_right} = ppu.window_positions
-    w1? = (config &&& 0x01) != 0
-    w2? = (config &&& 0x04) != 0
-    w1 = window_value(x, w1_left, w1_right, (config &&& 0x02) != 0)
-    w2 = window_value(x, w2_left, w2_right, (config &&& 0x08) != 0)
+    # Each window selector pair is encoded as enable,invert (EIei): the high
+    # bit enables the window and the low bit inverts its area.
+    w1? = (config &&& 0x02) != 0
+    w2? = (config &&& 0x08) != 0
+    w1 = window_value(x, w1_left, w1_right, (config &&& 0x01) != 0)
+    w2 = window_value(x, w2_left, w2_right, (config &&& 0x04) != 0)
 
     case {w1?, w2?} do
       {false, false} -> false

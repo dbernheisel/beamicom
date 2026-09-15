@@ -236,6 +236,37 @@ defmodule Beamicom.SNES.PPUTest do
     assert configured.data == baseline.data
   end
 
+  test "decodes window selector pairs as enable then invert" do
+    base =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2107, 0x04)
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x212E, 0x01)
+      |> PPU.write(0x2126, 0)
+      |> PPU.write(0x2127, 127)
+      |> write_vram_byte(0x0000, 0xFF)
+      |> write_cgram_color(1, 0x001F)
+
+    # W12SEL's BG1 low pair is EI: bit 1 enables window 1 and bit 0
+    # inverts it. With %10, BG1 is masked inside x=0..127.
+    inside = PPU.write(base, 0x2123, 0x02)
+    native = PPU.render_frame(inside).data
+    assert binary_part(native, 0, 3) == <<0, 0, 0>>
+    assert binary_part(native, 200 * 3, 3) == <<255, 0, 0>>
+
+    # Setting the low invert bit reverses the masked area.
+    inverted = PPU.render_frame(PPU.write(base, 0x2123, 0x03)).data
+    assert binary_part(inverted, 0, 3) == <<255, 0, 0>>
+    assert binary_part(inverted, 200 * 3, 3) == <<0, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(inside, objects) == native
+    end
+  end
+
   test "forced blank takes the allocation-light solid-frame path" do
     frame = PPU.render_frame(PPU.new())
     assert frame.data == :binary.copy(<<0, 0, 0>>, 256 * 224)
