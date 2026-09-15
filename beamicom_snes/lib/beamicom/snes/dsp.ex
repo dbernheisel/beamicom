@@ -4,6 +4,7 @@ defmodule Beamicom.SNES.DSP do
   import Bitwise
 
   @compile {:inline, reg: 2, ram_get: 2, signed8: 1, clip16: 1}
+  @compile {:no_warn_undefined, Beamicom.SNES.Nx.DSPRenderer}
 
   @voice %{
     active?: false,
@@ -62,17 +63,110 @@ defmodule Beamicom.SNES.DSP do
   def read(%__MODULE__{} = dsp, address), do: :array.get(address &&& 0x7F, dsp.registers)
 
   @doc "Renders signed-16 little-endian stereo frames from current DSP state."
-  def render(%__MODULE__{} = dsp, _ram, 0), do: {dsp, <<>>}
+  def render(%__MODULE__{} = dsp, ram, frames), do: render(dsp, ram, frames, :native)
 
-  def render(%__MODULE__{} = dsp, ram, frames) when frames > 0 do
+  @doc "Renders through the selected native or Nx S-DSP mixer."
+  def render(%__MODULE__{} = dsp, _ram, 0, _renderer), do: {dsp, <<>>}
+
+  def render(%__MODULE__{} = dsp, ram, frames, renderer) when frames > 0 do
     dsp = apply_keys(dsp, ram)
     mixer = mixer_state(dsp)
 
-    {voices, end_flags, pcm} =
-      render_samples(render_voices(dsp.voices), dsp.end_flags, ram, mixer, frames, [])
+    {voices, end_flags, pcm} = render_with(dsp, ram, mixer, frames, renderer)
 
     dsp = %{dsp | voices: store_voices(voices), end_flags: end_flags}
-    {dsp, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
+    {dsp, pcm}
+  end
+
+  defp render_with(dsp, ram, mixer, frames, renderer) do
+    cond do
+      nx_synthesis_renderer?(renderer, frames) ->
+        renderer.render(render_voices(dsp.voices), dsp.end_flags, ram, mixer, frames)
+
+      nx_renderer?(renderer, frames) ->
+        {voices, end_flags, rows} =
+          render_voice_rows(render_voices(dsp.voices), dsp.end_flags, ram, mixer, frames)
+
+        {voices, end_flags, renderer.render(rows, mixer)}
+
+      true ->
+        {voices, end_flags, pcm} =
+          render_samples(render_voices(dsp.voices), dsp.end_flags, ram, mixer, frames, [])
+
+        {voices, end_flags, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
+    end
+  end
+
+  defp nx_synthesis_renderer?(renderer, frames) when is_atom(renderer) do
+    renderer != :native and Code.ensure_loaded?(renderer) and
+      function_exported?(renderer, :synthesis_minimum_frames, 0) and
+      function_exported?(renderer, :render, 5) and frames >= renderer.synthesis_minimum_frames()
+  end
+
+  defp nx_synthesis_renderer?(_renderer, _frames), do: false
+
+  defp nx_renderer?(renderer, frames) when is_atom(renderer) do
+    renderer != :native and Code.ensure_loaded?(renderer) and
+      function_exported?(renderer, :minimum_frames, 0) and
+      function_exported?(renderer, :render, 2) and frames >= renderer.minimum_frames()
+  end
+
+  defp nx_renderer?(_renderer, _frames), do: false
+
+  defp render_voice_rows(voices, end_flags, ram, {controls, _, _, _}, frames) do
+    {voices, columns, end_flags} =
+      Enum.reduce(0..7, {voices, [], end_flags}, fn index, {voices, columns, end_flags} ->
+        {pitch, _left, _right} = elem(controls, index)
+
+        {voice, samples, ended?} =
+          render_voice_column(elem(voices, index), pitch, ram, frames, [], false)
+
+        end_flags = if ended?, do: end_flags ||| 1 <<< index, else: end_flags
+        {put_elem(voices, index, voice), [samples | columns], end_flags}
+      end)
+
+    rows =
+      columns
+      |> Enum.reverse()
+      |> Enum.zip()
+      |> Enum.map(&Tuple.to_list/1)
+
+    {voices, end_flags, rows}
+  end
+
+  defp render_voice_column(voice, _pitch, _ram, 0, samples, ended?),
+    do: {voice, Enum.reverse(samples), ended?}
+
+  defp render_voice_column(
+         {false, _, _, _, _, _, _, _, _, _} = voice,
+         pitch,
+         ram,
+         remaining,
+         samples,
+         ended?
+       ) do
+    render_voice_column(voice, pitch, ram, remaining - 1, [0 | samples], ended?)
+  end
+
+  defp render_voice_column(
+         {true, _, _, _, _, voice_samples, sample_index, _, _, _} = voice,
+         pitch,
+         ram,
+         remaining,
+         samples,
+         ended?
+       ) do
+    sample = elem(voice_samples, sample_index)
+    {voice, ended_now?} = advance_render_voice(voice, pitch, ram)
+
+    render_voice_column(
+      voice,
+      pitch,
+      ram,
+      remaining - 1,
+      [sample | samples],
+      ended? or ended_now?
+    )
   end
 
   defp render_samples(voices, end_flags, _ram, _mixer, 0, pcm),

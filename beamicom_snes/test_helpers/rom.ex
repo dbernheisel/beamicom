@@ -14,6 +14,7 @@ defmodule Beamicom.SNESTestROM do
     mode = Keyword.get(opts, :map_mode, Map.fetch!(@modes, layout))
     destination = Keyword.get(opts, :destination, 1)
     ram_size_code = Keyword.get(opts, :ram_size_code, 0)
+    expansion_ram_size_code = Keyword.get(opts, :expansion_ram_size_code, 0)
     cartridge_type = Keyword.get(opts, :cartridge_type, 0)
     program = Keyword.get(opts, :program, <<0xEA>>)
     header_offset = Map.fetch!(@offsets, layout)
@@ -22,6 +23,7 @@ defmodule Beamicom.SNESTestROM do
     rom =
       :binary.copy(<<0>>, size)
       |> put_bytes(header_offset, padded_title)
+      |> put_byte(header_offset - 3, expansion_ram_size_code)
       |> put_byte(header_offset + 0x15, mode)
       |> put_byte(header_offset + 0x16, cartridge_type)
       |> put_byte(header_offset + 0x17, rom_size_code(size))

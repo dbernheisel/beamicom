@@ -13,7 +13,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       common = [
         Nx.template({0x10000}, :u8),
         Nx.template({256}, :u16),
-        Nx.template({@height, @width, 2}, :u8)
+        Nx.template({@height, 32, 9}, :s32)
       ]
 
       for {variant, rows} <- [
@@ -25,7 +25,7 @@ if Code.ensure_loaded?(Nx.Defn) do
             mode7: @height
           ] do
         args = [Nx.template({rows, @control_columns}, :s32) | common]
-        compiled(args, variant)
+        compiled(args, {variant, :descriptors})
       end
 
       :ok
@@ -98,11 +98,13 @@ if Code.ensure_loaded?(Nx.Defn) do
 
       palette = states |> hd() |> elem(21) |> :array.to_list()
 
+      {objects, object_kind} = object_tensor(object_layer)
+
       args = [
         controls,
         vram_tensor(ppu),
         Nx.tensor(palette, type: :u16),
-        object_layer |> Nx.from_binary(:u8) |> Nx.reshape({@height, @width, 2})
+        objects
       ]
 
       mode = states |> hd() |> elem(2)
@@ -125,7 +127,19 @@ if Code.ensure_loaded?(Nx.Defn) do
           {1, false, false} -> :mode1
         end
 
-      compiled(args, variant) |> apply(args) |> Nx.to_binary()
+      compiled(args, {variant, object_kind}) |> apply(args) |> Nx.to_binary()
+    end
+
+    defn render_mode1_descriptors(controls, vram, palettes, descriptors) do
+      render_mode1(controls, vram, palettes, object_layer(vram, descriptors))
+    end
+
+    defn render_mode1_unwindowed_descriptors(controls, vram, palettes, descriptors) do
+      render_mode1_unwindowed(controls, vram, palettes, object_layer(vram, descriptors))
+    end
+
+    defn render_mode7_descriptors(controls, vram, palettes, descriptors) do
+      render_mode7(controls, vram, palettes, object_layer(vram, descriptors))
     end
 
     defp supported_mode?(states) do
@@ -419,6 +433,58 @@ if Code.ensure_loaded?(Nx.Defn) do
       wrapped = repeat == 0 or repeat == 1
       color = Nx.select(wrapped or in_bounds, color, Nx.select(repeat == 3, tile_zero_color, 0))
       color
+    end
+
+    defnp object_layer(vram, descriptors) do
+      active = object_column(descriptors, 0) != 0
+      sprite_x = object_column(descriptors, 1)
+      size = object_column(descriptors, 2)
+      tile = object_column(descriptors, 3)
+      source_y = object_column(descriptors, 4)
+      priority = object_column(descriptors, 5)
+      palette = object_column(descriptors, 6)
+      base = object_column(descriptors, 7)
+      hflip = object_column(descriptors, 8) != 0
+      screen_x = Nx.iota({1, @width, 1}, type: :s32)
+      output_x = screen_x - sprite_x
+      inside = active and output_x >= 0 and output_x < size
+      output_x = Nx.clip(output_x, 0, 63)
+      source_x = Nx.select(hflip, size - 1 - output_x, output_x)
+      tile_x = Nx.quotient(source_x, 8)
+      tile_y = Nx.quotient(source_y, 8)
+
+      character =
+        band(band(tile, 0xF0) + tile_y * 16, 0xF0) + band(tile + tile_x, 0x0F)
+
+      address = band(base + character * 32 + band(source_y, 7) * 2, 0xFFFF)
+      bit = 7 - band(source_x, 7)
+      p0 = gather_object_bit(vram, address, bit)
+      p1 = gather_object_bit(vram, band(address + 1, 0xFFFF), bit)
+      p2 = gather_object_bit(vram, band(address + 16, 0xFFFF), bit)
+      p3 = gather_object_bit(vram, band(address + 17, 0xFFFF), bit)
+      raw = p0 + p1 * 2 + p2 * 4 + p3 * 8
+      opaque = inside and raw != 0
+      slot = Nx.iota({1, 1, 32}, type: :s32) + 1
+      encoded = Nx.select(opaque, slot * 0x10000 + priority * 0x100 + palette + raw, 0)
+      winner = Nx.reduce_max(encoded, axes: [2])
+
+      Nx.stack([band(winner, 0xFF), band(shr(winner, 8), 0xFF)], axis: 2)
+      |> Nx.as_type(:u8)
+    end
+
+    defnp object_column(descriptors, index) do
+      descriptors[[.., .., index]]
+      |> Nx.new_axis(1)
+      |> Nx.broadcast({@height, @width, 32})
+    end
+
+    defnp gather_object_bit(vram, address, bit) do
+      byte =
+        Nx.take(vram, Nx.flatten(address))
+        |> Nx.reshape({@height, @width, 32})
+        |> Nx.as_type(:s32)
+
+      band(shr(byte, bit), 1)
     end
 
     defnp compose_mode7(pixel, object_index, object_priority, screen, extbg) do
@@ -755,6 +821,12 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp controls_tensor(rows), do: Nx.tensor(rows, type: :s32)
 
+    defp object_tensor({:descriptors, rows}),
+      do: {Nx.tensor(rows, type: :s32), :descriptors}
+
+    defp object_tensor(layer) when is_binary(layer),
+      do: {layer |> Nx.from_binary(:u8) |> Nx.reshape({@height, @width, 2}), :pixels}
+
     defp vram_tensor(ppu) do
       key = {__MODULE__, :resident_vram, Beamicom.SNES.Nx.backend()}
 
@@ -776,22 +848,33 @@ if Code.ensure_loaded?(Nx.Defn) do
       end
     end
 
-    defp compiled(args, variant) do
+    defp compiled(args, {variant, object_kind}) do
       key =
-        {__MODULE__, :background_obj_v6, variant, Beamicom.SNES.Nx.compiler_options()}
+        {__MODULE__, :background_obj_v7, variant, object_kind,
+         Beamicom.SNES.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->
           function =
-            case variant do
-              variant when variant in [:mode1_windowed, :mode1_windowed_constant] ->
+            case {variant, object_kind} do
+              {variant, :pixels} when variant in [:mode1_windowed, :mode1_windowed_constant] ->
                 &render_mode1/4
 
-              variant when variant in [:mode1, :mode1_constant] ->
+              {variant, :pixels} when variant in [:mode1, :mode1_constant] ->
                 &render_mode1_unwindowed/4
 
-              variant when variant in [:mode7, :mode7_constant] ->
+              {variant, :pixels} when variant in [:mode7, :mode7_constant] ->
                 &render_mode7/4
+
+              {variant, :descriptors}
+              when variant in [:mode1_windowed, :mode1_windowed_constant] ->
+                &render_mode1_descriptors/4
+
+              {variant, :descriptors} when variant in [:mode1, :mode1_constant] ->
+                &render_mode1_unwindowed_descriptors/4
+
+              {variant, :descriptors} when variant in [:mode7, :mode7_constant] ->
+                &render_mode7_descriptors/4
             end
 
           compiled = Beamicom.SNES.Nx.compile(function, args)

@@ -12,7 +12,13 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
     {opts, paths, invalid} =
       OptionParser.parse(args,
-        strict: [warmup: :integer, frames: :integer, minimum_fps: :float, renderer: :string]
+        strict: [
+          warmup: :integer,
+          frames: :integer,
+          minimum_fps: :float,
+          renderer: :string,
+          apu_renderer: :string
+        ]
       )
 
     if invalid != [], do: Mix.raise("invalid benchmark options: #{inspect(invalid)}")
@@ -22,9 +28,18 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     frames = positive_option!(opts, :frames, 360)
     minimum_fps = Keyword.get(opts, :minimum_fps, 60.0)
     renderer = renderer_option!(opts)
+    apu_renderer = apu_renderer_option!(opts)
     Application.put_env(:beamicom_snes, :ppu_renderer, renderer)
 
-    {:ok, machine} = path |> File.read!() |> Machine.load()
+    {:ok, machine} =
+      path
+      |> File.read!()
+      |> Machine.load(
+        render_pipeline: true,
+        async_dsp: true,
+        apu_renderer: apu_renderer
+      )
+
     {machine, warmup_frame, _warmup_audio_frames, _warmup_pcm} = run_frames!(machine, warmup)
 
     if all_black?(warmup_frame) do
@@ -46,6 +61,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
     Mix.shell().info("ROM: #{path}")
     Mix.shell().info("Renderer: #{renderer}")
+    Mix.shell().info("APU renderer: #{inspect(apu_renderer)}")
     Mix.shell().info("Frames: #{frames} after #{warmup} warmup frames")
     Mix.shell().info(:io_lib.format("Throughput: ~.2f FPS (~.2f ms/frame)", [fps, 1_000 / fps]))
 
@@ -107,6 +123,22 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
       "native" -> :native
       "nx" -> :nx
       _other -> Mix.raise("--renderer must be native or nx")
+    end
+  end
+
+  defp apu_renderer_option!(opts) do
+    case Keyword.get(opts, :apu_renderer, "native") do
+      "native" ->
+        :native
+
+      "nx" ->
+        if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer),
+          do: Beamicom.SNES.Nx.DSPRenderer,
+          else:
+            Mix.raise("Nx DSP renderer is unavailable; install the optional nx/exla dependencies")
+
+      _other ->
+        Mix.raise("--apu-renderer must be native or nx")
     end
   end
 

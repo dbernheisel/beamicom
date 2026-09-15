@@ -16,6 +16,7 @@ defmodule Beamicom.SNES.APU do
 
   @sample_rate 32_000
   @spc_rate 1_024_000
+  @async_min_frames 32
 
   defstruct cpu_to_apu: {0, 0, 0, 0},
             apu_to_cpu: {0xAA, 0xBB, 0, 0},
@@ -33,13 +34,28 @@ defmodule Beamicom.SNES.APU do
             pending_frames: 0,
             pending_pcm: [],
             pending_spc_cycles: 0,
-            elapsed_master_clocks: 0
+            elapsed_master_clocks: 0,
+            async_dsp?: false,
+            apu_renderer: :native,
+            dsp_task: nil
 
   @type t :: %__MODULE__{}
 
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    apu = %__MODULE__{}
+    renderer =
+      Keyword.get(
+        opts,
+        :apu_renderer,
+        Application.get_env(:beamicom_snes, :apu_renderer, :native)
+      )
+
+    warmup_renderer(renderer)
+
+    apu = %__MODULE__{
+      async_dsp?: Keyword.get(opts, :async_dsp, false),
+      apu_renderer: renderer
+    }
 
     if Keyword.get(opts, :native_ipl, false) do
       spc = %{SPC700.new(apu.ram, 0xFFC0) | control: 0xB0}
@@ -94,33 +110,62 @@ defmodule Beamicom.SNES.APU do
   @spec advance(t(), non_neg_integer(), :ntsc | :pal) :: t()
   def advance(%__MODULE__{} = apu, clocks, region)
       when is_integer(clocks) and clocks >= 0 and region in [:ntsc, :pal] do
-    apu = advance_driver_start(apu, clocks)
+    apu = apu |> finish_dsp_task() |> advance_driver_start(clocks)
     {clock_numerator, clock_denominator} = master_clock_ratio(region)
     sample_phase = apu.sample_phase + clocks * @sample_rate * clock_denominator
     spc_phase = apu.spc_phase + clocks * @spc_rate * clock_denominator
     frames = div(sample_phase, clock_numerator)
     spc_cycles = div(spc_phase, clock_numerator)
 
-    {spc, dsp_cycle_phase, pcm} =
-      advance_audio(apu.spc, spc_cycles, apu.dsp_cycle_phase, frames)
+    if apu.async_dsp? and match?(%SPC700{}, apu.spc) and frames >= @async_min_frames do
+      {spc, dsp_task} =
+        start_dsp_task(
+          apu.spc,
+          spc_cycles,
+          apu.dsp_cycle_phase,
+          frames,
+          apu.apu_renderer
+        )
 
-    apu_to_cpu = if spc, do: spc.output_ports, else: apu.apu_to_cpu
-    ram = if spc, do: spc.ram, else: apu.ram
-    pending_pcm = if pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]
+      %{
+        apu
+        | sample_phase: rem(sample_phase, clock_numerator),
+          spc_phase: rem(spc_phase, clock_numerator),
+          pending_spc_cycles: apu.pending_spc_cycles + spc_cycles,
+          elapsed_master_clocks: apu.elapsed_master_clocks + clocks,
+          spc: spc,
+          apu_to_cpu: spc.output_ports,
+          ram: spc.ram,
+          dsp_task: dsp_task
+      }
+    else
+      {spc, dsp_cycle_phase, pcm} =
+        advance_audio(
+          apu.spc,
+          spc_cycles,
+          apu.dsp_cycle_phase,
+          frames,
+          apu.apu_renderer
+        )
 
-    %{
-      apu
-      | sample_phase: rem(sample_phase, clock_numerator),
-        spc_phase: rem(spc_phase, clock_numerator),
-        dsp_cycle_phase: dsp_cycle_phase,
-        pending_frames: apu.pending_frames + frames,
-        pending_pcm: pending_pcm,
-        pending_spc_cycles: apu.pending_spc_cycles + spc_cycles,
-        elapsed_master_clocks: apu.elapsed_master_clocks + clocks,
-        spc: spc,
-        apu_to_cpu: apu_to_cpu,
-        ram: ram
-    }
+      apu_to_cpu = if spc, do: spc.output_ports, else: apu.apu_to_cpu
+      ram = if spc, do: spc.ram, else: apu.ram
+      pending_pcm = if pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]
+
+      %{
+        apu
+        | sample_phase: rem(sample_phase, clock_numerator),
+          spc_phase: rem(spc_phase, clock_numerator),
+          dsp_cycle_phase: dsp_cycle_phase,
+          pending_frames: apu.pending_frames + frames,
+          pending_pcm: pending_pcm,
+          pending_spc_cycles: apu.pending_spc_cycles + spc_cycles,
+          elapsed_master_clocks: apu.elapsed_master_clocks + clocks,
+          spc: spc,
+          apu_to_cpu: apu_to_cpu,
+          ram: ram
+      }
+    end
   end
 
   @doc "Consumes the number of nominal SPC700 cycles ready to execute."
@@ -128,50 +173,176 @@ defmodule Beamicom.SNES.APU do
   def take_spc_cycles(%__MODULE__{pending_spc_cycles: cycles} = apu),
     do: {cycles, %{apu | pending_spc_cycles: 0}}
 
-  @doc "Drains `{frame_count, signed-16 little-endian stereo PCM, updated_apu}`."
+  @doc "Drains completed `{frame_count, signed-16 little-endian stereo PCM, updated_apu}`."
   @spec take_pcm(t()) :: {non_neg_integer(), binary(), t()}
   def take_pcm(%__MODULE__{pending_frames: frames, pending_pcm: chunks} = apu) do
     pcm = chunks |> Enum.reverse() |> IO.iodata_to_binary()
     {frames, pcm, %{apu | pending_frames: 0, pending_pcm: []}}
   end
 
-  defp advance_audio(nil, spc_cycles, dsp_cycle_phase, frames) do
+  @doc "Waits for an in-flight DSP batch, then drains all completed PCM."
+  @spec drain_pcm(t()) :: {non_neg_integer(), binary(), t()}
+  def drain_pcm(%__MODULE__{} = apu), do: apu |> finish_dsp_task() |> take_pcm()
+
+  defp start_dsp_task(%SPC700{} = spc, spc_cycles, dsp_cycle_phase, frames, renderer) do
+    start_cycles = spc.cycles
+    debt = max(-spc.cycle_credit, 0)
+    start_dsp = spc.dsp
+    {events, spc} = SPC700.run_with_dsp_events(spc, spc_cycles)
+    ram = spc.ram
+
+    task =
+      Task.async(fn ->
+        {dsp, dsp_cycle_phase, pcm} =
+          render_audio_events(
+            start_dsp,
+            ram,
+            events,
+            start_cycles,
+            debt,
+            spc_cycles,
+            dsp_cycle_phase,
+            renderer
+          )
+
+        {dsp, dsp_cycle_phase, frames, pcm}
+      end)
+
+    {spc, task}
+  end
+
+  defp finish_dsp_task(%__MODULE__{dsp_task: nil} = apu), do: apu
+
+  defp finish_dsp_task(%__MODULE__{dsp_task: task} = apu) do
+    {dsp, dsp_cycle_phase, frames, pcm} = Task.await(task, :infinity)
+    spc = if apu.spc, do: %{apu.spc | dsp: dsp}, else: nil
+    pending_pcm = if pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]
+
+    %{
+      apu
+      | spc: spc,
+        dsp_cycle_phase: dsp_cycle_phase,
+        pending_frames: apu.pending_frames + frames,
+        pending_pcm: pending_pcm,
+        dsp_task: nil
+    }
+  end
+
+  defp advance_audio(nil, spc_cycles, dsp_cycle_phase, frames, _renderer) do
     pcm = :binary.copy(<<0::signed-little-16, 0::signed-little-16>>, frames)
     {nil, rem(dsp_cycle_phase + spc_cycles, 32), pcm}
   end
 
-  defp advance_audio(%SPC700{} = spc, spc_cycles, dsp_cycle_phase, _frames) do
+  defp advance_audio(%SPC700{} = spc, spc_cycles, dsp_cycle_phase, _frames, renderer) do
     start_cycles = spc.cycles
     debt = max(-spc.cycle_credit, 0)
     start_dsp = spc.dsp
     {events, spc} = SPC700.run_with_dsp_events(spc, spc_cycles)
 
+    {dsp, dsp_cycle_phase, pcm} =
+      render_audio_events(
+        start_dsp,
+        spc.ram,
+        events,
+        start_cycles,
+        debt,
+        spc_cycles,
+        dsp_cycle_phase,
+        renderer
+      )
+
+    {%{spc | dsp: dsp}, dsp_cycle_phase, pcm}
+  end
+
+  defp render_audio_events(
+         start_dsp,
+         ram,
+         events,
+         start_cycles,
+         debt,
+         spc_cycles,
+         dsp_cycle_phase,
+         renderer
+       ) do
+    batches =
+      batch_dsp_events(events, start_cycles, debt, spc_cycles, dsp_cycle_phase)
+
     {dsp, dsp_cycle_phase, pcm, position} =
-      Enum.reduce(events, {start_dsp, dsp_cycle_phase, [], 0}, fn
-        {event_cycle, address, value}, {dsp, phase, pcm, position} ->
-          event_position = (event_cycle - start_cycles + debt) |> max(position) |> min(spc_cycles)
-          {dsp, phase, chunk} = render_dsp_span(dsp, spc.ram, event_position - position, phase)
+      Enum.reduce(batches, {start_dsp, dsp_cycle_phase, [], 0}, fn
+        {first_position, last_position, writes}, {dsp, phase, pcm, position} ->
+          {dsp, phase, chunk} =
+            render_dsp_span(dsp, ram, first_position - position, phase, renderer)
+
           pcm = if chunk == <<>>, do: pcm, else: [chunk | pcm]
-          {DSP.write(dsp, address, value), phase, pcm, event_position}
+
+          dsp =
+            Enum.reduce(writes, dsp, fn {address, value}, dsp ->
+              DSP.write(dsp, address, value)
+            end)
+
+          # Every write in a batch lies before the same DSP sample boundary.
+          # Advancing this remainder cannot synthesize a frame, so no renderer
+          # dispatch is needed between the individual register writes.
+          phase = phase + last_position - first_position
+          {dsp, phase, pcm, last_position}
       end)
 
     {dsp, dsp_cycle_phase, tail} =
-      render_dsp_span(dsp, spc.ram, spc_cycles - position, dsp_cycle_phase)
+      render_dsp_span(dsp, ram, spc_cycles - position, dsp_cycle_phase, renderer)
 
     pcm = if tail == <<>>, do: pcm, else: [tail | pcm]
-    {%{spc | dsp: dsp}, dsp_cycle_phase, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
+    {dsp, dsp_cycle_phase, pcm |> Enum.reverse() |> IO.iodata_to_binary()}
   end
 
-  defp render_dsp_span(dsp, ram, cycles, phase) do
+  defp batch_dsp_events(events, start_cycles, debt, spc_cycles, initial_phase) do
+    {batches, current, _position} =
+      Enum.reduce(events, {[], nil, 0}, fn {event_cycle, address, value},
+                                           {batches, current, position} ->
+        event_position = (event_cycle - start_cycles + debt) |> max(position) |> min(spc_cycles)
+        boundary = div(initial_phase + event_position, 32)
+
+        case current do
+          {^boundary, first, _last, writes} ->
+            {batches, {boundary, first, event_position, [{address, value} | writes]},
+             event_position}
+
+          nil ->
+            {batches, {boundary, event_position, event_position, [{address, value}]},
+             event_position}
+
+          batch ->
+            {[batch | batches], {boundary, event_position, event_position, [{address, value}]},
+             event_position}
+        end
+      end)
+
+    batches = if current, do: [current | batches], else: batches
+
+    batches
+    |> Enum.reverse()
+    |> Enum.map(fn {_boundary, first, last, writes} ->
+      {first, last, Enum.reverse(writes)}
+    end)
+  end
+
+  defp render_dsp_span(dsp, ram, cycles, phase, renderer) do
     elapsed = phase + cycles
     frames = div(elapsed, 32)
-    {dsp, pcm} = DSP.render(dsp, ram, frames)
+    {dsp, pcm} = DSP.render(dsp, ram, frames, renderer)
     {dsp, rem(elapsed, 32), pcm}
   end
 
   # NTSC is exactly 945/44 MHz. PAL's supplied master clock is integral in Hz.
   defp master_clock_ratio(:ntsc), do: {945_000_000, 44}
   defp master_clock_ratio(:pal), do: {21_281_370, 1}
+
+  defp warmup_renderer(:native), do: :ok
+
+  defp warmup_renderer(renderer) when is_atom(renderer) do
+    if Code.ensure_loaded?(renderer) and function_exported?(renderer, :warmup, 0),
+      do: renderer.warmup(),
+      else: :ok
+  end
 
   defp handle_ipl_write(%{ipl_state: :ready} = apu, 0, 0xCC), do: begin_upload(apu)
 

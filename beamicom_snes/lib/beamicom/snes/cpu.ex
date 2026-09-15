@@ -10,6 +10,7 @@ defmodule Beamicom.SNES.CPU do
 
   import Bitwise
   require Beamicom.SNES.Bus.CPUAccess
+  alias Beamicom.SNES.{SA1, SuperFX}
   alias Beamicom.SNES.Bus, as: SystemBus
   alias Beamicom.SNES.Bus.CPUAccess, as: Bus
   alias Beamicom.SNES.Timing
@@ -885,6 +886,20 @@ defmodule Beamicom.SNES.CPU do
       (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
         value = :array.get(offset, bus.wram)
         {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
+
+      match?(%SuperFX{}, bus.coprocessor) and SuperFX.cpu_rom_mapped?(address) ->
+        clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
+        value = SuperFX.cpu_rom_byte(bus.cartridge, address, bus.open_bus)
+
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks},
+         clocks}
+
+      match?(%SA1{}, bus.coprocessor) and SA1.rom_mapped?(address) ->
+        clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
+        value = SA1.rom_byte(bus.coprocessor, bus.cartridge, address, bus.open_bus)
+
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks},
+         clocks}
 
       bus.cartridge.layout == :lorom and
           (offset >= 0x8000 or bank in 0x40..0x6F or bank in 0xC0..0xEF) ->

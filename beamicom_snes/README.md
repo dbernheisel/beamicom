@@ -12,10 +12,14 @@ Nx/EXLA PPU acceleration. The implementation currently includes:
   OBJ, windows, color math, brightness, and scanline-varying state;
 - general DMA, HDMA, the WRAM data port, and fast-ROM selection;
 - directional CPU/APU ports, native SPC700 IPL upload/launch, S-DSP mixing,
-  and synchronized 32 kHz stereo PCM output;
+  synchronized 32 kHz stereo PCM output, and an optional batched Nx/EXLA
+  eight-voice stereo mixer;
 - partial Capcom Cx4 support with its cartridge RAM/register window,
   ROM-to-RAM transfers, self-test responses, composite OAM generation,
   scale/rotate conversion, scalar math, and trapezoid clipping;
+- partial DSP-1/1A/1B support with mapper-specific ports, scalar and vector
+  math, retained attitude matrices, fixed-point projection/target commands,
+  and hardware-style streamed Mode 7 raster matrices;
 - an emulation/native-mode 65C816 interpreter with interrupt entry/RTI; and
 - optional frame-wide Nx/EXLA renderers for the supported Mode 1 and Mode 7
   paths, with automatic native fallback.
@@ -23,8 +27,8 @@ Nx/EXLA PPU acceleration. The implementation currently includes:
 It boots and renders the tested Final Fantasy II, Final Fantasy III, Super Mario
 World, and Super Metroid scenes with active audio. It is not yet a complete or
 cycle-perfect core: all 256 CPU opcode bytes dispatch, but addressing/timing
-  edge cases, modes 2-6, remaining Cx4 graphics commands, other cartridge
-  coprocessors, and further PPU/DSP accuracy remain future work. See the detailed
+  edge cases, modes 2-6, remaining coprocessor commands, and further PPU/DSP
+  accuracy remain future work. See the detailed
 [implementation status matrix](IMPLEMENTATION_STATUS.md).
 
 Widths follow the 65C816 M and X flags. Bus accesses advance SNES master clocks
@@ -35,6 +39,17 @@ timestamped register writes. WRAM, VRAM, CGRAM, and OAM use persistent fixed
 arrays. The PPU decodes planar data once per tile row and reuses a completed RGB
 frame when final visual state is unchanged. Stable direct-page NMI polling loops
 are fast-forwarded only within a scanline and only while H/HV IRQs are disabled.
+
+Scenic and the benchmark enable one-job-deep presentation pipelines. An
+immutable PPU snapshot renders alongside the following emulated frame, while
+SPC700 execution remains synchronous and its immutable DSP synthesis batch runs
+alongside the main CPU. Both jobs are joined before their state can affect the
+next device batch, preserving event order at the cost of one frame of host-side
+audio/video latency. Other callers can opt in with
+`Machine.load(media, render_pipeline: true, async_dsp: true)`. Pass
+`apu_renderer: Beamicom.SNES.Nx.DSPRenderer` to keep BRR/history advancement
+native while compiling the parallel eight-voice stereo mix with Nx. Scenic uses
+this renderer automatically when Nx is available.
 
 ## Tests
 
@@ -52,7 +67,8 @@ Select the optimized renderer explicitly for the 60 FPS E2E gate:
 
 ```sh
 mix beamicom.snes.benchmark "roms/Final Fantasy III.sfc" \
-  --renderer nx --warmup 1700 --frames 240 --minimum-fps 60.0
+  --renderer nx --apu-renderer nx \
+  --warmup 1700 --frames 240 --minimum-fps 60.0
 ```
 
 ## Bring-up order

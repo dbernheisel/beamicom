@@ -129,6 +129,46 @@ defmodule Beamicom.SNES.APUTest do
     assert chunked.spc_phase == once.spc_phase
   end
 
+  test "async DSP synthesis publishes the preceding completed batch" do
+    clocks = 357_368
+
+    sync = APU.new(native_ipl: true) |> APU.advance(clocks, :ntsc)
+    {expected_frames, expected_pcm, _sync} = APU.take_pcm(sync)
+
+    async = APU.new(native_ipl: true, async_dsp: true) |> APU.advance(clocks, :ntsc)
+    assert {0, <<>>, async} = APU.take_pcm(async)
+    assert %Task{} = async.dsp_task
+
+    async = APU.advance(async, clocks, :ntsc)
+    assert {^expected_frames, ^expected_pcm, async} = APU.take_pcm(async)
+
+    {tail_frames, tail_pcm, async} = APU.drain_pcm(async)
+    assert tail_frames > 0
+    assert byte_size(tail_pcm) == tail_frames * 4
+    assert async.dsp_task == nil
+  end
+
+  if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer) do
+    test "async APU batches accept the Nx DSP renderer without changing output" do
+      clocks = 357_368
+
+      native = APU.new(native_ipl: true) |> APU.advance(clocks, :ntsc)
+      {expected_frames, expected_pcm, _native} = APU.take_pcm(native)
+
+      nx =
+        APU.new(
+          native_ipl: true,
+          async_dsp: true,
+          apu_renderer: Beamicom.SNES.Nx.DSPRenderer
+        )
+        |> APU.advance(clocks, :ntsc)
+        |> APU.advance(clocks, :ntsc)
+
+      assert nx.apu_renderer == Beamicom.SNES.Nx.DSPRenderer
+      assert {^expected_frames, ^expected_pcm, _nx} = APU.take_pcm(nx)
+    end
+  end
+
   test "SPC instruction overruns become debt across fragmented cycle grants" do
     ram = :array.new(0x10000, default: 0, fixed: true)
     initial = SPC700.new(ram, 0)
@@ -382,6 +422,55 @@ defmodule Beamicom.SNES.APUTest do
 
     {restarted, _pcm} = looping |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 1)
     assert DSP.read(restarted, 0x7C) == 0
+  end
+
+  if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer) do
+    test "Nx DSP block mixing is bit-identical to the native mixer" do
+      ram =
+        Enum.reduce(
+          [{0x100, 0x00}, {0x101, 0x02}, {0x102, 0x00}, {0x103, 0x02}, {0x200, 0x13}],
+          :array.new(0x10000, default: 0, fixed: true),
+          fn {address, value}, ram -> :array.set(address, value, ram) end
+        )
+
+      ram =
+        Enum.reduce(0x201..0x208, ram, fn address, ram ->
+          :array.set(address, 0x71 + rem(address, 7), ram)
+        end)
+
+      dsp =
+        Enum.reduce(0..7, DSP.new(), fn index, dsp ->
+          base = index * 0x10
+
+          dsp
+          |> DSP.write(base, 0x70 - index * 9)
+          |> DSP.write(base + 1, 0x90 + index * 7)
+          |> DSP.write(base + 2, index * 0x21)
+          |> DSP.write(base + 3, 0x10)
+          |> DSP.write(base + 4, 0)
+        end)
+        |> DSP.write(0x0C, 0x71)
+        |> DSP.write(0x1C, 0x9B)
+        |> DSP.write(0x5D, 0x01)
+        |> DSP.write(0x4C, 0xFF)
+
+      {native, native_pcm} = DSP.render(dsp, ram, 256)
+
+      {nx, nx_pcm} =
+        DSP.render(dsp, ram, 256, Beamicom.SNES.Nx.DSPRenderer)
+
+      assert nx == native
+      assert nx_pcm == native_pcm
+      refute nx_pcm == :binary.copy(<<0>>, byte_size(nx_pcm))
+
+      {native_long, native_long_pcm} = DSP.render(native, ram, 4096)
+
+      {nx_long, nx_long_pcm} =
+        DSP.render(nx, ram, 4096, Beamicom.SNES.Nx.DSPRenderer)
+
+      assert nx_long == native_long
+      assert nx_long_pcm == native_long_pcm
+    end
   end
 
   test "DSP keeps KOFF asserted and replaces pending KON writes" do

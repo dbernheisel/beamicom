@@ -30,8 +30,8 @@ The audit describes the current source, not a cycle-accuracy claim.
 | SPC700 | **256/256 opcode bytes**, lightly validated | Exact instruction/MMIO timing and conformance tests; fragmented-cycle debt is handled |
 | S-SMP | Ports, native IPL execution, timers, DSP address/data mostly present | TEST semantics, timer phase, DSPDATA write behavior, port collision timing |
 | S-DSP | Basic eight-voice BRR playback, stereo mixing, and register-event-ordered output | ADSR/GAIN, interpolation, PMON/noise, echo/FIR |
-| Cartridge coprocessors | **Partial Cx4** | Remaining Cx4 transform-lines/wireframe/disintegration/wave commands; common interface and SuperFX |
-| Nx/EXLA | Optimized subsets of Mode 1 and Mode 7 | Broader fused PPU kernels; later block-based DSP mixing |
+| Cartridge coprocessors | **Partial Cx4, SuperFX, DSP-1, and SA-1** | Remaining chip commands, cycle-level arbitration, DSP-1 busy timing/ROM dump, and the SA-1 CPU/DMA scheduler |
+| Nx/EXLA | Optimized subsets of Mode 1 and Mode 7; batched eight-voice S-DSP stereo mixing | Broader fused PPU kernels; BRR decoding remains native because of its sample-history recurrence |
 
 ## W65C816S CPU instruction inventory
 
@@ -252,29 +252,29 @@ listed above remain approximate.
 
 ## Cartridge coprocessor inventory
 
-[`cx4.ex`](lib/beamicom/snes/cx4.ex) now recognizes cartridge type `$F3` and
-owns an 8 KiB host window at `$6000-$7FFF` in banks `$00-$3F/$80-$BF`.
 [`bus.ex`](lib/beamicom/snes/bus.ex) routes CPU and DMA-visible reads/writes
-through the cartridge coprocessor state before ordinary ROM/SRAM mapping.
-Other chips remain missing and should converge on a common interface as their
-timing and arbitration requirements become concrete.
+through cartridge-specific Cx4, SuperFX, DSP-1, and SA-1 state before ordinary
+ROM/SRAM mapping. SuperFX RAM/cache use per-machine mutable storage so GSU
+pixel workloads do not rebuild persistent trees for every byte. Coprocessors
+still execute synchronously while their cycle-level schedulers and arbitration
+rules are developed.
 
 ### Priority chips for the supplied ROM set
 
 | Chip | Command/instruction surface | Status |
 |---|---|---|
 | Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` polar conversion; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$00` composite OAM build plus scale/rotate modes `$03/$07`, and `$05/$0D/$10/$13/$15/$1F/$22/$25/$2D/$40/$54/$5C/$89`. X3 passes its Cx4 self-test and renders composite boss sprites in its attract sequence; transform-lines, wireframe, disintegration, and wave commands remain. |
-| SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | Missing. Required by Star Fox and Yoshi's Island. |
+| SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | **Partial:** complete native opcode-family decode, GSU register/cache/ROM/RAM state, S-CPU mapping, IRQ/STOP jobs, and PLOT/RPIX bitplanes. Yoshi's Island reaches recognizable GSU-rendered intro graphics. Jobs are still atomic rather than cycle-interleaved, and active workload throughput remains below 60 FPS. |
 
 ### Remaining commercial enhancement chips
 
 | Chip | Command/interface surface | Status |
 |---|---|---|
-| DSP-1/1A/1B | Commands: multiply `$00`, inverse `$10`, triangle `$04`, radius `$08`, range `$18` and `$38`, distance `$28`, rotate `$0C`, polar `$1C`, parameter `$02`, raster `$0A`, project `$06`, target `$0E`, attitude matrices A/B/C `$01/$11/$21`, objective transforms A/B/C `$0D/$1D/$2D`, subjective transforms A/B/C `$03/$13/$23`, scalar products A/B/C `$0B/$1B/$2B`, gyrate `$14`, memory test `$0F`, memory size `$2F`. | Missing. Needed by Super Mario Kart and Pilotwings, among others. |
+| DSP-1/1A/1B | Commands: multiply `$00`, inverse `$10`, triangle `$04`, radius `$08`, range `$18` and `$38`, distance `$28`, rotate `$0C`, polar `$1C`, parameter `$02`, raster `$0A`, project `$06`, target `$0E`, attitude matrices A/B/C `$01/$11/$21`, objective transforms A/B/C `$0D/$1D/$2D`, subjective transforms A/B/C `$03/$13/$23`, scalar products A/B/C `$0B/$1B/$2B`, gyrate `$14`, memory test `$0F`, memory size `$2F`. | **Partial:** all listed high-level command families and aliases dispatch; projection uses firmware-style fixed-point normalization, interpolation, clipping, and truncation; matrices retain state; Raster streams successive Mode 7 matrices and honors write-to-terminate behavior. Super Mario Kart reaches a race with clean command framing. ROM dump `$1F`, command busy timing, and DSP-1B revision differences remain. |
 | DSP-2 | `$01` bitmap-to-bitplane, `$03` transparent color, `$05` transparent overlay, `$06` reverse bitmap, `$09` 16x16 multiply, `$0D` scale bitmap, `$0F` reset/no-op. | Missing. |
 | DSP-3 | Command processor for memory test/dump, coordinate conversion, pathfinding, and data decompression used by SD Gundam GX. Some variants require dumped firmware for low-level emulation. | Missing. |
 | DSP-4 | Command processor for track projection, polygon/sprite transforms, clipping, and OAM generation used by Top Gear 3000. | Missing. |
-| SA-1 | Second 65C816-derived CPU plus `$2200-$23FF` control/vector/IRQ, Super MMC ROM/BW-RAM mapping and protection, 2 KiB I-RAM, DMA and character conversion, arithmetic unit, timers/counters, bitmap mode, and variable-length bit processing. | Missing. |
+| SA-1 | Second 65C816-derived CPU plus `$2200-$23FF` control/vector/IRQ, Super MMC ROM/BW-RAM mapping and protection, 2 KiB I-RAM, DMA and character conversion, arithmetic unit, timers/counters, bitmap mode, and variable-length bit processing. | **Foundation:** chip detection, S-CPU MMIO/IRQ/vector handshake, Super MMC ROM banks, protected I-RAM/BW-RAM windows, and signed multiply/unsigned divide/40-bit accumulation. The second 65C816 scheduler, DMA/character conversion, timers, bitmap access, and variable-bit reader remain. |
 | S-DD1 | ROM banking and streaming data decompression channels. | Missing. |
 | SPC7110 / SPC7110+RTC | ROM mapping, data-decompression stream, math/data ports, and optional RTC-4513 interface. | Missing. |
 | OBC-1 | Object attribute helper RAM and address/index register interface. | Missing. |
@@ -387,6 +387,7 @@ stable loop shape and batches iterations only up to the next scanline boundary.
 - [S-DSP registers](https://snes.nesdev.org/wiki/S-DSP_registers)
 - [PPU registers](https://snes.nesdev.org/wiki/PPU_registers)
 - [SuperFX opcode matrix](https://wiki.superfamicom.org/super-fx-opcode-matrix)
+- [SuperFX flag clobber table](https://wiki.superfamicom.org/super-fx-flag-clobber-table)
 - [Cx4 command/register documentation](https://wiki.superfamicom.org/capcom-cx4-hitachi-hg51b169)
 - [DSP-1 command documentation](https://snes.nesdev.org/wiki/DSP-1)
 - [DSP enhancement-chip overview](https://snes.nesdev.org/wiki/DSP_Expansion)

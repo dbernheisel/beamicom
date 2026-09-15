@@ -18,6 +18,7 @@ defmodule Beamicom.Scenic.SNESSystem do
   @width 256
   @height 224
   @audio_rate 32_000
+  @compile {:no_warn_undefined, Beamicom.SNES.Nx.DSPRenderer}
   @button_bits %{
     b: 0x8000,
     y: 0x4000,
@@ -54,6 +55,12 @@ defmodule Beamicom.Scenic.SNESSystem do
 
   @impl true
   def load(media, options \\ []) do
+    options =
+      options
+      |> Keyword.put_new(:render_pipeline, true)
+      |> Keyword.put_new(:async_dsp, true)
+      |> Keyword.put_new(:apu_renderer, default_apu_renderer())
+
     with {:ok, machine} <- Machine.load(media, options) do
       {:ok, %State{machine: machine}}
     end
@@ -110,6 +117,12 @@ defmodule Beamicom.Scenic.SNESSystem do
       frame_count: sample_count,
       data: pcm
     }
+  end
+
+  defp default_apu_renderer do
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer),
+      do: Beamicom.SNES.Nx.DSPRenderer,
+      else: :native
   end
 
   defp normalize_frame(%{width: @width, height: height, data: data}) when height >= @height,

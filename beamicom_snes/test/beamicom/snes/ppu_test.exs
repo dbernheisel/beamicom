@@ -1,5 +1,5 @@
 defmodule Beamicom.SNES.PPUTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import Bitwise
 
@@ -345,6 +345,63 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(PPU.render_frame(rotated).data, 0, 3) == <<0, 255, 0>>
   end
 
+  test "large OBJ horizontal tiles wrap within the character row" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      # Size pair 2 makes a high-table-sized object 64x64.
+      |> PPU.write(0x2101, 0x40)
+      |> PPU.write(0x212C, 0x10)
+      # The second tile after character $0f is $00, not $10.
+      |> write_vram_byte(0x0000, 0x80)
+      |> write_cgram_color(129, 0x001F)
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 0)
+
+    ppu =
+      Enum.reduce([0, 0, 0x0F, 0], ppu, fn byte, ppu ->
+        PPU.write(ppu, 0x2104, byte)
+      end)
+
+    ppu =
+      ppu
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 1)
+      |> PPU.write(0x2104, 0x02)
+
+    assert binary_part(PPU.render_frame(ppu).data, 8 * 3, 3) == <<255, 0, 0>>
+  end
+
+  if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+    test "Nx PPU rasterizes OBJ descriptors with native pixel parity" do
+      previous = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
+      on_exit(fn -> Application.put_env(:beamicom_snes, :ppu_renderer, previous) end)
+
+      ppu =
+        PPU.new()
+        |> PPU.write(0x2100, 0x0F)
+        |> PPU.write(0x2105, 0x01)
+        |> PPU.write(0x212C, 0x10)
+        |> write_vram_byte(0x0000, 0x81)
+        |> write_vram_byte(0x0010, 0x01)
+        |> write_cgram_color(129, 0x001F)
+        |> PPU.write(0x2102, 0)
+        |> PPU.write(0x2103, 0)
+
+      ppu =
+        Enum.reduce([3, 4, 0, 0x60], ppu, fn byte, ppu ->
+          PPU.write(ppu, 0x2104, byte)
+        end)
+
+      Application.put_env(:beamicom_snes, :ppu_renderer, :native)
+      native = PPU.render_frame(ppu).data
+      Application.put_env(:beamicom_snes, :ppu_renderer, :nx)
+
+      assert PPU.render_frame(ppu).data == native
+      assert :binary.match(native, <<255, 0, 0>>) != :nomatch
+    end
+  end
+
   test "scanline capture preserves mid-frame OAM priority rotation" do
     ppu =
       PPU.new()
@@ -592,6 +649,25 @@ defmodule Beamicom.SNES.PPUTest do
 
     ppu = ppu |> PPU.write(0x2100, 0x0E) |> PPU.enter_scanline(225)
     assert ppu.rendered_frames == 2
+  end
+
+  test "render pipeline publishes one immutable frame behind emulation" do
+    ppu = PPU.new(render_pipeline: true) |> PPU.write(0x2100, 0x0F)
+
+    ppu = PPU.enter_scanline(ppu, 225)
+    assert {nil, ppu} = PPU.take_frame(ppu)
+    assert match?({:running, %Task{}, _key}, ppu.render_task)
+
+    ppu = PPU.enter_scanline(ppu, 225)
+    assert {first, ppu} = PPU.take_frame(ppu)
+    assert first.number == 0
+    assert ppu.rendered_frames == 1
+
+    ppu = PPU.enter_scanline(ppu, 225)
+    assert {second, ppu} = PPU.take_frame(ppu)
+    assert second.number == 1
+    assert second.data == first.data
+    assert ppu.reused_frames == 1
   end
 
   defp write_vram_byte(ppu, byte_address, value) do
