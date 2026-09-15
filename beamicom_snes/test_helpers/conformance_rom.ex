@@ -40,6 +40,62 @@ defmodule Beamicom.SNES.ConformanceROM do
       suite: :gilyon,
       path: "gilyon-snes-tests/spctest.sfc",
       sha256: "3909f03d55b07081a4e9ac437ba5179731ec6c8ac3c715f712daec0f398dde63"
+    },
+    neser_m7_identity: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-identity.sfc",
+      sha256: "2dfb27282618bae57c171d58f57f5f3f5a7ad738fdf63a341aad073b09dca6aa",
+      frame_crc32: 0x7EDC_DD3D,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_scale_wrap: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-scale-wrap.sfc",
+      sha256: "c7b7172288910c78105ab905207b3bbb7497ff0335e7231e09c6ca5da0063680",
+      frame_crc32: 0xB431_6EA2,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_scale_color0: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-scale-color0.sfc",
+      sha256: "a00f907e185dfbd676c9881aefc0999472eb701036ee966319215a0a97ac3925",
+      frame_crc32: 0xE5AB_774A,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_scale_tile0: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-scale-tile0.sfc",
+      sha256: "785ed8de4665b8d2fc2d51c49d659e87e382357018b5356b911e2b62d8968bd5",
+      frame_crc32: 0x5D47_8D7E,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_rot30: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-rot30.sfc",
+      sha256: "64538022583ec155864f7555cd6fb8ca92e1409d062dbfc4fa24eef98fc9076b",
+      frame_crc32: 0x9A58_AB93,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_flip_h: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-flip-h.sfc",
+      sha256: "53765393a202730ea91a33aa42bd40439bd74b840daa501528ecb3870c5f85f3",
+      frame_crc32: 0x3C92_8CE7,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_flip_v: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-flip-v.sfc",
+      sha256: "4f19c3b75e3da330a3cedbab9990f64b5883a434e9dcf2b43186450571e665c4",
+      frame_crc32: 0x7DB8_DCC0,
+      load_opts: [native_ipl: true]
+    },
+    neser_m7_mosaic: %{
+      suite: :neser_mode7,
+      path: "neser-mode7-tests/m7-mosaic.sfc",
+      sha256: "0c6a3cdfc5825d5f2d7b192318f45166ced8fc3fea669f5279360edd7a9071e6",
+      frame_crc32: 0x27C9_C012,
+      load_opts: [native_ipl: true]
     }
   ]
 
@@ -52,6 +108,8 @@ defmodule Beamicom.SNES.ConformanceROM do
   def fixture_available?(name), do: File.regular?(fixture_path(name))
 
   def fixtures_available?(names), do: Enum.all?(names, &fixture_available?/1)
+
+  def expected_frame_crc32(name), do: Map.fetch!(fixture!(name), :frame_crc32)
 
   def fixture_path(name) do
     @fixture_root
@@ -71,7 +129,9 @@ defmodule Beamicom.SNES.ConformanceROM do
   end
 
   def load!(name) do
-    case name |> verify_fixture!() |> Machine.load() do
+    fixture = fixture!(name)
+
+    case name |> verify_fixture!() |> Machine.load(Map.get(fixture, :load_opts, [])) do
       {:ok, machine} -> machine
       {:error, reason} -> raise "could not load #{name}: #{inspect(reason)}"
     end

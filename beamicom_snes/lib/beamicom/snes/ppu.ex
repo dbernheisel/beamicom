@@ -1623,7 +1623,14 @@ defmodule Beamicom.SNES.PPU do
     List.to_tuple(for index <- 0..255, do: :array.get(index, ppu.cgram))
   end
 
-  defp expand5(value, brightness), do: div(value * 255 * brightness, 31 * 15)
+  defp expand5(value, brightness) do
+    # The DAC applies master brightness while the channel is still 5-bit, then
+    # converts that result to 8-bit by repeating its high bits.  Scaling an
+    # already-expanded 8-bit channel gives different rounding for mid-range
+    # colors (for example, 16 must become 132 at full brightness, not 131).
+    scaled = div(value * brightness, 15)
+    scaled <<< 3 ||| scaled >>> 2
+  end
 
   defp m7_product(a, b) do
     signed_a = if a >= 0x8000, do: a - 0x10000, else: a

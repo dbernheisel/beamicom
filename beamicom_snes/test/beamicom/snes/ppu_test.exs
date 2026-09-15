@@ -45,6 +45,34 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(frame.data, 0, 6) == <<255, 0, 0, 0, 0, 0>>
   end
 
+  test "applies master brightness in 5-bit space before DAC expansion" do
+    full =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> write_cgram_color(0, 0x021F)
+
+    # Bit replication maps the mid-range green component 16 to 132.  A direct
+    # 5-bit-to-255 ratio would incorrectly round it down to 131.
+    assert binary_part(PPU.render_frame(full).data, 0, 3) == <<255, 132, 0>>
+
+    half =
+      PPU.new()
+      |> PPU.write(0x2100, 0x07)
+      |> PPU.write(0x2105, 0x01)
+      |> write_cgram_color(0, 0x001F)
+
+    # Brightness is applied before expansion: floor(31 * 7 / 15) = 14,
+    # and (14 << 3) | (14 >> 2) = 115.
+    assert binary_part(PPU.render_frame(half).data, 0, 3) == <<115, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(full, objects) == PPU.render_frame(full).data
+      assert Beamicom.SNES.Nx.PPURenderer.render(half, objects) == PPU.render_frame(half).data
+    end
+  end
+
   test "MOSAIC repeats each enabled background's upper-left pixel in screen-aligned blocks" do
     base =
       PPU.new()

@@ -710,7 +710,10 @@ if Code.ensure_loaded?(Nx.Defn) do
       band(shr(byte, bit), 1)
     end
 
-    defnp(expand(component, brightness), do: Nx.quotient(component * 255 * brightness, 31 * 15))
+    defnp expand(component, brightness) do
+      scaled = Nx.quotient(component * brightness, 15)
+      bor(Nx.left_shift(scaled, 3), shr(scaled, 2))
+    end
 
     defnp column(tensor, index) do
       tensor[[.., index]] |> Nx.new_axis(1) |> Nx.broadcast({@height, 1})
