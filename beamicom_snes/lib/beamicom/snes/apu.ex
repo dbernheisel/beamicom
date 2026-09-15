@@ -12,7 +12,7 @@ defmodule Beamicom.SNES.APU do
   """
 
   import Bitwise
-  alias Beamicom.SNES.{DSP, SPC700}
+  alias Beamicom.SNES.{DSP, DSPTask, SPC700}
 
   @sample_rate 32_000
   @spc_rate 1_024_000
@@ -192,7 +192,7 @@ defmodule Beamicom.SNES.APU do
     ram = spc.ram
 
     task =
-      Task.async(fn ->
+      DSPTask.start(fn ->
         {dsp, dsp_cycle_phase, pcm} =
           render_audio_events(
             start_dsp,
@@ -214,7 +214,7 @@ defmodule Beamicom.SNES.APU do
   defp finish_dsp_task(%__MODULE__{dsp_task: nil} = apu), do: apu
 
   defp finish_dsp_task(%__MODULE__{dsp_task: task} = apu) do
-    {dsp, dsp_cycle_phase, frames, pcm} = Task.await(task, :infinity)
+    {dsp, dsp_cycle_phase, frames, pcm} = DSPTask.await(task)
     spc = if apu.spc, do: %{apu.spc | dsp: dsp}, else: nil
     pending_pcm = if pcm == <<>>, do: apu.pending_pcm, else: [pcm | apu.pending_pcm]
 

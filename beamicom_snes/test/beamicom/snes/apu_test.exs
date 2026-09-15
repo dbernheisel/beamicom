@@ -1,7 +1,7 @@
 defmodule Beamicom.SNES.APUTest do
   use ExUnit.Case, async: true
 
-  alias Beamicom.SNES.{APU, DSP, SPC700}
+  alias Beamicom.SNES.{APU, DSP, DSPTask, SPC700}
 
   test "keeps CPU-to-APU and APU-to-CPU ports directional" do
     apu = APU.new() |> APU.cpu_write(2, 0x1AB)
@@ -137,7 +137,11 @@ defmodule Beamicom.SNES.APUTest do
 
     async = APU.new(native_ipl: true, async_dsp: true) |> APU.advance(clocks, :ntsc)
     assert {0, <<>>, async} = APU.take_pcm(async)
-    assert %Task{} = async.dsp_task
+    assert %DSPTask{} = async.dsp_task
+
+    # Completed DSP work stays in its worker until the next APU boundary. It
+    # must not leak a Task reply into a host GenServer's handle_info mailbox.
+    refute_receive {_reference, _result}, 100
 
     async = APU.advance(async, clocks, :ntsc)
     assert {^expected_frames, ^expected_pcm, async} = APU.take_pcm(async)
