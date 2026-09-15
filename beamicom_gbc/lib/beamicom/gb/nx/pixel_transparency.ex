@@ -41,7 +41,7 @@ if Code.ensure_loaded?(Nx.Defn) do
     ]
 
     @parameter_names Keyword.keys(@defaults)
-    @compiled_version :pixel_transparency_v1
+    @compiled_version :pixel_transparency_v4
     @tau 6.283185308
 
     defmacrop parameter(parameters, name) do
@@ -145,16 +145,14 @@ if Code.ensure_loaded?(Nx.Defn) do
       background = tint_background(background, parameters)
 
       grid = parameter(parameters, :brightness_grid)
-      white_blend = smoothstep(0.05, 1.0, grid)
-      white_grid_source = mix(original, lcd, white_blend)
 
       white_mask =
         current_is_white
         |> Nx.new_axis(2)
         |> Nx.broadcast({output_height, output_width, 3})
 
-      grid_source = Nx.select(white_mask, white_grid_source, lcd)
-      brightness_source = Nx.select(grid > 0.001, grid_source, original)
+      lcd_foreground = Nx.select(white_mask, original, lcd)
+      brightness_source = Nx.select(grid > 0.001, lcd_foreground, original)
       pixel_intensity = brightness(brightness_source, parameter(parameters, :brightness_mode))
 
       base_alpha = parameter(parameters, :base_alpha)
@@ -162,11 +160,12 @@ if Code.ensure_loaded?(Nx.Defn) do
       boosted = current_is_white and parameter(parameters, :white_boost) > 0.5
       bright_alpha = Nx.clip(base_alpha * pixel_intensity * 2.665, 0.0, 1.0)
       bright_alpha = Nx.select(boosted, Nx.max(bright_alpha, white_alpha), bright_alpha)
-      bright_output = mix(lcd, background, Nx.new_axis(bright_alpha, 2))
+      transparent_white = mix(lcd_foreground, background, Nx.new_axis(bright_alpha, 2))
+      bright_output = Nx.select(white_mask, transparent_white, lcd)
 
       pixel_alpha = Nx.clip(pixel_intensity / 3.0 + base_alpha, 0.0, 1.0)
       pixel_alpha = Nx.select(boosted, Nx.max(pixel_alpha, white_alpha), pixel_alpha)
-      applied = mix(lcd, background, Nx.new_axis(pixel_alpha, 2))
+      applied = mix(lcd_foreground, background, Nx.new_axis(pixel_alpha, 2))
       pixel_mode = parameter(parameters, :pixel_mode)
       should_apply = current_is_white or pixel_mode >= 0.5
 
