@@ -30,6 +30,26 @@ defmodule Beamicom.SNES.BusTest do
     assert Bus.peek(bus, 0xF00123) == 0x42
   end
 
+  test "reads HiROM directly and persists its SRAM mirrors" do
+    media =
+      :hirom
+      |> SNESTestROM.build(ram_size_code: 3)
+      |> SNESTestROM.put_byte(0x1234, 0x5A)
+
+    {:ok, cartridge} = Cartridge.load(media)
+    bus = Bus.new(cartridge)
+
+    assert {0x5A, bus, 8} = Bus.cpu_read(bus, 0xC01234)
+    assert Bus.peek(bus, 0x401234) == 0x5A
+
+    bus = %{bus | open_bus: 0xA5}
+    assert {0xA5, bus, 8} = Bus.cpu_read(bus, 0x106000)
+
+    {bus, 8} = Bus.cpu_write(bus, 0x206001, 0x42)
+    assert {0x42, _bus, 8} = Bus.cpu_read(bus, 0xA06001)
+    assert Bus.peek(bus, 0x216001) == 0x42
+  end
+
   test "maps Cx4 RAM and mirrors its identity command across cartridge banks" do
     {:ok, cartridge} =
       :lorom |> SNESTestROM.build(cartridge_type: 0xF3) |> Cartridge.load()

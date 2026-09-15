@@ -206,9 +206,13 @@ defmodule Beamicom.SNES.PPU do
     force_blank? = (value &&& 0x80) != 0
     brightness = value &&& 0x0F
 
-    ppu
-    |> mark_dirty_if(ppu.force_blank? != force_blank? or ppu.brightness != brightness)
-    |> Map.merge(%{force_blank?: force_blank?, brightness: brightness})
+    %{
+      ppu
+      | force_blank?: force_blank?,
+        brightness: brightness,
+        render_dirty?:
+          ppu.render_dirty? or ppu.force_blank? != force_blank? or ppu.brightness != brightness
+    }
   end
 
   def write(ppu, 0x2101, value), do: update_visual(ppu, %{obsel: value})
@@ -221,7 +225,8 @@ defmodule Beamicom.SNES.PPU do
         bg_tile_size: value >>> 4
       })
 
-  def write(ppu, 0x2106, value), do: update_visual(ppu, %{mosaic: value})
+  def write(ppu, 0x2106, value),
+    do: %{ppu | mosaic: value, render_dirty?: ppu.render_dirty? or ppu.mosaic != value}
 
   def write(ppu, 0x2102, value) do
     oamadd = (ppu.oamadd &&& 0x100) ||| value
@@ -271,7 +276,8 @@ defmodule Beamicom.SNES.PPU do
 
   def write(ppu, register, value) when register in 0x2107..0x210A do
     bg = register - 0x2107
-    update_visual(ppu, %{bg_sc: put_elem(ppu.bg_sc, bg, value)})
+    bg_sc = put_elem(ppu.bg_sc, bg, value)
+    %{ppu | bg_sc: bg_sc, render_dirty?: ppu.render_dirty? or ppu.bg_sc != bg_sc}
   end
 
   def write(ppu, 0x210B, value),
@@ -378,9 +384,13 @@ defmodule Beamicom.SNES.PPU do
   end
 
   def write(ppu, register, value) when register in 0x2126..0x2129 do
-    update_visual(ppu, %{
-      window_positions: put_elem(ppu.window_positions, register - 0x2126, value)
-    })
+    window_positions = put_elem(ppu.window_positions, register - 0x2126, value)
+
+    %{
+      ppu
+      | window_positions: window_positions,
+        render_dirty?: ppu.render_dirty? or ppu.window_positions != window_positions
+    }
   end
 
   def write(ppu, 0x212A, value),
@@ -389,12 +399,35 @@ defmodule Beamicom.SNES.PPU do
   def write(ppu, 0x212B, value),
     do: update_visual(ppu, %{window_logic: put_elem(ppu.window_logic, 1, value)})
 
-  def write(ppu, 0x212C, value), do: update_visual(ppu, %{main_screen: value &&& 0x1F})
-  def write(ppu, 0x212D, value), do: update_visual(ppu, %{sub_screen: value &&& 0x1F})
-  def write(ppu, 0x212E, value), do: update_visual(ppu, %{main_window: value &&& 0x1F})
-  def write(ppu, 0x212F, value), do: update_visual(ppu, %{sub_window: value &&& 0x1F})
-  def write(ppu, 0x2130, value), do: update_visual(ppu, %{color_window_select: value})
-  def write(ppu, 0x2131, value), do: update_visual(ppu, %{color_math: value})
+  def write(ppu, 0x212C, value) do
+    value = value &&& 0x1F
+    %{ppu | main_screen: value, render_dirty?: ppu.render_dirty? or ppu.main_screen != value}
+  end
+
+  def write(ppu, 0x212D, value) do
+    value = value &&& 0x1F
+    %{ppu | sub_screen: value, render_dirty?: ppu.render_dirty? or ppu.sub_screen != value}
+  end
+
+  def write(ppu, 0x212E, value) do
+    value = value &&& 0x1F
+    %{ppu | main_window: value, render_dirty?: ppu.render_dirty? or ppu.main_window != value}
+  end
+
+  def write(ppu, 0x212F, value) do
+    value = value &&& 0x1F
+    %{ppu | sub_window: value, render_dirty?: ppu.render_dirty? or ppu.sub_window != value}
+  end
+
+  def write(ppu, 0x2130, value),
+    do: %{
+      ppu
+      | color_window_select: value,
+        render_dirty?: ppu.render_dirty? or ppu.color_window_select != value
+    }
+
+  def write(ppu, 0x2131, value),
+    do: %{ppu | color_math: value, render_dirty?: ppu.render_dirty? or ppu.color_math != value}
 
   def write(ppu, 0x2132, value) do
     component = value &&& 0x1F
@@ -405,7 +438,11 @@ defmodule Beamicom.SNES.PPU do
       |> set_color_component(0x03E0, 5, component, (value &&& 0x40) != 0)
       |> set_color_component(0x7C00, 10, component, (value &&& 0x80) != 0)
 
-    update_visual(ppu, %{fixed_color: fixed_color})
+    %{
+      ppu
+      | fixed_color: fixed_color,
+        render_dirty?: ppu.render_dirty? or ppu.fixed_color != fixed_color
+    }
   end
 
   def write(ppu, 0x2133, value),

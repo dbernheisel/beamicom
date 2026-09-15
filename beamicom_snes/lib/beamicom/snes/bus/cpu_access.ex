@@ -19,11 +19,21 @@ defmodule Beamicom.SNES.Bus.CPUAccess do
   defmacro write(bus, address, value),
     do: quote(do: Beamicom.SNES.Bus.cpu_write(unquote(bus), unquote(address), unquote(value)))
 
-  defmacro idle(bus),
-    do: quote(do: Beamicom.SNES.Bus.cpu_idle(unquote(bus)))
+  defmacro idle(bus) do
+    quote do
+      cpu_bus = unquote(bus)
+      clocks = 6
+      {%{cpu_bus | cpu_pending_clocks: cpu_bus.cpu_pending_clocks + clocks}, clocks}
+    end
+  end
 
-  defmacro idle(bus, cycles),
-    do: quote(do: Beamicom.SNES.Bus.cpu_idle(unquote(bus), unquote(cycles)))
+  defmacro idle(bus, cycles) do
+    quote do
+      cpu_bus = unquote(bus)
+      clocks = unquote(cycles) * 6
+      {%{cpu_bus | cpu_pending_clocks: cpu_bus.cpu_pending_clocks + clocks}, clocks}
+    end
+  end
 
   defmacro flush(bus),
     do: quote(do: Beamicom.SNES.Bus.flush_cpu_timing(unquote(bus)))
