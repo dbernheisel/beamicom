@@ -4,6 +4,14 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
   alias Beamicom.NES.APU
   alias Beamicom.NES.Nx.APUBlockRenderer
 
+  test "persistent oscillator state is donated on every compiled frame call" do
+    state = APUBlockRenderer.prepare(APU.new())
+    assert state |> Map.values() |> List.flatten() |> Enum.all?(&donatable_tree?/1)
+
+    {_count, _pcm, next_state} = APUBlockRenderer.render(state, [], 100, [])
+    assert next_state |> Map.values() |> List.flatten() |> Enum.all?(&donatable_tree?/1)
+  end
+
   test "block rendering mixes a native-timed DMC stream exactly" do
     sample = :binary.copy(<<0xA5>>, 17)
 
@@ -95,4 +103,9 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
     {console, [_video, audio]} = Beamicom.NES.System.run_slice(console)
     run_frames(console, count - 1, [audio.data | pcm])
   end
+
+  defp donatable_tree?(%Nx.Tensor{} = tensor), do: Nx.donatable?(tensor)
+
+  defp donatable_tree?(map) when is_map(map),
+    do: map |> Map.values() |> Enum.all?(&donatable_tree?/1)
 end

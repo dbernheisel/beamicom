@@ -19,6 +19,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         native_apu
         |> APU.pack()
         |> Nx.backend_copy(backend())
+        |> Nx.donatable()
 
       # Compile while the console is loading. Scenic starts its audio player only
       # after load returns, so first-use Nx compilation cannot starve the player
@@ -38,7 +39,7 @@ if Code.ensure_loaded?(Nx.Defn) do
     @impl true
     def snapshot(state), do: Nx.backend_copy(state, Nx.BinaryBackend)
     @impl true
-    def restore(state), do: Nx.backend_copy(state, backend())
+    def restore(state), do: state |> Nx.backend_copy(backend()) |> Nx.donatable()
 
     @impl true
     def render(state, events, cycles, sample_inputs) do
@@ -72,7 +73,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         do: raise("Nx APU block did not consume the complete frame")
 
       bytes = pcm |> Nx.to_binary() |> binary_part(0, count * 2)
-      {count, bytes, state}
+      {count, bytes, Nx.donatable(state)}
     end
 
     @impl true
