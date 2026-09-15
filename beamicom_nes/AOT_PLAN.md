@@ -181,6 +181,37 @@ and test those rather than create a second rendering stack:
   per-block semantics remain the next architectural step, but must use explicit
   state threading rather than nested hygienic quote rebinding.
 
+## Direct generated-semantics checkpoint
+
+- Generated blocks no longer call or depend on `CPU.step_static/6`; that
+  function and its private static address resolver have been removed. The new
+  `Recompiler.Semantics.step/6` macro receives the block's CPU and bus bindings
+  explicitly and expands the hot zero-page, immediate, implied, accumulator,
+  branch, absolute/indexed, JSR/RTS, load, and store semantics into the generated
+  ROM module. Static instructions not yet lowered call the interpreter oracle's
+  `CPU.step/2` directly.
+- The exact timing envelope is deliberately shared with the interpreter through
+  the small `CPU.aot_prepare/5` and `CPU.aot_complete/7` APIs. This preserves the
+  pre-access/final-cycle PPU split, NMI/IRQ recognition, APU/mapper flushing, DMA
+  stalls, and cycle count while separating timing from the generated opcode
+  semantics.
+- On Castlevania III's one-million-instruction profile, 1,701 of 1,836 static
+  identities are directly lowered (92.65%), accounting for 975,436 executed
+  instructions (97.5436%). The 10,000-transition differential trace passed, as
+  did all 152 native tests and the 38-test Nx/EXLA suite (4 platform skips).
+- CPU-only performance remains a regression: a 200,000-instruction sample ran
+  at 790,873 IPS versus 1,046,578 IPS for the interpreter (0.756x). Generated
+  module compilation also increased to 28.6 seconds in that sample because the
+  expanded block bodies are larger.
+- Three 61-frame MMC5 + 48 kHz EXLA samples measured 1.045x, 1.063x, and 1.114x
+  end-to-end speedup (median 1.063x). Every video/audio hash matched, with 12
+  dynamic-dispatch fallbacks in 561,896 instructions. Compile times were 31.09,
+  33.60, and 28.71 seconds (median 31.09 seconds). The direct semantics therefore
+  buy a modest frame-level improvement but worsen load-time latency; with 97.54%
+  weighted lowering, the remaining interpreter fallback is not the bottleneck.
+  The next experiment should reduce the two cross-module timing-envelope calls
+  per lowered instruction without weakening cycle/NMI/IRQ equivalence.
+
 ## Checkpoints
 
 - C0: baseline tests and ROM/header report.

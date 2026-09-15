@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Nes.RecompileBench do
   import Bitwise
 
   alias Beamicom.NES.{Cart, Console}
-  alias Beamicom.NES.Recompiler.{Generator, MMC5Profile, Program}
+  alias Beamicom.NES.Recompiler.{Generator, MMC5Profile, Program, Semantics}
 
   @impl true
   def run(args) do
@@ -116,7 +116,8 @@ defmodule Mix.Tasks.Nes.RecompileBench do
       static_instructions: map_size(program.discovery.instructions),
       compiled_instructions: compiled,
       fallback_instructions: fallback,
-      fallback_percent: percent(fallback, compiled + fallback)
+      fallback_percent: percent(fallback, compiled + fallback),
+      direct_lowering: Semantics.coverage(program.discovery)
     }
     |> maybe_profile_stats(program.discovery)
   end

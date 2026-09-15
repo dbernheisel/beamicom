@@ -1,10 +1,10 @@
 defmodule Beamicom.NES.Recompiler.Generator do
   @moduledoc """
-  Generates one BEAM module for a mapper-0 PRG image.
+  Generates one hash-named BEAM module for a mapper-0 or profiled MMC5 PRG image.
 
-  This first correctness checkpoint emits the final block/dispatch ABI while
-  delegating instruction semantics to the interpreter oracle. Opcode families
-  can then be replaced behind the same ABI under differential tests.
+  Common opcode/addressing families expand directly into each generated block.
+  Unsupported static instructions deliberately execute one `CPU.step/2` as the
+  interpreter fallback, under the same differential oracle as block dispatch.
   """
 
   import Bitwise
@@ -149,7 +149,8 @@ defmodule Beamicom.NES.Recompiler.Generator do
       @moduledoc false
 
       alias Beamicom.NES.{Console, CPU}
-      alias Beamicom.NES.Recompiler.Runtime
+      alias Beamicom.NES.Recompiler.{Runtime, Semantics}
+      require Semantics
 
       def rom_hash, do: unquote(hash)
       def block_starts, do: unquote(starts)
@@ -240,7 +241,8 @@ defmodule Beamicom.NES.Recompiler.Generator do
       @moduledoc false
 
       alias Beamicom.NES.{Console, CPU}
-      alias Beamicom.NES.Recompiler.Runtime
+      alias Beamicom.NES.Recompiler.{Runtime, Semantics}
+      require Semantics
 
       def rom_hash, do: unquote(hash)
       def block_starts, do: unquote(Macro.escape(starts))
@@ -311,7 +313,7 @@ defmodule Beamicom.NES.Recompiler.Generator do
     quote do
       if var!(cpu).pc == unquote(address) do
         {var!(cpu), var!(bus)} =
-          CPU.step_static(
+          Semantics.step(
             var!(cpu),
             var!(bus),
             unquote(operation),
@@ -346,7 +348,7 @@ defmodule Beamicom.NES.Recompiler.Generator do
     quote do
       if var!(cpu).pc == unquote(address) do
         {var!(cpu), var!(bus)} =
-          CPU.step_static(
+          Semantics.step(
             var!(cpu),
             var!(bus),
             unquote(operation),

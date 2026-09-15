@@ -15,7 +15,7 @@ defmodule Mix.Tasks.Nes.AotFrameBench do
 
   alias Beamicom.NES.{Bus, Cart, Console, Palette, PPU}
   alias Beamicom.NES.System, as: NESSystem
-  alias Beamicom.NES.Recompiler.{Generator, MMC5Profile, Program}
+  alias Beamicom.NES.Recompiler.{Generator, MMC5Profile, Program, Semantics}
 
   @impl true
   def run(args) do
@@ -85,7 +85,8 @@ defmodule Mix.Tasks.Nes.AotFrameBench do
         instructions: map_size(program.discovery.instructions),
         executed_compiled_instructions: compiled,
         fallback_instructions: fallback,
-        fallback_percent: percent(fallback, compiled + fallback)
+        fallback_percent: percent(fallback, compiled + fallback),
+        direct_lowering: Semantics.coverage(program.discovery)
       },
       interpreter: interpreter,
       aot: aot,

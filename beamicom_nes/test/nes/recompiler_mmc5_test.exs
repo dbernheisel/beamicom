@@ -2,7 +2,7 @@ defmodule Beamicom.NES.Recompiler.MMC5Test do
   use ExUnit.Case, async: true
 
   alias Beamicom.NES.{Bus, CPU, Cart, Console, Mapper}
-  alias Beamicom.NES.Recompiler.{Equivalence, Generator, MMC5Profile, Program}
+  alias Beamicom.NES.Recompiler.{Equivalence, Generator, MMC5Profile, Program, Semantics}
 
   test "profiles bank changes and dispatches blocks by PC plus MMC5 mapping" do
     cart = fixture_cart()
@@ -26,6 +26,15 @@ defmodule Beamicom.NES.Recompiler.MMC5Test do
     assert stats.compiled_blocks == 3
     assert stats.compiled_instructions == 5
     assert stats.fallback_instructions == 0
+
+    assert %{
+             lowered_instruction_identities: 5,
+             instruction_identities: 5,
+             identity_percent: 100.0,
+             lowered_profile_hits: 5,
+             profile_hits: 5,
+             profile_hit_percent: 100.0
+           } = Semantics.coverage(program.discovery)
   end
 
   test "an executable PRG-RAM window is always an interpreter fallback" do
@@ -36,7 +45,8 @@ defmodule Beamicom.NES.Recompiler.MMC5Test do
 
     ram_mapping =
       start
-      |> put_in([Access.key!(:bus), Access.key!(:mapper_state), Access.key!(:m5_prg_regs)],
+      |> put_in(
+        [Access.key!(:bus), Access.key!(:mapper_state), Access.key!(:m5_prg_regs)],
         {0, 0x04, 0x81, 0x82, 0xFF}
       )
       |> then(fn console -> %{console | bus: Mapper.reset(console.bus)} end)

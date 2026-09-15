@@ -34,8 +34,6 @@ defmodule Beamicom.NES.CPU do
             nmi_sensitive_addr?: 1,
             adv: 2,
             page_crossed?: 2,
-            ram_read: 2,
-            ram_write: 3,
             ld: 3,
             set: 3,
             set_zn: 2}
@@ -106,268 +104,6 @@ defmodule Beamicom.NES.CPU do
     execute_resolved(cpu, bus, op, mode, cyc, addr, crossed)
   end
 
-  @doc false
-  def step_static(cpu, bus, :STA, :zp, 3, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 3, 0)
-    complete_instruction(cpu, ram_write(bus, operand, cpu.a), 3, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :LDA, :zp, 3, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 3, 0)
-    value = ram_read(bus, operand)
-    complete_instruction(ld(cpu, :a, value), bus, 3, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :ADC, :zp, 3, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 3, 0)
-    value = ram_read(bus, operand)
-    complete_instruction(adc(cpu, value), bus, 3, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :INC, :zp, 5, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 5, 0)
-    value = ram_read(bus, operand)
-    value = value + 1 &&& 0xFF
-    cpu = %{cpu | p: set_zn(cpu.p, value)}
-    complete_instruction(cpu, ram_write(bus, operand, value), 5, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :DEC, :zp, 5, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 5, 0)
-    value = ram_read(bus, operand)
-    value = value - 1 &&& 0xFF
-    cpu = %{cpu | p: set_zn(cpu.p, value)}
-    complete_instruction(cpu, ram_write(bus, operand, value), 5, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :LDX, :zp, 3, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 3, 0)
-    value = ram_read(bus, operand)
-    complete_instruction(ld(cpu, :x, value), bus, 3, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :LDA, :zpx, 4, operand) do
-    address = operand + cpu.x &&& 0xFF
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 4, 0)
-    value = ram_read(bus, address)
-    complete_instruction(ld(cpu, :a, value), bus, 4, 0, 0, address, poll)
-  end
-
-  def step_static(cpu, bus, :STA, :zpx, 4, operand) do
-    address = operand + cpu.x &&& 0xFF
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 4, 0)
-    complete_instruction(cpu, ram_write(bus, address, cpu.a), 4, 0, 0, address, poll)
-  end
-
-  def step_static(cpu, bus, operation, :abs, cycles, operand)
-      when operation in [:LDA, :LDX, :LDY, :STA, :STX, :STY] do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 3, cycles, 0)
-
-    {cpu, bus} =
-      case operation do
-        :LDA ->
-          {value, bus} = Bus.read(bus, operand)
-          {ld(cpu, :a, value), bus}
-
-        :LDX ->
-          {value, bus} = Bus.read(bus, operand)
-          {ld(cpu, :x, value), bus}
-
-        :LDY ->
-          {value, bus} = Bus.read(bus, operand)
-          {ld(cpu, :y, value), bus}
-
-        :STA ->
-          {cpu, Bus.write(bus, operand, cpu.a)}
-
-        :STX ->
-          {cpu, Bus.write(bus, operand, cpu.x)}
-
-        :STY ->
-          {cpu, Bus.write(bus, operand, cpu.y)}
-      end
-
-    complete_instruction(cpu, bus, cycles, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :LDA, mode, 4, operand) when mode in [:abx, :aby] do
-    index = if mode == :abx, do: cpu.x, else: cpu.y
-    address = operand + index &&& 0xFFFF
-    penalty = if page_crossed?(operand, address), do: 1, else: 0
-    {cpu, bus, poll} = static_prepare(cpu, bus, 3, 4, penalty)
-    {value, bus} = Bus.read(bus, address)
-    complete_instruction(ld(cpu, :a, value), bus, 4, penalty, 0, address, poll)
-  end
-
-  def step_static(cpu, bus, :STA, mode, 5, operand) when mode in [:abx, :aby] do
-    index = if mode == :abx, do: cpu.x, else: cpu.y
-    address = operand + index &&& 0xFFFF
-    {cpu, bus, poll} = static_prepare(cpu, bus, 3, 5, 0)
-    complete_instruction(cpu, Bus.write(bus, address, cpu.a), 5, 0, 0, address, poll)
-  end
-
-  def step_static(cpu, bus, :LDA, :izy, 5, operand) do
-    base = ram_read(bus, operand) ||| ram_read(bus, operand + 1 &&& 0xFF) <<< 8
-    address = base + cpu.y &&& 0xFFFF
-    penalty = if page_crossed?(base, address), do: 1, else: 0
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 5, penalty)
-    {value, bus} = Bus.read(bus, address)
-    complete_instruction(ld(cpu, :a, value), bus, 5, penalty, 0, address, poll)
-  end
-
-  def step_static(cpu, bus, operation, :imm, 2, operand)
-      when operation in [:LDA, :LDX, :LDY, :ADC, :SBC, :CMP, :CPX, :CPY, :AND, :ORA, :EOR] do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 2, 0)
-
-    cpu =
-      case operation do
-        :LDA -> ld(cpu, :a, operand)
-        :LDX -> ld(cpu, :x, operand)
-        :LDY -> ld(cpu, :y, operand)
-        :ADC -> adc(cpu, operand)
-        :SBC -> adc(cpu, bxor(operand, 0xFF))
-        :CMP -> compare(cpu, cpu.a, operand)
-        :CPX -> compare(cpu, cpu.x, operand)
-        :CPY -> compare(cpu, cpu.y, operand)
-        :AND -> ld(cpu, :a, cpu.a &&& operand)
-        :ORA -> ld(cpu, :a, cpu.a ||| operand)
-        :EOR -> ld(cpu, :a, bxor(cpu.a, operand))
-      end
-
-    complete_instruction(cpu, bus, 2, 0, 0, nil, poll)
-  end
-
-  def step_static(cpu, bus, operation, :imp, 2, _operand)
-      when operation in [
-             :CLC,
-             :SEC,
-             :CLI,
-             :SEI,
-             :CLD,
-             :SED,
-             :CLV,
-             :INX,
-             :INY,
-             :DEX,
-             :DEY,
-             :TAX,
-             :TAY,
-             :TXA,
-             :TYA,
-             :TSX,
-             :TXS,
-             :NOP
-           ] do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 1, 2, 0)
-
-    cpu =
-      case operation do
-        :CLC -> flag(cpu, @c, false)
-        :SEC -> flag(cpu, @c, true)
-        :CLI -> flag(cpu, @i, false)
-        :SEI -> flag(cpu, @i, true)
-        :CLD -> flag(cpu, @d, false)
-        :SED -> flag(cpu, @d, true)
-        :CLV -> flag(cpu, @v, false)
-        :INX -> ld(cpu, :x, cpu.x + 1)
-        :INY -> ld(cpu, :y, cpu.y + 1)
-        :DEX -> ld(cpu, :x, cpu.x - 1)
-        :DEY -> ld(cpu, :y, cpu.y - 1)
-        :TAX -> ld(cpu, :x, cpu.a)
-        :TAY -> ld(cpu, :y, cpu.a)
-        :TXA -> ld(cpu, :a, cpu.x)
-        :TYA -> ld(cpu, :a, cpu.y)
-        :TSX -> ld(cpu, :x, cpu.sp)
-        :TXS -> %{cpu | sp: cpu.x}
-        :NOP -> cpu
-      end
-
-    complete_instruction(cpu, bus, 2, 0, 0, nil, poll)
-  end
-
-  def step_static(cpu, bus, operation, :acc, 2, _operand)
-      when operation in [:ASL, :LSR, :ROL, :ROR] do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 1, 2, 0)
-
-    {p, value} =
-      case operation do
-        :ASL -> asl(cpu.p, cpu.a)
-        :LSR -> lsr(cpu.p, cpu.a)
-        :ROL -> rol(cpu.p, cpu.a)
-        :ROR -> ror(cpu.p, cpu.a)
-      end
-
-    cpu = %{cpu | a: value, p: set_zn(p, value)}
-    complete_instruction(cpu, bus, 2, 0, 0, nil, poll)
-  end
-
-  def step_static(cpu, bus, :JMP, :abs, 3, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 3, 3, 0)
-    complete_instruction(%{cpu | pc: operand}, bus, 3, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :JSR, :abs, 6, operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 3, 6, 0)
-    return = cpu.pc - 1 &&& 0xFFFF
-    bus = ram_write(bus, 0x0100 + cpu.sp, return >>> 8)
-    cpu = %{cpu | sp: cpu.sp - 1 &&& 0xFF}
-    bus = ram_write(bus, 0x0100 + cpu.sp, return &&& 0xFF)
-    cpu = %{cpu | sp: cpu.sp - 1 &&& 0xFF, pc: operand}
-    complete_instruction(cpu, bus, 6, 0, 0, operand, poll)
-  end
-
-  def step_static(cpu, bus, :RTS, :imp, 6, _operand) do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 1, 6, 0)
-    low_sp = cpu.sp + 1 &&& 0xFF
-    low = ram_read(bus, 0x0100 + low_sp)
-    high_sp = low_sp + 1 &&& 0xFF
-    high = ram_read(bus, 0x0100 + high_sp)
-    cpu = %{cpu | sp: high_sp, pc: (low ||| high <<< 8) + 1 &&& 0xFFFF}
-    complete_instruction(cpu, bus, 6, 0, 0, nil, poll)
-  end
-
-  def step_static(cpu, bus, operation, :rel, 2, operand)
-      when operation in [:BCC, :BCS, :BNE, :BEQ, :BPL, :BMI, :BVC, :BVS] do
-    {cpu, bus, poll} = static_prepare(cpu, bus, 2, 2, 0)
-    offset = if operand >= 0x80, do: operand - 0x100, else: operand
-    target = cpu.pc + offset &&& 0xFFFF
-
-    taken =
-      case operation do
-        :BCC -> (cpu.p &&& @c) == 0
-        :BCS -> (cpu.p &&& @c) != 0
-        :BNE -> (cpu.p &&& @z) == 0
-        :BEQ -> (cpu.p &&& @z) != 0
-        :BPL -> (cpu.p &&& @n) == 0
-        :BMI -> (cpu.p &&& @n) != 0
-        :BVC -> (cpu.p &&& @v) == 0
-        :BVS -> (cpu.p &&& @v) != 0
-      end
-
-    extra = if taken, do: if(page_crossed?(cpu.pc, target), do: 2, else: 1), else: 0
-    cpu = if taken, do: %{cpu | pc: target}, else: cpu
-    complete_instruction(cpu, bus, 2, 0, extra, target, poll)
-  end
-
-  def step_static(cpu, bus, op, mode, cyc, operand)
-      when is_atom(op) and is_atom(mode) and is_integer(cyc) and cyc > 0 do
-    cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
-    {addr, crossed, cpu, bus} = resolve_static(mode, operand, cpu, bus)
-    execute_resolved(cpu, bus, op, mode, cyc, addr, crossed)
-  end
-
-  defp ram_read(%Bus{ram: {:atomics, ram}}, address),
-    do: :atomics.get(ram, (address &&& 0x07FF) + 1)
-
-  defp ram_read(%Bus{} = bus, address), do: Bus.peek(bus, address)
-
-  defp ram_write(%Bus{ram: {:atomics, ram}} = bus, address, value) do
-    :atomics.put(ram, (address &&& 0x07FF) + 1, value &&& 0xFF)
-    bus
-  end
-
-  defp ram_write(%Bus{} = bus, address, value), do: Bus.write(bus, address, value)
-
   defp execute_resolved(cpu, bus, op, mode, cyc, addr, crossed) do
     penalty = if crossed and op in @read_ops and mode in @penalty_modes, do: 1, else: 0
     # Only the PPU advance is split around the memory access (for exact NMI /
@@ -392,6 +128,14 @@ defmodule Beamicom.NES.CPU do
     {cpu, bus} = tick_ppu_cycles(cpu, bus, cyc + penalty - 1)
     {cpu, bus, cpu.nmi_pending}
   end
+
+  @doc false
+  def aot_prepare(cpu, bus, size, cyc, penalty),
+    do: static_prepare(cpu, bus, size, cyc, penalty)
+
+  @doc false
+  def aot_complete(cpu, bus, cyc, penalty, extra, addr, poll),
+    do: complete_instruction(cpu, bus, cyc, penalty, extra, addr, poll)
 
   defp complete_instruction(cpu, bus, cyc, penalty, extra, addr, poll) do
     {cpu, bus} = post_access_nmi(cpu, bus, addr)
@@ -597,47 +341,6 @@ defmodule Beamicom.NES.CPU do
     cpu = adv(cpu, 1)
     off = if off >= 0x80, do: off - 0x100, else: off
     {cpu.pc + off &&& 0xFFFF, false, cpu, bus}
-  end
-
-  # Generated code already holds operand bytes, so it can bypass repeated PRG
-  # fetches while retaining the interpreter's addressing and execution logic.
-  defp resolve_static(:imp, _operand, cpu, bus), do: {nil, false, cpu, bus}
-  defp resolve_static(:acc, _operand, cpu, bus), do: {nil, false, cpu, bus}
-  defp resolve_static(:imm, _operand, cpu, bus), do: {cpu.pc, false, adv(cpu, 1), bus}
-  defp resolve_static(:zp, operand, cpu, bus), do: {operand, false, adv(cpu, 1), bus}
-
-  defp resolve_static(:zpx, operand, cpu, bus),
-    do: {operand + cpu.x &&& 0xFF, false, adv(cpu, 1), bus}
-
-  defp resolve_static(:zpy, operand, cpu, bus),
-    do: {operand + cpu.y &&& 0xFF, false, adv(cpu, 1), bus}
-
-  defp resolve_static(:abs, operand, cpu, bus), do: {operand, false, adv(cpu, 2), bus}
-  defp resolve_static(:abx, operand, cpu, bus), do: indexed(operand, cpu.x, adv(cpu, 2), bus)
-  defp resolve_static(:aby, operand, cpu, bus), do: indexed(operand, cpu.y, adv(cpu, 2), bus)
-
-  defp resolve_static(:ind, operand, cpu, bus) do
-    lo = peek(bus, operand)
-    hi = peek(bus, (operand &&& 0xFF00) ||| (operand + 1 &&& 0xFF))
-    {lo ||| hi <<< 8, false, adv(cpu, 2), bus}
-  end
-
-  defp resolve_static(:izx, operand, cpu, bus) do
-    zp = operand + cpu.x &&& 0xFF
-    addr = peek(bus, zp) ||| peek(bus, zp + 1 &&& 0xFF) <<< 8
-    {addr, false, adv(cpu, 1), bus}
-  end
-
-  defp resolve_static(:izy, operand, cpu, bus) do
-    base = peek(bus, operand) ||| peek(bus, operand + 1 &&& 0xFF) <<< 8
-    addr = base + cpu.y &&& 0xFFFF
-    {addr, page_crossed?(base, addr), adv(cpu, 1), bus}
-  end
-
-  defp resolve_static(:rel, operand, cpu, bus) do
-    cpu = adv(cpu, 1)
-    offset = if operand >= 0x80, do: operand - 0x100, else: operand
-    {cpu.pc + offset &&& 0xFFFF, false, cpu, bus}
   end
 
   defp indexed(base, idx, cpu, bus) do
