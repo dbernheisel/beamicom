@@ -19,7 +19,9 @@ defmodule Beamicom.SNES.CPU do
             fetch8: 2,
             read_bus: 2,
             flush_events: 1,
+            pending_h_irq?: 1,
             cpu_line_clocks: 1,
+            poll_remaining_clocks: 1,
             poll_access_clocks: 2,
             accumulator_width: 1,
             index_width: 1,
@@ -169,10 +171,10 @@ defmodule Beamicom.SNES.CPU do
   # pass. Interrupts are still sampled at that boundary.
   defp fast_forward_poll_loop(
          %{poll_loop: {pb, pc, address, loop_clocks}} = cpu,
-         %{irq_mode: :off} = bus
+         bus
        )
        when cpu.pb == pb and cpu.pc == pc do
-    remaining = Timing.line_clocks(bus.timing) - bus.timing.hclock - bus.cpu_pending_clocks
+    remaining = poll_remaining_clocks(bus)
     iterations = div(max(remaining, 0), loop_clocks)
 
     cond do
@@ -200,7 +202,32 @@ defmodule Beamicom.SNES.CPU do
     end
   end
 
+  # Preserve the cached loop while executing the two-byte LDA dp that precedes
+  # its branch. Otherwise the instruction boundary clears the cache before the
+  # BEQ can reuse it, forcing ROM peeks and timing reconstruction every pass.
+  defp fast_forward_poll_loop(%{poll_loop: {pb, pc, _address, _clocks}} = cpu, _bus)
+       when cpu.pb == pb and cpu.pc == (pc + 2 &&& 0xFFFF),
+       do: :keep
+
   defp fast_forward_poll_loop(_cpu, _bus), do: :no
+
+  defp poll_remaining_clocks(bus) do
+    current_hclock = bus.timing.hclock + bus.cpu_pending_clocks
+    line_remaining = Timing.line_clocks(bus.timing) - current_hclock
+
+    h_irq_qualified? =
+      bus.irq_mode == :h or (bus.irq_mode == :hv and bus.timing.vline == bus.vtime)
+
+    if h_irq_qualified? do
+      target = bus.htime * 4
+
+      if target > current_hclock,
+        do: min(line_remaining, target - current_hclock),
+        else: line_remaining
+    else
+      line_remaining
+    end
+  end
 
   defp mark_poll_loop(
          %{poll_loop: {pb, target, _address, _clocks}} = cpu,
@@ -1345,13 +1372,22 @@ defmodule Beamicom.SNES.CPU do
 
   defp flush_events(%{cpu_pending_clocks: 0} = bus), do: bus
 
-  defp flush_events(%{irq_mode: :off} = bus) do
-    if bus.cpu_pending_clocks >= cpu_line_clocks(bus.timing) - bus.timing.hclock,
-      do: SystemBus.flush_cpu_timing(bus),
-      else: bus
+  defp flush_events(bus) do
+    if bus.cpu_pending_clocks >= cpu_line_clocks(bus.timing) - bus.timing.hclock or
+         pending_h_irq?(bus),
+       do: SystemBus.flush_cpu_timing(bus),
+       else: bus
   end
 
-  defp flush_events(bus), do: SystemBus.flush_cpu_events(bus)
+  defp pending_h_irq?(%{irq_mode: mode} = bus) when mode in [:h, :hv] do
+    target = bus.htime * 4
+    qualified? = mode == :h or bus.timing.vline == bus.vtime
+
+    qualified? and target > bus.timing.hclock and
+      target <= bus.timing.hclock + bus.cpu_pending_clocks
+  end
+
+  defp pending_h_irq?(_bus), do: false
 
   defp cpu_line_clocks(%{region: :ntsc, interlace?: false, field: 1, vline: 240}), do: 1360
   defp cpu_line_clocks(%{region: :pal, interlace?: true, field: 1, vline: 311}), do: 1368

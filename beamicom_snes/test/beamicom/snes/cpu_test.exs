@@ -103,6 +103,25 @@ defmodule Beamicom.SNES.CPUTest do
     assert (cpu.a &&& 0xFF) == 1
   end
 
+  test "deferred polling stops at an enabled H IRQ boundary" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0xA5, 0x10, 0xF0, 0xFC>>))
+    bus = %{machine.bus | irq_mode: :h, htime: 100}
+
+    {cpu, bus} =
+      Enum.reduce_while(1..10, {machine.cpu, bus}, fn _, {cpu, bus} ->
+        assert {:ok, cpu, bus} = CPU.step_deferred(cpu, bus)
+
+        if bus.irq_flag?,
+          do: {:halt, {cpu, bus}},
+          else: {:cont, {cpu, bus}}
+      end)
+
+    assert bus.irq_flag?
+    assert bus.timing.hclock >= 400
+    assert bus.timing.hclock < 446
+    assert cpu.instructions > 4
+  end
+
   test "runs a tight loop to a PPU frame and drains synchronized audio" do
     {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x80, 0xFE>>))
 
