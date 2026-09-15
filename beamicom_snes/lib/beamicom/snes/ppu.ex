@@ -1665,7 +1665,7 @@ defmodule Beamicom.SNES.PPU do
 
       _ ->
         snapshot = %{ppu | frame_ready: nil, render_task: nil}
-        task = Task.async(fn -> render_frame(snapshot) end)
+        task = Beamicom.SNES.DSPTask.start(fn -> render_frame(snapshot) end)
         %{ppu | render_dirty?: false, render_task: {:running, task, key}}
     end
   end
@@ -1677,7 +1677,7 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp finish_render_task(%{render_task: {:running, task, key}} = ppu) do
-    frame = Task.await(task, :infinity)
+    frame = Beamicom.SNES.DSPTask.await(task)
 
     %{
       ppu

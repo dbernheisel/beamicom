@@ -656,7 +656,8 @@ defmodule Beamicom.SNES.PPUTest do
 
     ppu = PPU.enter_scanline(ppu, 225)
     assert {nil, ppu} = PPU.take_frame(ppu)
-    assert match?({:running, %Task{}, _key}, ppu.render_task)
+    assert match?({:running, %Beamicom.SNES.DSPTask{}, _key}, ppu.render_task)
+    refute_receive {_reference, _result}, 100
 
     ppu = PPU.enter_scanline(ppu, 225)
     assert {first, ppu} = PPU.take_frame(ppu)
