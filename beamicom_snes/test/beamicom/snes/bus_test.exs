@@ -153,6 +153,52 @@ defmodule Beamicom.SNES.BusTest do
     assert bus.coprocessor.unknown_commands == MapSet.new()
   end
 
+  test "Cx4 scale/rotate converts packed pixels to SNES bitplanes" do
+    {:ok, cartridge} =
+      :lorom |> SNESTestROM.build(cartridge_type: 0xF3) |> Cartridge.load()
+
+    bus = Bus.new(cartridge)
+
+    bus =
+      Enum.reduce(0x006600..0x00661F, bus, fn address, bus ->
+        {bus, 8} = Bus.write(bus, address, 0xFF)
+        bus
+      end)
+
+    registers = [
+      {0x007F80, 0},
+      {0x007F81, 0},
+      {0x007F83, 4},
+      {0x007F84, 0},
+      {0x007F86, 4},
+      {0x007F87, 0},
+      {0x007F89, 8},
+      {0x007F8C, 8},
+      {0x007F8F, 0},
+      {0x007F90, 0x10},
+      {0x007F92, 0},
+      {0x007F93, 0x10},
+      {0x007F4D, 3}
+    ]
+
+    bus =
+      Enum.reduce(registers, bus, fn {address, value}, bus ->
+        {bus, 8} = Bus.write(bus, address, value)
+        bus
+      end)
+
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0)
+
+    assert for(
+             row <- 0..7,
+             plane <- [0, 1, 16, 17],
+             do: Bus.peek(bus, 0x006000 + row * 2 + plane)
+           ) ==
+             List.duplicate(0xFF, 32)
+
+    assert bus.coprocessor.unknown_commands == MapSet.new()
+  end
+
   test "prices WRAM, MMIO, JOYSER, slow ROM, and fast ROM accesses", %{bus: bus} do
     assert Bus.access_clocks(bus, 0x7E0000) == 8
     assert Bus.access_clocks(bus, 0x002100) == 6

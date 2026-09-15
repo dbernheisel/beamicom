@@ -149,6 +149,8 @@ defmodule Beamicom.SNES.Cx4 do
   end
 
   defp execute_sprite(cx4, 0x00, cartridge), do: build_oam(cx4, cartridge)
+  defp execute_sprite(cx4, 0x03, _cartridge), do: scale_rotate(cx4, 0)
+  defp execute_sprite(cx4, 0x07, _cartridge), do: scale_rotate(cx4, 64)
 
   defp execute_sprite(cx4, _mode, _cartridge) do
     %{cx4 | unknown_commands: MapSet.put(cx4.unknown_commands, 0x00)}
@@ -300,6 +302,97 @@ defmodule Beamicom.SNES.Cx4 do
     }
   end
 
+  defp scale_rotate(cx4, row_padding) do
+    angle = unsigned(cx4, 0x1F80, 2)
+    x_scale = scale_value(unsigned(cx4, 0x1F8F, 2))
+    y_scale = scale_value(unsigned(cx4, 0x1F92, 2))
+    {a, b, c, d} = scale_matrix(angle, x_scale, y_scale)
+    width = unsigned(cx4, 0x1F89, 1) &&& 0xF8
+    height = unsigned(cx4, 0x1F8C, 1) &&& 0xF8
+    output_bytes = div((width + div(row_padding, 4)) * height, 2)
+    ram = clear_prefix(cx4.ram, output_bytes)
+
+    ram =
+      if width == 0 or height == 0 do
+        ram
+      else
+        center_x = array_signed(ram, 0x1F83, 2)
+        center_y = array_signed(ram, 0x1F86, 2)
+        line_x = (center_x <<< 12) - center_x * a - center_x * b
+        line_y = (center_y <<< 12) - center_y * c - center_y * d
+        output_stride = width * 4 + row_padding
+
+        Enum.reduce(0..(height - 1), ram, fn y, ram ->
+          source_x = line_x + y * b
+          source_y = line_y + y * d
+
+          Enum.reduce(0..(width - 1), ram, fn x, ram ->
+            pixel = packed_pixel(ram, source_x + x * a, source_y + x * c, width, height)
+            put_planar_pixel(ram, output_stride, x, y, pixel)
+          end)
+        end)
+      end
+
+    %{cx4 | ram: ram}
+  end
+
+  defp scale_value(value), do: if((value &&& 0x8000) != 0, do: 0x7FFF, else: value)
+
+  defp scale_matrix(0, x_scale, y_scale), do: {x_scale, 0, 0, y_scale}
+  defp scale_matrix(128, x_scale, y_scale), do: {0, -y_scale, x_scale, 0}
+  defp scale_matrix(256, x_scale, y_scale), do: {-x_scale, 0, 0, -y_scale}
+  defp scale_matrix(384, x_scale, y_scale), do: {0, y_scale, -x_scale, 0}
+
+  defp scale_matrix(angle, x_scale, y_scale) do
+    radians = (angle &&& 0x1FF) * 2 * :math.pi() / 512
+    sine = round(:math.sin(radians) * 32_767)
+    cosine = round(:math.cos(radians) * 32_767)
+
+    {
+      signed_width((cosine * x_scale) >>> 15, 16),
+      signed_width(-((sine * y_scale) >>> 15), 16),
+      signed_width((sine * x_scale) >>> 15, 16),
+      signed_width((cosine * y_scale) >>> 15, 16)
+    }
+  end
+
+  defp packed_pixel(ram, fixed_x, fixed_y, width, height) do
+    source_x = fixed_x >>> 12
+    source_y = fixed_y >>> 12
+
+    if source_x in 0..(width - 1) and source_y in 0..(height - 1) do
+      pixel = source_y * width + source_x
+      byte = :array.get(0x600 + div(pixel, 2), ram)
+      if (pixel &&& 1) == 0, do: byte &&& 0x0F, else: byte >>> 4
+    else
+      0
+    end
+  end
+
+  defp put_planar_pixel(ram, _stride, _x, _y, 0), do: ram
+
+  defp put_planar_pixel(ram, stride, x, y, pixel) do
+    offset = div(y, 8) * stride + div(x, 8) * 32 + rem(y, 8) * 2
+    mask = 0x80 >>> rem(x, 8)
+
+    ram
+    |> or_pixel_plane(offset, mask, pixel &&& 1)
+    |> or_pixel_plane(offset + 1, mask, pixel >>> 1 &&& 1)
+    |> or_pixel_plane(offset + 16, mask, pixel >>> 2 &&& 1)
+    |> or_pixel_plane(offset + 17, mask, pixel >>> 3 &&& 1)
+  end
+
+  defp or_pixel_plane(ram, _offset, _mask, 0), do: ram
+
+  defp or_pixel_plane(ram, offset, mask, _set),
+    do: :array.set(offset, :array.get(offset, ram) ||| mask, ram)
+
+  defp clear_prefix(ram, 0), do: ram
+
+  defp clear_prefix(ram, bytes) do
+    Enum.reduce(0..(min(bytes, @ram_size) - 1), ram, &:array.set(&1, 0, &2))
+  end
+
   # Immediate ROM signature used by software to identify a Cx4.
   defp execute_command(cx4, 0x89), do: put_unsigned(cx4, 0x1F80, 0x054336, 3)
 
@@ -404,7 +497,14 @@ defmodule Beamicom.SNES.Cx4 do
   end
 
   defp signed(cx4, offset, bytes) do
-    value = unsigned(cx4, offset, bytes)
+    signed_value(unsigned(cx4, offset, bytes), bytes)
+  end
+
+  defp array_signed(ram, offset, bytes) do
+    signed_value(array_unsigned(ram, offset, bytes), bytes)
+  end
+
+  defp signed_value(value, bytes) do
     sign = 1 <<< (bytes * 8 - 1)
     if (value &&& sign) == 0, do: value, else: value - (1 <<< (bytes * 8))
   end

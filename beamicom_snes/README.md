@@ -14,8 +14,8 @@ Nx/EXLA PPU acceleration. The implementation currently includes:
 - directional CPU/APU ports, native SPC700 IPL upload/launch, S-DSP mixing,
   and synchronized 32 kHz stereo PCM output;
 - partial Capcom Cx4 support with its cartridge RAM/register window,
-  ROM-to-RAM transfers, self-test responses, composite OAM generation, scalar
-  math, and trapezoid clipping;
+  ROM-to-RAM transfers, self-test responses, composite OAM generation,
+  scale/rotate conversion, scalar math, and trapezoid clipping;
 - an emulation/native-mode 65C816 interpreter with interrupt entry/RTI; and
 - optional frame-wide Nx/EXLA renderers for the supported Mode 1 and Mode 7
   paths, with automatic native fallback.

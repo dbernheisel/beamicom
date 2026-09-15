@@ -30,7 +30,7 @@ The audit describes the current source, not a cycle-accuracy claim.
 | SPC700 | **256/256 opcode bytes**, lightly validated | Exact instruction/MMIO timing and conformance tests; fragmented-cycle debt is handled |
 | S-SMP | Ports, native IPL execution, timers, DSP address/data mostly present | TEST semantics, timer phase, DSPDATA write behavior, port collision timing |
 | S-DSP | Basic eight-voice BRR playback, stereo mixing, and register-event-ordered output | ADSR/GAIN, interpolation, PMON/noise, echo/FIR |
-| Cartridge coprocessors | **Partial Cx4** | Remaining Cx4 scale/rotate/transform/wireframe commands; common interface and SuperFX |
+| Cartridge coprocessors | **Partial Cx4** | Remaining Cx4 transform/wireframe/disintegration/wave commands; common interface and SuperFX |
 | Nx/EXLA | Optimized subsets of Mode 1 and Mode 7 | Broader fused PPU kernels; later block-based DSP mixing |
 
 ## W65C816S CPU instruction inventory
@@ -259,7 +259,7 @@ timing and arbitration requirements become concrete.
 
 | Chip | Command/instruction surface | Status |
 |---|---|---|
-| Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` triangle; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$00` composite OAM build mode, and `$05/$15/$1F/$22/$25/$40/$54/$5C/$89`. X3 passes its Cx4 self-test and renders composite boss sprites in its attract sequence; scale/rotate, wireframe, and coordinate-transform commands remain. |
+| Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` triangle; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$00` composite OAM build plus scale/rotate modes `$03/$07`, and `$05/$15/$1F/$22/$25/$40/$54/$5C/$89`. X3 passes its Cx4 self-test and renders composite boss sprites in its attract sequence; transform-lines, wireframe, disintegration, wave, and coordinate-transform commands remain. |
 | SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | Missing. Required by Star Fox and Yoshi's Island. |
 
 ### Remaining commercial enhancement chips
