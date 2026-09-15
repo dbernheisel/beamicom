@@ -5,19 +5,26 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     The native core supplies timestamped register operations while the oscillator
     and filter state remains resident on the configured Nx backend between calls.
+    Sample phase, nonlinear mixer values, and filter recurrence use signed Q30
+    fixed point so the block graph contains no floating-point tensors. The GPU
+    produces a parallel raw sample block; the small recurrent output filter runs
+    on the host, where its strict sample dependency is inexpensive.
     """
 
     alias Beamicom.NES.Nx.{APU, BlockAPU}
     @behaviour Beamicom.NES.APURenderer
 
     @capacity 128
+    @fixed_scale Bitwise.bsl(1, 30)
+    @hp90_fixed round(0.987340 * @fixed_scale)
+    @lp8k_fixed round(0.532680 * @fixed_scale)
     @compiled_key {__MODULE__, :compiled}
 
     @impl true
     def prepare(native_apu) do
-      state =
+      apu =
         native_apu
-        |> APU.pack()
+        |> APU.pack_fixed()
         |> Nx.backend_copy(backend())
         |> Nx.donatable()
 
@@ -25,24 +32,31 @@ if Code.ensure_loaded?(Nx.Defn) do
       # after load returns, so first-use Nx compilation cannot starve the player
       # or make the runtime enqueue a catch-up burst.
       compiled([
-        state,
+        apu,
         Nx.template({@capacity, 3}, :s32),
         Nx.template({}, :s32),
         Nx.template({}, :s32),
         Nx.template({1024}, :s32),
-        Nx.template({1024}, :f64)
+        Nx.template({1024}, :s64)
       ])
 
-      state
+      %{
+        apu: apu,
+        filter:
+          {APU.to_fixed(native_apu.f_hp), APU.to_fixed(native_apu.f_hp_x),
+           APU.to_fixed(native_apu.f_lp)}
+      }
     end
 
     @impl true
-    def snapshot(state), do: Nx.backend_copy(state, Nx.BinaryBackend)
-    @impl true
-    def restore(state), do: state |> Nx.backend_copy(backend()) |> Nx.donatable()
+    def snapshot(%{apu: apu} = state), do: %{state | apu: Nx.backend_copy(apu, Nx.BinaryBackend)}
 
     @impl true
-    def render(state, events, cycles, sample_inputs) do
+    def restore(%{apu: apu} = state),
+      do: %{state | apu: apu |> Nx.backend_copy(backend()) |> Nx.donatable()}
+
+    @impl true
+    def render(%{apu: apu, filter: filter}, events, cycles, sample_inputs) do
       if length(sample_inputs) > 1024, do: raise("sample-level block exceeds capacity")
 
       {dmc_samples, expansion_samples} = split_inputs(sample_inputs)
@@ -51,14 +65,15 @@ if Code.ensure_loaded?(Nx.Defn) do
       dmc = Nx.tensor(dmc_samples ++ List.duplicate(0, 1024 - length(dmc_samples)), type: :s32)
 
       expansion =
-        Nx.tensor(expansion_samples ++ List.duplicate(0.0, 1024 - length(expansion_samples)),
-          type: :f64
-        )
+        expansion_samples
+        |> Enum.map(&APU.to_fixed/1)
+        |> Kernel.++(List.duplicate(0, 1024 - length(expansion_samples)))
+        |> Nx.tensor(type: :s64)
 
       resident = fn tensor -> Nx.backend_copy(tensor, backend()) end
 
       args = [
-        state,
+        apu,
         resident.(event_tensor),
         resident.(event_count),
         resident.(Nx.tensor(cycles, type: :s32)),
@@ -66,14 +81,15 @@ if Code.ensure_loaded?(Nx.Defn) do
         resident.(expansion)
       ]
 
-      {state, pcm, count, left, consumed} = apply(compiled(args), args)
+      {apu, raw, count, left, consumed} = apply(compiled(args), args)
       count = Nx.to_number(count)
 
       if Nx.to_number(left) != 0 or Nx.to_number(consumed) != length(events),
         do: raise("Nx APU block did not consume the complete frame")
 
-      bytes = pcm |> Nx.to_binary() |> binary_part(0, count * 2)
-      {count, bytes, Nx.donatable(state)}
+      raw = raw |> Nx.to_binary() |> binary_part(0, count * 8)
+      {bytes, filter} = filter_pcm(raw, filter, [])
+      {count, bytes, %{apu: Nx.donatable(apu), filter: filter}}
     end
 
     @impl true
@@ -103,6 +119,24 @@ if Code.ensure_loaded?(Nx.Defn) do
       end)
       |> Enum.unzip()
     end
+
+    defp filter_pcm(<<>>, filter, samples),
+      do: {samples |> Enum.reverse() |> IO.iodata_to_binary(), filter}
+
+    defp filter_pcm(<<x::signed-native-64, rest::binary>>, {hp, previous, lp}, samples) do
+      hp = fixed_multiply(@hp90_fixed, hp + x - previous)
+      lp = lp + fixed_multiply(@lp8k_fixed, hp - lp)
+      sample = fixed_pcm(lp)
+      filter_pcm(rest, {hp, x, lp}, [<<sample::signed-native-16>> | samples])
+    end
+
+    defp fixed_multiply(coefficient, value), do: fixed_divide(coefficient * value)
+    defp fixed_pcm(value), do: (value * 32_767) |> fixed_divide() |> min(32_767) |> max(-32_768)
+
+    defp fixed_divide(value) when value >= 0,
+      do: div(value + div(@fixed_scale, 2), @fixed_scale)
+
+    defp fixed_divide(value), do: div(value - div(@fixed_scale, 2), @fixed_scale)
 
     defp backend, do: Beamicom.NES.Nx.backend()
   end

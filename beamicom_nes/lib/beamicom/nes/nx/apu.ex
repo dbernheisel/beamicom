@@ -8,6 +8,13 @@ if Code.ensure_loaded?(Nx.Defn) do
     @m5 for(n <- 0..30, do: if(n == 0, do: 0.0, else: 95.88 / (8128 / n + 100)))
     @pcm for(n <- 0..255, do: n / 255 * 0.25)
     @ratio 44_100 / 1_789_773
+    @fixed_shift 30
+    @fixed_scale Bitwise.bsl(1, @fixed_shift)
+    @fixed_cpu_hz 1_789_773
+    @pulse_fixed Enum.map(@pulse, &round(&1 * @fixed_scale))
+    @tnd_fixed Enum.map(@tnd, &round(&1 * @fixed_scale))
+    @m5_fixed Enum.map(@m5, &round(&1 * @fixed_scale))
+    @pcm_fixed Enum.map(@pcm, &round(&1 * @fixed_scale))
 
     # LFSR evolution is linear over XOR. Three 5-bit lookup chunks exactly
     # reconstruct any 15-bit state after 0..32 steps, for either feedback tap.
@@ -40,6 +47,17 @@ if Code.ensure_loaded?(Nx.Defn) do
       ])
       |> pack_map()
     end
+
+    @doc false
+    def pack_fixed(s) do
+      s
+      |> pack()
+      |> Map.drop([:sample_ratio, :f_hp, :f_hp_x, :f_lp])
+      |> Map.put(:sample_acc, Nx.tensor(round(s.sample_acc * @fixed_cpu_hz), type: :s64))
+    end
+
+    @doc false
+    def to_fixed(value) when is_number(value), do: round(value * @fixed_scale)
 
     defp pack_map(s) do
       Map.new(s, fn {k, v} ->
@@ -289,6 +307,34 @@ if Code.ensure_loaded?(Nx.Defn) do
           s.m5_active != 0,
           Nx.take(m5_table, m5) + Nx.take(pcm_table, s.m5pcm),
           Nx.tensor(0.0, type: :f64)
+        )
+
+      Nx.take(pulse_table, p) + Nx.take(tnd_table, 3 * tri + 2 * noise + dmc) + expansion
+    end
+
+    @doc false
+    defn mix_fixed(s, dmc) do
+      pulse_table = Nx.tensor(@pulse_fixed, type: :s64)
+      tnd_table = Nx.tensor(@tnd_fixed, type: :s64)
+      m5_table = Nx.tensor(@m5_fixed, type: :s64)
+      pcm_table = Nx.tensor(@pcm_fixed, type: :s64)
+      tri = Nx.select(s.tri_seq < 16, 15 - s.tri_seq, s.tri_seq - 16)
+
+      noise =
+        Nx.select(
+          s.noise.length == 0 or band(s.noise_shift, 1) == 1,
+          0,
+          Nx.select(s.noise.const != 0, s.noise.vol, s.noise.env_decay)
+        )
+
+      p = level(s.pulse1, s.p1_seq, 0) + level(s.pulse2, s.p2_seq, 0)
+      m5 = level(s.m5p1, s.m5p1_seq, 1) + level(s.m5p2, s.m5p2_seq, 1)
+
+      expansion =
+        Nx.select(
+          s.m5_active != 0,
+          Nx.take(m5_table, m5) + Nx.take(pcm_table, s.m5pcm),
+          Nx.tensor(0, type: :s64)
         )
 
       Nx.take(pulse_table, p) + Nx.take(tnd_table, 3 * tri + 2 * noise + dmc) + expansion

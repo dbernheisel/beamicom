@@ -4,12 +4,14 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
   alias Beamicom.NES.APU
   alias Beamicom.NES.Nx.APUBlockRenderer
 
-  test "persistent oscillator state is donated on every compiled frame call" do
+  test "persistent oscillator state is fixed-point and donated on every compiled frame call" do
     state = APUBlockRenderer.prepare(APU.new())
     assert state |> Map.values() |> List.flatten() |> Enum.all?(&donatable_tree?/1)
+    assert fixed_tree?(state)
 
     {_count, _pcm, next_state} = APUBlockRenderer.render(state, [], 100, [])
     assert next_state |> Map.values() |> List.flatten() |> Enum.all?(&donatable_tree?/1)
+    assert fixed_tree?(next_state)
   end
 
   test "block rendering mixes a native-timed DMC stream exactly" do
@@ -73,6 +75,25 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
     assert pcm == expected_pcm
   end
 
+  test "fixed-point filters remain sample-exact across five seconds" do
+    initial =
+      APU.new()
+      |> APU.write(0x4015, 0x01)
+      |> APU.write(0x4000, 0xBF)
+      |> APU.write(0x4002, 0xFD)
+      |> APU.write(0x4003, 0x08)
+
+    Enum.reduce(1..301, {initial, APUBlockRenderer.prepare(initial)}, fn _, {reference, state} ->
+      reference = APU.tick(reference, 29_780)
+      {expected_count, expected_pcm, reference} = APU.take_pcm(reference)
+      {count, pcm, state} = APUBlockRenderer.render(state, [], 29_780, [])
+
+      assert count == expected_count
+      assert pcm == expected_pcm
+      {reference, state}
+    end)
+  end
+
   test "live frame event capture is exact and survives save-state restore" do
     media = File.read!("test/support/fixtures/nestest.nes")
     {:ok, accelerated} = Beamicom.NES.System.load(media)
@@ -105,7 +126,19 @@ defmodule Beamicom.NES.Nx.APUBlockRendererTest do
   end
 
   defp donatable_tree?(%Nx.Tensor{} = tensor), do: Nx.donatable?(tensor)
+  defp donatable_tree?(value) when is_integer(value), do: true
+
+  defp donatable_tree?(tuple) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> Enum.all?(&donatable_tree?/1)
 
   defp donatable_tree?(map) when is_map(map),
     do: map |> Map.values() |> Enum.all?(&donatable_tree?/1)
+
+  defp fixed_tree?(%Nx.Tensor{} = tensor), do: Nx.type(tensor) in [{:s, 16}, {:s, 32}, {:s, 64}]
+  defp fixed_tree?(value) when is_integer(value), do: true
+
+  defp fixed_tree?(tuple) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> Enum.all?(&fixed_tree?/1)
+
+  defp fixed_tree?(map) when is_map(map), do: map |> Map.values() |> Enum.all?(&fixed_tree?/1)
 end
