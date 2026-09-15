@@ -28,13 +28,17 @@
    - One package-owned opcode metadata table shared by discovery/codegen tests.
      Initially validate it exhaustively against interpreter behavior rather than
      changing the interpreter's private `decode/1` API.
-3. `Beamicom.NES.Recompiler.Discovery`
+3. `Beamicom.NES.Recompiler.Discovery` / `MMC5Discovery`
    - Mapper-0 CPU-address-to-PRG translation.
    - Recursive descent from NMI/reset/IRQ vectors through conditional branches,
      `JMP abs`, and `JSR`; terminate blocks at control-flow instructions and at
      already discovered entries.
    - `JMP ind`, `RTS`, `RTI`, `BRK`, invalid opcodes, and ROM exits terminate the
      static block and use dynamic dispatch/fallback.
+   - MMC5 release builds collect bank signatures and dynamic roots under the
+     interpreter, then recursively descend only through instruction identities
+     observed under each signature. Unknown signatures and executable PRG-RAM
+     are mandatory fallbacks.
 4. `Beamicom.NES.Recompiler.Generator`
    - Generate one hash-named module per mapper-0 PRG image with `block_xxxx/2`
      functions, a pattern-matched `dispatch/2`, and tail calls for known direct
@@ -64,10 +68,10 @@ and test those rather than create a second rendering stack:
 2. Sprites: retain native timing-visible sprite-zero behavior until a tested
    `[240][64]` in-range mask, `Nx.cumulative_sum/2` eight-sprite limiter,
    overflow result, and priority overlay match it.
-3. APU: compose the existing timestamped `Nx.BlockAPU` path with fixed-capacity
-   writes. Add the requested time-domain phase/cumulative-sum and windowed-sinc
-   `Nx.conv/3` decimator only after waveform equivalence tests define the exact
-   resampling contract (current output is 44.1 kHz; requested output is 48 kHz).
+3. APU: `Nx.FrameAPURenderer` captures the native CPU-timed DMC DAC lane at
+   192 kHz, evaluates 2A03 and MMC5 oscillator state in `Nx.BlockAPU`, and uses a
+   33-tap windowed-sinc `Nx.conv/3` pass to return 800 s16 samples at 48 kHz.
+   The existing 44.1 kHz renderer remains the default.
 4. Optional presentation: compose palette expansion and the existing Blargg
    NTSC convolution renderer behind a flag while always retaining native
    `u8[240][256]` palette-address pixels.
@@ -96,13 +100,11 @@ and test those rather than create a second rendering stack:
 
 ## Open questions / discovered constraints
 
-1. `roms/castlevania3.nes` declares NES 2.0 mapper 5 (MMC5), not mapper 0. It is
-   suitable for measuring interpreter and Nx-frame behavior, and for measuring
-   how completely fallback dominates, but it cannot exercise mapper-0 static
-   PRG discovery because its CPU address mapping changes at runtime. Initial AOT
-   equivalence/coverage therefore uses the checked-in mapper-0 conformance ROMs.
-   Making Castlevania III itself statically recompiled is a separate mapper-5
-   bank-specialization milestone.
+1. `roms/castlevania3.nes` declares NES 2.0 mapper 5 (MMC5), not mapper 0. Its
+   measured hot set stabilizes at seven PRG signatures and 1,836 instruction
+   identities over one million interpreted instructions. Generated dispatch now
+   keys on `{PC, four PRG offsets, PRG-RAM window mask}`. A mapping is checked at
+   block entry and after memory-writing opcodes; unknown states fall back.
 2. "BeamAsm" is not currently a dependency or module in this umbrella. The safe
    first implementation generates quoted Elixir and uses `Module.create/3`,
    which invokes the Elixir/BEAM compiler. Direct use of Erlang compiler-internal
@@ -113,9 +115,40 @@ and test those rather than create a second rendering stack:
    insufficient (banked CHR, ExRAM/extended attributes, split screen). The first
    exact synthesizer should keep the richer existing scanline contract; a strict
    raw-state/log contract can initially be mapper-0-only.
-4. Existing audio output and host capability are 44.1 kHz. Moving the public
-   output contract to 48 kHz affects sinks and requires approval; until then a
-   48 kHz synthesizer should be opt-in and converted at the integration edge.
+4. The 48 kHz host contract is opt-in through `BEAMICOM_AUDIO_48=1`; public
+   function arities were preserved. `FrameAPUExecutable` has a platform-specific
+   release dump/load path and an in-memory compile fallback. The current fixed
+   frame buffer holds the last 192 kHz value across the short NTSC tail, so it is
+   a fixed 800-sample/nominal-60-Hz contract rather than a fractional-rate audio
+   clock with cross-frame FIR overlap.
+5. The supplied Castlevania III image enables MMC5 expansion audio but did not
+   touch DMC during a one-million-instruction trace. DMC is therefore covered by
+   an active synthetic timing/render test, not claimed as ROM benchmark coverage.
+   Native DMC still preloads each sample and does not model per-byte DMA stalls or
+   mid-sample PRG bank switching.
+
+## Measured expansion checkpoint
+
+- CPU-only, one million Castlevania III instructions: seven MMC5 signatures,
+  1,836 static identities, 12 fallbacks (0.0012%). The generated path is still
+  slower because instruction semantics call the shared oracle core: 0.67x the
+  interpreter after static-operand specialization. This is not yet a speed win.
+- A 10,000-transition Castlevania III differential run matched A/X/Y/SP/P/PC,
+  interrupt latches, cycles, RAM, WRAM, mapper state, and PRG mappings exactly.
+- End-to-end over 61 warmed frames with Nx MMC5 video and the 48 kHz audio graph:
+  interpreter 75.13 FPS versus AOT 70.82 FPS (0.943x), with identical video and
+  audio SHA-256 hashes. The profile took 1.740 s and generated-module compilation
+  took 13.163 s. The measured 0.00214% fallback rate is not the bottleneck.
+- EXLA frame audio, 100 calls with active DMC and MMC5: mean 1.364 ms, p50
+  1.268 ms, p95 1.987 ms, p99 2.242 ms; 50,696 host-to-device bytes and 1,600
+  device-to-host bytes per call.
+- Castlevania's atlas-mode video inputs add 53,746 host-to-device bytes and its
+  palette-index plus RGB outputs add 245,760 device-to-host bytes, for 104,442
+  combined host-to-device bytes per complete frame call.
+- XLA's buffer-assignment dump reports 98,112 total bytes and an
+  `input_output_alias` entry for every one of the 116 donated resident APU/FIR
+  leaves. The two 4,096-sample per-frame input lanes remain ordinary parameter
+  allocations, as expected.
 
 ## Checkpoints
 
