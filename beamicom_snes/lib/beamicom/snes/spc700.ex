@@ -141,7 +141,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(op, spc) when op in [0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0, 0xED] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = if op in [0xA0, 0xC0, 0xED], do: advance_bus_cycle(spc), else: spc
 
     psw =
@@ -160,12 +160,12 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(0x00, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     {:ok, spc, 2}
   end
 
   defp execute(0x0F, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = spc |> push(spc.pc >>> 8) |> push(spc.pc) |> push(spc.psw)
     spc = advance_bus_cycle(spc)
     {target, spc} = read_word(spc, 0xFFDE)
@@ -181,7 +181,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(op, spc) when op in [0x5D, 0x7D, 0x9D, 0xBD, 0xDD, 0xFD] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
 
     {register, value} =
       case op do
@@ -362,7 +362,7 @@ defmodule Beamicom.SNES.SPC700 do
 
   # INC/DEC registers.
   defp execute(op, spc) when op in [0x1D, 0x3D, 0x9C, 0xBC, 0xDC, 0xFC] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
 
     {register, delta} =
       case op do
@@ -408,7 +408,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(op, spc) when op in [0x1C, 0x3C, 0x5C, 0x7C] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     {value, spc} = rmw_value(spc, op, spc.a)
     {:ok, %{spc | a: value}, 2}
   end
@@ -479,7 +479,7 @@ defmodule Beamicom.SNES.SPC700 do
 
   defp execute(op, spc) when (op &&& 0x0F) == 1 do
     vector = 0xFFDE - (op >>> 4) * 2
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     spc = spc |> push(spc.pc >>> 8) |> push(spc.pc)
     spc = advance_bus_cycle(spc)
@@ -488,7 +488,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(0x6F, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     {low, spc} = pop(spc)
     {high, spc} = pop(spc)
@@ -496,7 +496,7 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(0x7F, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     {psw, spc} = pop(spc)
     {low, spc} = pop(spc)
@@ -519,13 +519,13 @@ defmodule Beamicom.SNES.SPC700 do
   # Stack operations.
   defp execute(op, spc) when op in [0x0D, 0x2D, 0x4D, 0x6D] do
     value = %{0x0D => spc.psw, 0x2D => spc.a, 0x4D => spc.x, 0x6D => spc.y}[op]
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = spc |> push(value) |> advance_bus_cycle()
     {:ok, spc, 4}
   end
 
   defp execute(op, spc) when op in [0x8E, 0xAE, 0xCE, 0xEE] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     {value, spc} = pop(spc)
     register = %{0x8E => :psw, 0xAE => :a, 0xCE => :x, 0xEE => :y}[op]
@@ -534,7 +534,7 @@ defmodule Beamicom.SNES.SPC700 do
 
   # DBNZ and CBNE.
   defp execute(0xFE, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     {offset, spc} = fetch(spc)
     y = spc.y - 1 &&& 0xFF
@@ -658,14 +658,14 @@ defmodule Beamicom.SNES.SPC700 do
 
   # MUL, DIV, nibble exchange, and decimal adjust.
   defp execute(0xCF, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_to_before_cycle(spc, 9)
     value = spc.y * spc.a
     {:ok, %{spc | a: value &&& 0xFF, y: value >>> 8} |> set_nz(value >>> 8), 9}
   end
 
   defp execute(0x9E, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_to_before_cycle(spc, 12)
     divisor = spc.x <<< 9
 
@@ -689,14 +689,14 @@ defmodule Beamicom.SNES.SPC700 do
   end
 
   defp execute(0x9F, spc) do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_to_before_cycle(spc, 5)
     value = (spc.a <<< 4 ||| spc.a >>> 4) &&& 0xFF
     {:ok, %{spc | a: value} |> set_nz(value), 5}
   end
 
   defp execute(op, spc) when op in [0xBE, 0xDF] do
-    {_discard, spc} = read(spc, spc.pc)
+    spc = dummy_read(spc, spc.pc)
     spc = advance_bus_cycle(spc)
     {value, psw} = decimal_adjust(spc.a, spc.psw, op)
     {:ok, %{spc | a: value, psw: psw} |> set_nz(value), 3}
@@ -1017,6 +1017,15 @@ defmodule Beamicom.SNES.SPC700 do
         {memory_get(spc, address), spc}
     end
   end
+
+  # Dummy instruction-bus reads discard their value. Only timer output reads
+  # have an observable read side effect; other addresses need just the cycle.
+  defp dummy_read(spc, address) when address in 0xFD..0xFF do
+    {_discard, spc} = read(spc, address)
+    spc
+  end
+
+  defp dummy_read(spc, _address), do: advance_bus_cycle(spc)
 
   defp write(spc, address, value) do
     spc = advance_bus_cycle(spc)

@@ -180,6 +180,17 @@ defmodule Beamicom.SNES.APUTest do
     assert spc.cycles == 10
   end
 
+  test "SPC dummy reads preserve timer output register side effects" do
+    ram = spc_ram([{0xFC, 0x00}])
+
+    spc =
+      %{SPC700.new(ram, 0xFC) | timer_outputs: {5, 0, 0}}
+      |> SPC700.run(1)
+
+    assert spc.pc == 0xFD
+    assert spc.timer_outputs == {0, 0, 0}
+  end
+
   test "SPC timer divider phase free-runs while disabled and survives enable" do
     ram = spc_ram([{0, 0x8F}, {1, 0x01}, {2, 0xF1}])
 
