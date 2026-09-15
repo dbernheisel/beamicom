@@ -928,12 +928,8 @@ defmodule Beamicom.SNES.PPU do
     main = palette_color(ppu, palette, layer, main_index)
 
     if color_math_enabled?(ppu.color_math, layer) do
-      second =
-        if (select &&& 0x02) != 0,
-          do: palette_color(ppu, palette, sub_layer, sub_index),
-          else: ppu.fixed_color
-
-      color_to_rgb(blend_color(main, second, ppu.color_math), components)
+      {second, math} = color_math_operand(ppu, palette, sub_layer, sub_index)
+      color_to_rgb(blend_color(main, second, math), components)
     else
       if direct_color?(ppu, layer),
         do: color_to_rgb(main, components),
@@ -962,12 +958,8 @@ defmodule Beamicom.SNES.PPU do
 
     color =
       if math? and not window_mode_applies?(prevent_mode, color_window?) do
-        second =
-          if (ppu.color_window_select &&& 0x02) != 0,
-            do: palette_color(ppu, palette, sub_layer, sub_index),
-            else: ppu.fixed_color
-
-        blend_color(main, second, ppu.color_math)
+        {second, math} = color_math_operand(ppu, palette, sub_layer, sub_index)
+        blend_color(main, second, math)
       else
         main
       end
@@ -991,6 +983,23 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp palette_color(_ppu, palette, _layer, index), do: elem(palette, index &&& 0xFF)
+
+  defp color_math_operand(ppu, palette, sub_layer, sub_index) do
+    cond do
+      (ppu.color_window_select &&& 0x02) == 0 ->
+        {ppu.fixed_color, ppu.color_math}
+
+      sub_layer == :backdrop ->
+        # With add/sub-screen selected, an uncovered sub-screen pixel falls
+        # back to COLDATA. Hardware also disables CGADSUB's half operation for
+        # this fallback; it is not the same case as explicitly selecting the
+        # fixed-color operand with CGWSEL bit 1 clear.
+        {ppu.fixed_color, ppu.color_math &&& bnot(0x40)}
+
+      true ->
+        {palette_color(ppu, palette, sub_layer, sub_index), ppu.color_math}
+    end
+  end
 
   defp direct_color?(%{bg_mode: 7, color_window_select: select}, 0), do: (select &&& 1) != 0
 

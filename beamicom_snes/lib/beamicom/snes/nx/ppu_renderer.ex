@@ -179,7 +179,7 @@ if Code.ensure_loaded?(Nx.Defn) do
           bg3_high
         )
 
-      {sub_index, _sub_layer} =
+      {sub_index, sub_layer} =
         compose(
           c0,
           c1,
@@ -208,7 +208,9 @@ if Code.ensure_loaded?(Nx.Defn) do
 
       select = full_column(controls, 16)
       fixed = full_column(controls, 18)
-      second = Nx.select(band(select, 2) != 0, sub_color, fixed)
+      use_sub = band(select, 2) != 0
+      fixed_fallback = use_sub and sub_layer == 5
+      second = Nx.select(use_sub and sub_layer != 5, sub_color, fixed)
       math = full_column(controls, 17)
       enabled = band(shr(math, main_layer), 1) != 0
       enabled = Nx.select(main_layer == 5, band(math, 0x20) != 0, enabled)
@@ -216,7 +218,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       color_window = window_mask(controls, 5)
       first = Nx.select(window_mode_applies(band(shr(select, 6), 3), color_window), 0, first)
       enabled = enabled and not window_mode_applies(band(shr(select, 4), 3), color_window)
-      mixed = blend(first, second, math)
+      mixed = blend(first, second, Nx.select(fixed_fallback, band(math, 0xBF), math))
       color = Nx.select(enabled, mixed, first)
       brightness = column(controls, 0)
 
@@ -262,7 +264,7 @@ if Code.ensure_loaded?(Nx.Defn) do
           bg3_high
         )
 
-      {sub_index, _sub_layer} =
+      {sub_index, sub_layer} =
         compose_unwindowed(
           c0,
           c1,
@@ -288,11 +290,17 @@ if Code.ensure_loaded?(Nx.Defn) do
         |> Nx.reshape({@height, @width})
 
       select = full_column(controls, 16)
-      second = Nx.select(band(select, 2) != 0, sub_color, full_column(controls, 18))
+      use_sub = band(select, 2) != 0
+      fixed_fallback = use_sub and sub_layer == 5
+
+      second =
+        Nx.select(use_sub and sub_layer != 5, sub_color, full_column(controls, 18))
+
       math = full_column(controls, 17)
       enabled = band(shr(math, main_layer), 1) != 0
       enabled = Nx.select(main_layer == 5, band(math, 0x20) != 0, enabled)
       enabled = Nx.select(main_layer == 4, enabled and main_index >= 192, enabled)
+      math = Nx.select(fixed_fallback, band(math, 0xBF), math)
       color = Nx.select(enabled, blend(first, second, math), first)
       brightness = column(controls, 0)
 
@@ -337,11 +345,17 @@ if Code.ensure_loaded?(Nx.Defn) do
       direct_sub = mode7_direct_color(sub_index)
       first = Nx.select(band(select, 1) != 0 and main_layer == 0, direct_main, palette_main)
       sub_color = Nx.select(band(select, 1) != 0 and sub_layer == 0, direct_sub, palette_sub)
-      second = Nx.select(band(select, 2) != 0, sub_color, full_column(controls, 18))
+      use_sub = band(select, 2) != 0
+      fixed_fallback = use_sub and sub_layer == 5
+
+      second =
+        Nx.select(use_sub and sub_layer != 5, sub_color, full_column(controls, 18))
+
       math = full_column(controls, 17)
       enabled = band(shr(math, main_layer), 1) != 0
       enabled = Nx.select(main_layer == 5, band(math, 0x20) != 0, enabled)
       enabled = Nx.select(main_layer == 4, enabled and main_index >= 192, enabled)
+      math = Nx.select(fixed_fallback, band(math, 0xBF), math)
       color = Nx.select(enabled, blend(first, second, math), first)
       brightness = column(controls, 0)
 

@@ -194,6 +194,35 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(frame.data, 0, 3) == <<123, 0, 123>>
   end
 
+  test "uses unhalved fixed color when the selected sub-screen is uncovered" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2107, 0x04)
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x212D, 0x00)
+      |> PPU.write(0x2130, 0x02)
+      # Add and halve BG1, if a real sub-screen pixel covers this dot.
+      |> PPU.write(0x2131, 0x41)
+      # Green COLDATA fallback.
+      |> PPU.write(0x2132, 0x5F)
+      |> write_vram_byte(0x0800, 0x00)
+      |> write_vram_byte(0x0801, 0x00)
+      |> write_vram_byte(0x0000, 0x80)
+      |> write_cgram_color(1, 0x001F)
+
+    # An empty sub screen falls back to fixed green and disables halving, so
+    # the full-red main pixel becomes full yellow.
+    native = PPU.render_frame(ppu).data
+    assert binary_part(native, 0, 3) == <<255, 255, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(ppu, objects) == native
+    end
+  end
+
   test "ignores color-window selection when clip and prevent modes are disabled" do
     ppu =
       PPU.new()
