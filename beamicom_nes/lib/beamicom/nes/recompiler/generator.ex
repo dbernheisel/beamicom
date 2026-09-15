@@ -7,6 +7,8 @@ defmodule Beamicom.NES.Recompiler.Generator do
   can then be replaced behind the same ABI under differential tests.
   """
 
+  import Bitwise
+
   alias Beamicom.NES.Cart
   alias Beamicom.NES.{Console}
   alias Beamicom.NES.Recompiler.{Discovery, MMC5Discovery, MMC5Profile, Program}
@@ -115,23 +117,18 @@ defmodule Beamicom.NES.Recompiler.Generator do
           Enum.map(block.addresses, fn address ->
             instruction = Map.fetch!(discovery.instructions, address)
 
-            {address, instruction.operation, instruction.mode, instruction.base_cycles}
+            {address, instruction.operation, instruction.mode, instruction.base_cycles,
+             static_operand(instruction.bytes)}
           end)
+
+        body = emitted_block_body(instructions, nil)
 
         quote do
           @doc false
           def unquote(name)(a, x, y, sp, p, cycles, ram, context) do
-            Runtime.run_block(
-              a,
-              x,
-              y,
-              sp,
-              p,
-              cycles,
-              ram,
-              context,
-              unquote(Macro.escape(instructions))
-            )
+            {var!(cpu), var!(bus)} = Runtime.enter(a, x, y, sp, p, cycles, ram, context)
+            var!(frame) = Runtime.frame_marker(var!(bus))
+            unquote(body)
           end
         end
       end)
@@ -180,24 +177,20 @@ defmodule Beamicom.NES.Recompiler.Generator do
         instructions =
           Enum.map(block.addresses, fn address ->
             instruction = Map.fetch!(discovery.instructions, {block.signature, address})
-            {address, instruction.operation, instruction.mode, instruction.base_cycles}
+
+            {address, instruction.operation, instruction.mode, instruction.base_cycles,
+             static_operand(instruction.bytes),
+             mapping_write?(instruction.operation, instruction.mode)}
           end)
+
+        body = emitted_block_body(instructions, block.signature)
 
         quote do
           @doc false
           def unquote(name)(a, x, y, sp, p, cycles, ram, context) do
-            Runtime.run_block(
-              a,
-              x,
-              y,
-              sp,
-              p,
-              cycles,
-              ram,
-              context,
-              unquote(Macro.escape(instructions)),
-              unquote(Macro.escape(block.signature))
-            )
+            {var!(cpu), var!(bus)} = Runtime.enter(a, x, y, sp, p, cycles, ram, context)
+            var!(frame) = Runtime.frame_marker(var!(bus))
+            unquote(body)
           end
         end
       end)
@@ -209,16 +202,15 @@ defmodule Beamicom.NES.Recompiler.Generator do
         {banks, ram_windows} = block.signature
 
         quote do
-          def dispatch(
-                %Console{
-                  cpu: %CPU{pc: unquote(address)} = cpu,
-                  bus: %{
+          def dispatch(%Console{
+                cpu: %CPU{pc: unquote(address)} = cpu,
+                bus:
+                  %{
                     mapper: 5,
                     prg_banks: unquote(Macro.escape(banks)),
                     mapper_state: %{prg_ram_windows: unquote(ram_windows)}
                   } = bus
-                }
-              ) do
+              }) do
             unquote(name)(cpu.a, cpu.x, cpu.y, cpu.sp, cpu.p, cpu.cycles, bus.ram, {cpu, bus})
           end
         end
@@ -270,4 +262,111 @@ defmodule Beamicom.NES.Recompiler.Generator do
     suffix = address |> Integer.to_string(16) |> String.pad_leading(4, "0")
     String.to_atom("block_m5_#{index}_#{suffix}")
   end
+
+  # Only an opcode that writes through Bus can change an MMC5 PRG register. The
+  # generated runtime checks the mapping after these operations instead of
+  # rebuilding/comparing the four-window signature after every ALU or load.
+  defp mapping_write?(operation, mode) do
+    mode not in [:imp, :acc, :imm, :rel] and
+      operation in [
+        :STA,
+        :STX,
+        :STY,
+        :SAX,
+        :AHX,
+        :SHX,
+        :SHY,
+        :TAS,
+        :ASL,
+        :LSR,
+        :ROL,
+        :ROR,
+        :INC,
+        :DEC,
+        :DCP,
+        :ISC,
+        :SLO,
+        :RLA,
+        :SRE,
+        :RRA
+      ]
+  end
+
+  defp emitted_block_body(instructions, signature),
+    do: emitted_instruction_chain(instructions, signature, 0)
+
+  defp emitted_instruction_chain([], _signature, count) do
+    quote do
+      {%Console{cpu: var!(cpu), bus: var!(bus)}, unquote(count)}
+    end
+  end
+
+  defp emitted_instruction_chain(
+         [{address, operation, mode, base_cycles, operand} | rest],
+         nil,
+         count
+       ) do
+    next = emitted_instruction_chain(rest, nil, count + 1)
+
+    quote do
+      if var!(cpu).pc == unquote(address) do
+        {var!(cpu), var!(bus)} =
+          CPU.step_static(
+            var!(cpu),
+            var!(bus),
+            unquote(operation),
+            unquote(mode),
+            unquote(base_cycles),
+            unquote(operand)
+          )
+
+        if Runtime.same_frame?(var!(bus), var!(frame)) do
+          unquote(next)
+        else
+          {%Console{cpu: var!(cpu), bus: var!(bus)}, unquote(count + 1)}
+        end
+      else
+        {%Console{cpu: var!(cpu), bus: var!(bus)}, unquote(count)}
+      end
+    end
+  end
+
+  defp emitted_instruction_chain(
+         [{address, operation, mode, base_cycles, operand, mapping_write?} | rest],
+         signature,
+         count
+       ) do
+    next = emitted_instruction_chain(rest, signature, count + 1)
+
+    mapping_guard =
+      if mapping_write?,
+        do: quote(do: Runtime.same_mapping?(var!(bus), unquote(Macro.escape(signature)))),
+        else: true
+
+    quote do
+      if var!(cpu).pc == unquote(address) do
+        {var!(cpu), var!(bus)} =
+          CPU.step_static(
+            var!(cpu),
+            var!(bus),
+            unquote(operation),
+            unquote(mode),
+            unquote(base_cycles),
+            unquote(operand)
+          )
+
+        if Runtime.same_frame?(var!(bus), var!(frame)) and unquote(mapping_guard) do
+          unquote(next)
+        else
+          {%Console{cpu: var!(cpu), bus: var!(bus)}, unquote(count + 1)}
+        end
+      else
+        {%Console{cpu: var!(cpu), bus: var!(bus)}, unquote(count)}
+      end
+    end
+  end
+
+  defp static_operand([_opcode]), do: nil
+  defp static_operand([_opcode, low]), do: low
+  defp static_operand([_opcode, low, high]), do: low ||| high <<< 8
 end

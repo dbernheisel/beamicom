@@ -101,6 +101,18 @@ defmodule Beamicom.NES.CPU do
       when is_atom(op) and is_atom(mode) and is_integer(cyc) and cyc > 0 do
     cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
     {addr, crossed, cpu, bus} = resolve(mode, cpu, bus)
+    execute_resolved(cpu, bus, op, mode, cyc, addr, crossed)
+  end
+
+  @doc false
+  def step_static(cpu, bus, op, mode, cyc, operand)
+      when is_atom(op) and is_atom(mode) and is_integer(cyc) and cyc > 0 do
+    cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
+    {addr, crossed, cpu, bus} = resolve_static(mode, operand, cpu, bus)
+    execute_resolved(cpu, bus, op, mode, cyc, addr, crossed)
+  end
+
+  defp execute_resolved(cpu, bus, op, mode, cyc, addr, crossed) do
     penalty = if crossed and op in @read_ops and mode in @penalty_modes, do: 1, else: 0
     # Only the PPU advance is split around the memory access (for exact NMI /
     # register-read dot timing). The APU + mapper-IRQ flush is batched/lazy and the
@@ -316,6 +328,47 @@ defmodule Beamicom.NES.CPU do
     cpu = adv(cpu, 1)
     off = if off >= 0x80, do: off - 0x100, else: off
     {cpu.pc + off &&& 0xFFFF, false, cpu, bus}
+  end
+
+  # Generated code already holds operand bytes, so it can bypass repeated PRG
+  # fetches while retaining the interpreter's addressing and execution logic.
+  defp resolve_static(:imp, _operand, cpu, bus), do: {nil, false, cpu, bus}
+  defp resolve_static(:acc, _operand, cpu, bus), do: {nil, false, cpu, bus}
+  defp resolve_static(:imm, _operand, cpu, bus), do: {cpu.pc, false, adv(cpu, 1), bus}
+  defp resolve_static(:zp, operand, cpu, bus), do: {operand, false, adv(cpu, 1), bus}
+
+  defp resolve_static(:zpx, operand, cpu, bus),
+    do: {operand + cpu.x &&& 0xFF, false, adv(cpu, 1), bus}
+
+  defp resolve_static(:zpy, operand, cpu, bus),
+    do: {operand + cpu.y &&& 0xFF, false, adv(cpu, 1), bus}
+
+  defp resolve_static(:abs, operand, cpu, bus), do: {operand, false, adv(cpu, 2), bus}
+  defp resolve_static(:abx, operand, cpu, bus), do: indexed(operand, cpu.x, adv(cpu, 2), bus)
+  defp resolve_static(:aby, operand, cpu, bus), do: indexed(operand, cpu.y, adv(cpu, 2), bus)
+
+  defp resolve_static(:ind, operand, cpu, bus) do
+    lo = peek(bus, operand)
+    hi = peek(bus, (operand &&& 0xFF00) ||| (operand + 1 &&& 0xFF))
+    {lo ||| hi <<< 8, false, adv(cpu, 2), bus}
+  end
+
+  defp resolve_static(:izx, operand, cpu, bus) do
+    zp = operand + cpu.x &&& 0xFF
+    addr = peek(bus, zp) ||| peek(bus, zp + 1 &&& 0xFF) <<< 8
+    {addr, false, adv(cpu, 1), bus}
+  end
+
+  defp resolve_static(:izy, operand, cpu, bus) do
+    base = peek(bus, operand) ||| peek(bus, operand + 1 &&& 0xFF) <<< 8
+    addr = base + cpu.y &&& 0xFFFF
+    {addr, page_crossed?(base, addr), adv(cpu, 1), bus}
+  end
+
+  defp resolve_static(:rel, operand, cpu, bus) do
+    cpu = adv(cpu, 1)
+    offset = if operand >= 0x80, do: operand - 0x100, else: operand
+    {cpu.pc + offset &&& 0xFFFF, false, cpu, bus}
   end
 
   defp indexed(base, idx, cpu, bus) do

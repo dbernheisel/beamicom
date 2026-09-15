@@ -5,11 +5,26 @@ defmodule Beamicom.NES.Recompiler.Runtime do
   alias Beamicom.NES.Recompiler.MMC5Profile
 
   @doc false
+  def enter(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}) when is_binary(ram) do
+    {%{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}, %{bus | ram: ram}}
+  end
+
+  @doc false
+  def same_frame?(bus, frame), do: frame_marker(bus) === frame
+
+  @doc false
+  def same_mapping?(bus, signature), do: MMC5Profile.signature(bus) == signature
+
+  @doc false
+  def frame_marker(%{ppu: nil}), do: nil
+  def frame_marker(%{ppu: %{frame_ready: frame}}), do: frame
+
+  @doc false
   def run_block(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}, addresses)
       when is_binary(ram) and is_list(addresses) do
     cpu = %{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}
     bus = %{bus | ram: ram}
-    {cpu, bus, count} = run_instructions(cpu, bus, addresses, frame_number(bus), 0)
+    {cpu, bus, count} = run_instructions(cpu, bus, addresses, frame_marker(bus), 0)
     {%Console{cpu: cpu, bus: bus}, count}
   end
 
@@ -18,8 +33,15 @@ defmodule Beamicom.NES.Recompiler.Runtime do
       when is_binary(ram) and is_list(addresses) do
     cpu = %{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}
     bus = %{bus | ram: ram}
+
     {cpu, bus, count} =
-      run_mmc5_instructions(cpu, bus, addresses, signature, frame_number(bus), 0)
+      if MMC5Profile.signature(bus) == signature and
+           MMC5Profile.rom_address?(signature, cpu.pc) do
+        run_mmc5_instructions(cpu, bus, addresses, signature, frame_marker(bus), 0)
+      else
+        {cpu, bus, 0}
+      end
+
     {%Console{cpu: cpu, bus: bus}, count}
   end
 
@@ -40,7 +62,7 @@ defmodule Beamicom.NES.Recompiler.Runtime do
        ) do
     {cpu, bus} = CPU.step_known(cpu, bus, operation, mode, base_cycles)
 
-    if frame_number(bus) == frame,
+    if frame_marker(bus) === frame,
       do: run_instructions(cpu, bus, rest, frame, count + 1),
       else: {cpu, bus, count + 1}
   end
@@ -53,26 +75,21 @@ defmodule Beamicom.NES.Recompiler.Runtime do
   defp run_mmc5_instructions(
          %CPU{pc: pc} = cpu,
          bus,
-         [{pc, operation, mode, base_cycles} | rest],
+         [{pc, operation, mode, base_cycles, mapping_write?} | rest],
          signature,
          frame,
          count
        ) do
-    if MMC5Profile.signature(bus) == signature and MMC5Profile.rom_address?(signature, pc) do
-      {cpu, bus} = CPU.step_known(cpu, bus, operation, mode, base_cycles)
+    {cpu, bus} = CPU.step_known(cpu, bus, operation, mode, base_cycles)
 
-      if frame_number(bus) == frame,
-        do: run_mmc5_instructions(cpu, bus, rest, signature, frame, count + 1),
-        else: {cpu, bus, count + 1}
+    if frame_marker(bus) !== frame or
+         (mapping_write? and MMC5Profile.signature(bus) != signature) do
+      {cpu, bus, count + 1}
     else
-      {cpu, bus, count}
+      run_mmc5_instructions(cpu, bus, rest, signature, frame, count + 1)
     end
   end
 
   defp run_mmc5_instructions(cpu, bus, _instructions, _signature, _frame, count) when count > 0,
     do: {cpu, bus, count}
-
-  defp frame_number(%{ppu: nil}), do: nil
-  defp frame_number(%{ppu: %{frame_ready: nil}}), do: nil
-  defp frame_number(%{ppu: %{frame_ready: %{number: number}}}), do: number
 end

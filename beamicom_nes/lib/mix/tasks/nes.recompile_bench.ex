@@ -95,11 +95,13 @@ defmodule Mix.Tasks.Nes.RecompileBench do
   defp benchmark_generated(program, start, target, interpreter_ips) do
     {_warm_console, _warm_count} = run_generated(program, start, min(target, 2_000))
     stats_before = Program.statistics(program)
+    {_coverage_console, _coverage_count} = run_generated(program, start, target)
+    stats_after = Program.statistics(program)
+    timed_program = Program.without_statistics(program)
 
     {wall_us, {_console, executed}} =
-      :timer.tc(fn -> run_generated(program, start, target) end)
+      :timer.tc(fn -> run_generated(timed_program, start, target) end)
 
-    stats_after = Program.statistics(program)
     compiled = stats_after.compiled_instructions - stats_before.compiled_instructions
     fallback = stats_after.fallback_instructions - stats_before.fallback_instructions
     measured = rate(executed, wall_us)
