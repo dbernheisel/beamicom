@@ -8,7 +8,7 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
   This shape supports both single-instruction candidates and basic blocks.
   """
 
-  alias Beamicom.NES.{Console, CPU}
+  alias Beamicom.NES.{Bus, Console, CPU}
 
   @cpu_fields [
     :a,
@@ -27,6 +27,8 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
 
   @doc "Run and compare one candidate transition."
   def compare(%Console{} = before, candidate) when is_function(candidate, 1) do
+    before = immutable_ram(before)
+
     case candidate.(before) do
       {%Console{} = actual, count} when is_integer(count) and count > 0 ->
         expected = run_interpreter(before, count)
@@ -55,6 +57,7 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
   @doc "Compare a candidate repeatedly, carrying each side's resulting state."
   def compare_many(%Console{} = console, candidate, transitions)
       when is_function(candidate, 1) and is_integer(transitions) and transitions >= 0 do
+    console = immutable_ram(console)
     do_compare_many(console, console, candidate, transitions, 0)
   end
 
@@ -73,7 +76,7 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
   def snapshot(%Console{cpu: %CPU{} = cpu, bus: bus}) do
     %{
       cpu: Map.take(cpu, @cpu_fields),
-      ram: bus.ram,
+      ram: Bus.ram_binary(bus.ram),
       wram: bus.wram,
       mapper: bus.mapper,
       prg_banks: bus.prg_banks,
@@ -113,6 +116,9 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
   defp run_interpreter(console, count) do
     Enum.reduce(1..count, console, fn _, state -> Console.step(state) end)
   end
+
+  defp immutable_ram(%Console{} = console),
+    do: put_in(console.bus.ram, Bus.ram_binary(console.bus.ram))
 
   defp difference(expected, actual) do
     expected = snapshot(expected)

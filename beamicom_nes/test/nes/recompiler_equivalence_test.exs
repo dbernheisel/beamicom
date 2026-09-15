@@ -37,7 +37,7 @@ defmodule Beamicom.NES.Recompiler.EquivalenceTest do
     end
 
     assert {:ok, result} = Equivalence.compare(start, candidate)
-    assert :binary.at(result.bus.ram, 0x10) == 0x2A
+    assert Bus.peek(result.bus, 0x10) == 0x2A
   end
 
   test "reports the first mismatching field and both snapshots" do

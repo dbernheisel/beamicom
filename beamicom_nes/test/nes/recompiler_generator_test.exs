@@ -32,6 +32,7 @@ defmodule Beamicom.NES.Recompiler.GeneratorTest do
     assert result.cpu.a == 0x2A
     assert result.cpu.x == 0x2A
     assert result.cpu.p == 0x24
+    assert match?({:atomics, reference} when is_reference(reference), result.bus.ram)
 
     assert Program.statistics(program) == %{
              compiled_blocks: 1,

@@ -49,10 +49,11 @@
 5. `Beamicom.NES.Recompiler.Runtime`
    - State conversion, dynamic dispatch, interpreter fallback, memory helpers,
      cycle/interrupt boundary handling, frame-budget yield, and write logging.
-   - Plain RAM is evaluated with `:atomics`; PPU/APU/controller/mapper accesses
-     continue through `Bus.read/2` and `Bus.write/3`. Adoption waits for a
-     reproducible `:atomics` versus binary-copy benchmark because the current bus
-     and save-state design stores RAM as a binary.
+   - Generated execution copies the initial 2 KiB binary RAM into `:atomics`
+     once and retains that store across blocks and interpreter fallbacks.
+     PPU/APU/controller/mapper accesses continue through `Bus.read/2` and
+     `Bus.write/3`; equivalence and persistence boundaries use a stable binary
+     snapshot.
 6. `Mix.Tasks.Nes.Recompile` and `Mix.Tasks.Nes.RecompileBench`
    - Compile/cache a ROM module and report interpreter/recompiled throughput,
      static coverage, fallback counts, and speedup.
@@ -149,6 +150,36 @@ and test those rather than create a second rendering stack:
   `input_output_alias` entry for every one of the 116 donated resident APU/FIR
   leaves. The two 4,096-sample per-frame input lanes remain ordinary parameter
   allocations, as expected.
+
+## Mutable-RAM / hot-semantic checkpoint
+
+- The AOT console now owns persistent `:atomics` CPU RAM. Castlevania's first
+  million instructions are dominated by zero-page traffic: `STA zp`, `LDA zp`,
+  `ADC zp`, and `INC zp` alone account for 467,108 instructions in the captured
+  trace. Generated fallback remains valid because the interpreter bus supports
+  both RAM representations. The equivalence harness always snapshots atomics to
+  a fresh binary so shared mutable state cannot hide a mismatch.
+- `CPU.step_static/6` now has exact specialized clauses for the dominant
+  zero-page, immediate, implied, accumulator, branch, absolute/indexed,
+  JSR/RTS, and load/store paths. They bypass generic address/operation dispatch,
+  embed immediate values, access proven RAM/stack addresses directly, and keep
+  the oracle's pre-access/post-access PPU timing and interrupt checks. Remaining
+  operations still use the generic interpreter semantic path.
+- A fresh 10,000-transition Castlevania III differential run passed. The
+  million-instruction AOT rate rose from about 671k IPS at the original
+  checkpoint to 764k IPS here; the latest single-run ratio was 0.773x because
+  its interpreter sample reached 989k IPS. CPU-only AOT is therefore still a
+  regression.
+- Three warmed 61-frame end-to-end samples with MMC5 video and 48 kHz EXLA
+  audio measured 1.049x, 1.013x, and 1.000x interpreter wall time (median
+  1.013x). Video/audio hashes matched in every run, fallback remained 12 of
+  561,896 instructions, and generated-module compilation was 12.95-13.08 s.
+  This is break-even to a small gain, not yet a compelling speedup.
+- An attempted local helper injection into each generated module was rejected:
+  under Elixir 1.20 its nested generated block observed stale state bindings and
+  yielded after one instruction. The differential tests caught it. Direct
+  per-block semantics remain the next architectural step, but must use explicit
+  state threading rather than nested hygienic quote rebinding.
 
 ## Checkpoints
 

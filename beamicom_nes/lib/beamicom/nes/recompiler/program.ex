@@ -5,14 +5,16 @@ defmodule Beamicom.NES.Recompiler.Program do
   Counters are observational only and do not participate in emulation state.
   """
 
-  alias Beamicom.NES.Console
+  alias Beamicom.NES.{Bus, Console}
 
   @enforce_keys [:module, :rom_hash, :discovery, :stats]
   defstruct [:module, :rom_hash, :discovery, :stats, statistics?: true]
 
   @doc "Dispatch one generated block or one interpreter fallback instruction."
   def step(%__MODULE__{} = program, %Console{} = console) do
-    known? = program.module.known_console?(console)
+    known? = if program.statistics?, do: program.module.known_console?(console), else: false
+
+    console = put_in(console.bus.ram, Bus.mutable_ram(console.bus.ram))
     {next, count} = program.module.dispatch(console)
 
     if program.statistics? do

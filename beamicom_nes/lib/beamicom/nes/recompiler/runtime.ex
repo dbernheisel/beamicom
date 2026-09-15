@@ -5,7 +5,7 @@ defmodule Beamicom.NES.Recompiler.Runtime do
   alias Beamicom.NES.Recompiler.MMC5Profile
 
   @doc false
-  def enter(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}) when is_binary(ram) do
+  def enter(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}) do
     {%{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}, %{bus | ram: ram}}
   end
 
@@ -21,7 +21,7 @@ defmodule Beamicom.NES.Recompiler.Runtime do
 
   @doc false
   def run_block(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}, addresses)
-      when is_binary(ram) and is_list(addresses) do
+      when is_list(addresses) do
     cpu = %{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}
     bus = %{bus | ram: ram}
     {cpu, bus, count} = run_instructions(cpu, bus, addresses, frame_marker(bus), 0)
@@ -30,7 +30,7 @@ defmodule Beamicom.NES.Recompiler.Runtime do
 
   @doc false
   def run_block(a, x, y, sp, p, cycles, ram, {%CPU{} = cpu, bus}, addresses, signature)
-      when is_binary(ram) and is_list(addresses) do
+      when is_list(addresses) do
     cpu = %{cpu | a: a, x: x, y: y, sp: sp, p: p, cycles: cycles}
     bus = %{bus | ram: ram}
 
