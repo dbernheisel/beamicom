@@ -176,6 +176,7 @@ defmodule Beamicom.SNES.APUTest do
 
     assert spc.dsp_events == [{10, 0x4C, 0x01}]
     assert spc.bus_cycle == 0
+    assert spc.bus_counter == nil
     assert spc.cycles == 10
   end
 
@@ -212,6 +213,27 @@ defmodule Beamicom.SNES.APUTest do
     assert spc.a == 2
     assert elem(spc.timer_outputs, 0) == 0
     assert spc.error == nil
+  end
+
+  test "SPC timer target changes wait for exact equality after an 8-bit wrap" do
+    instructions =
+      [{0, 0x8F}, {1, 0x01}, {2, 0xFA}] ++
+        Enum.map(0..60, &{3 + &1, 0x00}) ++ [{64, 0xE4}, {65, 0xFD}]
+
+    spc = %{
+      SPC700.new(spc_ram(instructions), 0)
+      | control: 0x01,
+        timer_targets: {3, 0, 0},
+        timer_stages: {2, 0, 0}
+    }
+
+    spc = SPC700.run(spc, 130)
+
+    assert spc.a == 0
+    assert spc.timer_targets == {1, 0, 0}
+    assert spc.timer_stages == {3, 0, 0}
+    assert spc.timer_phase == {2, 0, 0}
+    assert spc.timer_outputs == {0, 0, 0}
   end
 
   test "SPC fetches the enabled internal IPL ROM over underlying RAM" do

@@ -37,7 +37,5 @@ mix test --include conformance test/beamicom/snes/gilyon_conformance_rom_test.ex
 ```
 
 The result decoder reads the ROM's ASCII BG1 tilemap protocol and stops as
-soon as it sees `Success` or `Failed`. At the time of vendoring, Beamicom
-reaches failures at CPU basic test `0007`, CPU full test `0003`, and SPC test
-`0087`; the tagged assertions deliberately remain failing until those emulator
-defects are corrected.
+soon as it sees `Success` or `Failed`. All three tagged assertions currently
+reach `Success` within their 240-frame bound.

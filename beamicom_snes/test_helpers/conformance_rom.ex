@@ -109,6 +109,9 @@ defmodule Beamicom.SNES.ConformanceROM do
   def failure_screen?(%{data: <<red, green, blue, _::binary>>}),
     do: red > 0 and green == 0 and blue == 0
 
+  def success_screen?(%{data: <<red, green, blue, _::binary>>}),
+    do: red == 0 and green == 0 and blue > 0
+
   defp run_frames(machine, 0, frame), do: %{machine: machine, frame: frame}
 
   defp run_frames(machine, remaining, _frame) do

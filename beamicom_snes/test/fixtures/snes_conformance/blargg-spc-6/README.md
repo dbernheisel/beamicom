@@ -35,7 +35,8 @@ can be run with:
 mix test --include conformance test/beamicom/snes/conformance_rom_test.exs
 ```
 
-The conformance checks intentionally become red while an emulation defect is
-present. At the time of vendoring, the timer and memory-access ROMs reach their
-red failure screens; the DSP and SMP suites are still running at the bounded
-120-frame checkpoint.
+The tagged checks boot all four ROMs, exercise both processors, and verify that
+none reaches Blargg's red failure screen through the bounded 120-frame
+checkpoint. They also assert the explicit blue success screen for the finite
+timer and memory-access suites; the longer DSP and SMP stress suites are still
+running at the bounded checkpoint.

@@ -16,7 +16,7 @@ defmodule Beamicom.SNES.PPU do
   import Bitwise
 
   @compile {:no_warn_undefined, Beamicom.SNES.Nx.PPURenderer}
-  @compile {:inline, vram_byte: 2}
+  @compile {:inline, vram_byte: 2, blend_component: 4}
 
   @width 256
   @render_workers 4
@@ -916,7 +916,7 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp render_color(
-         %{color_window_select: select, window_select: window_select} = ppu,
+         %{color_window_select: select} = ppu,
          palette,
          rgb_palette,
          components,
@@ -924,7 +924,7 @@ defmodule Beamicom.SNES.PPU do
          {sub_layer, sub_index},
          _x
        )
-       when (select &&& 0xF0) == 0 and (elem(window_select, 2) &&& 0xF0) == 0 do
+       when (select &&& 0xF0) == 0 do
     main = palette_color(ppu, palette, layer, main_index)
 
     if color_math_enabled?(ppu.color_math, layer) do
@@ -953,6 +953,7 @@ defmodule Beamicom.SNES.PPU do
     clip_mode = ppu.color_window_select >>> 6 &&& 0x03
     prevent_mode = ppu.color_window_select >>> 4 &&& 0x03
     color_window? = window_masked?(ppu, :color, x)
+    math? = color_math_enabled?(ppu.color_math, layer)
 
     main =
       if window_mode_applies?(clip_mode, color_window?),
@@ -960,8 +961,7 @@ defmodule Beamicom.SNES.PPU do
         else: palette_color(ppu, palette, layer, main_index)
 
     color =
-      if color_math_enabled?(ppu.color_math, layer) and
-           not window_mode_applies?(prevent_mode, color_window?) do
+      if math? and not window_mode_applies?(prevent_mode, color_window?) do
         second =
           if (ppu.color_window_select &&& 0x02) != 0,
             do: palette_color(ppu, palette, sub_layer, sub_index),
@@ -972,10 +972,9 @@ defmodule Beamicom.SNES.PPU do
         main
       end
 
-    if color == main and not color_math_enabled?(ppu.color_math, layer) and
-         not direct_color?(ppu, layer),
-       do: elem(rgb_palette, main_index &&& 0xFF),
-       else: color_to_rgb(color, components)
+    if color == main and not math? and not direct_color?(ppu, layer),
+      do: elem(rgb_palette, main_index &&& 0xFF),
+      else: color_to_rgb(color, components)
   end
 
   defp palette_color(ppu, palette, layer, index) when ppu.bg_mode == 7 and layer == 0 do
@@ -1057,14 +1056,25 @@ defmodule Beamicom.SNES.PPU do
     subtract? = (math &&& 0x80) != 0
     half? = (math &&& 0x40) != 0
 
-    blend = fn shift ->
-      a = first >>> shift &&& 0x1F
-      b = second >>> shift &&& 0x1F
-      value = if subtract?, do: max(a - b, 0), else: min(a + b, 31)
-      if half?, do: value >>> 1, else: value
-    end
+    red = blend_component(first &&& 0x1F, second &&& 0x1F, subtract?, half?)
 
-    blend.(0) ||| blend.(5) <<< 5 ||| blend.(10) <<< 10
+    green =
+      blend_component(first >>> 5 &&& 0x1F, second >>> 5 &&& 0x1F, subtract?, half?)
+
+    blue =
+      blend_component(first >>> 10 &&& 0x1F, second >>> 10 &&& 0x1F, subtract?, half?)
+
+    red ||| green <<< 5 ||| blue <<< 10
+  end
+
+  defp blend_component(first, second, true, half?) do
+    value = max(first - second, 0)
+    if half?, do: value >>> 1, else: value
+  end
+
+  defp blend_component(first, second, false, half?) do
+    value = min(first + second, 31)
+    if half?, do: value >>> 1, else: value
   end
 
   defp color_to_rgb(color, components) do

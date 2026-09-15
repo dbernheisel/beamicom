@@ -38,4 +38,16 @@ defmodule Beamicom.SNES.ConformanceROMTest do
              "#{fixture} reached Blargg's red failure screen"
     end
   end
+
+  for {fixture, frames} <- [spc_timer: 60, spc_mem_access_times: 400] do
+    @tag :conformance
+    @tag timeout: 120_000
+    test "#{fixture} reaches Blargg's success screen within #{frames} frames" do
+      fixture = unquote(fixture)
+      %{frame: frame} = ConformanceROM.run_frames!(fixture, unquote(frames))
+
+      assert ConformanceROM.success_screen?(frame),
+             "#{fixture} did not reach Blargg's blue success screen"
+    end
+  end
 end

@@ -166,6 +166,19 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(frame.data, 0, 3) == <<123, 0, 123>>
   end
 
+  test "ignores color-window selection when clip and prevent modes are disabled" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> write_cgram_color(0, 0x001F)
+
+    baseline = PPU.render_frame(ppu)
+    configured = ppu |> PPU.write(0x2125, 0xB0) |> PPU.render_frame()
+
+    assert binary_part(baseline.data, 0, 3) == <<255, 0, 0>>
+    assert configured.data == baseline.data
+  end
+
   test "forced blank takes the allocation-light solid-frame path" do
     frame = PPU.render_frame(PPU.new())
     assert frame.data == :binary.copy(<<0, 0, 0>>, 256 * 224)
