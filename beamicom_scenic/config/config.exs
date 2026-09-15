@@ -16,7 +16,7 @@ if System.get_env("BEAMICOM_SCENIC_NX") in ["1", "true", "yes", "on"] do
 
   config :beamicom_gbc,
     ppu_renderer: Beamicom.GB.Nx.PPURenderer,
-    apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+    apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 end
 
 # Static asset library (fonts/images) — needed by Scenic text/button components.

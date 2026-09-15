@@ -98,8 +98,8 @@ defmodule Beamicom.GB.CPU do
   def step(%__MODULE__{} = cpu, %Bus{interrupt_flags: 0} = bus),
     do: step_without_interrupt(cpu, bus)
 
-  def step(%__MODULE__{} = cpu, %Bus{} = bus) do
-    case {Bus.pending_interrupts(bus), cpu.ime_state, cpu.run_state} do
+  def step(%__MODULE__{} = cpu, %Bus{ie: ie, interrupt_flags: flags} = bus) do
+    case {ie &&& flags &&& 0x1F, cpu.ime_state, cpu.run_state} do
       {0, _, _} -> step_without_interrupt(cpu, bus)
       {pending, :enabled, _} -> service_interrupt(cpu, bus, pending)
       {_pending, _, :halted} -> step_without_interrupt(%{cpu | run_state: :running}, bus)
@@ -244,7 +244,7 @@ defmodule Beamicom.GB.CPU do
 
   # x = 1: 8-bit loads, with $76 repurposed as HALT.
   defp execute(cpu, bus, 0x76, 1, _y, _z, _p, _q) do
-    if cpu.ime_state != :enabled and Bus.pending_interrupts(bus) != 0,
+    if cpu.ime_state != :enabled and (bus.ie &&& bus.interrupt_flags &&& 0x1F) != 0,
       do: {%{cpu | halt_bug: true}, bus, 1},
       else: {%{cpu | run_state: :halted}, bus, 1}
   end

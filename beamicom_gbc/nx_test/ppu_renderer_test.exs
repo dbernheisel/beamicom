@@ -41,14 +41,6 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
     end
   end
 
-  test "block APU mixing is exact for routed audible channel output" do
-    native = audible_audio(:native)
-    accelerated = audible_audio(Beamicom.GB.Nx.APUBlockRenderer)
-
-    assert accelerated == native
-    refute native == :binary.copy(<<0>>, byte_size(native))
-  end
-
   test "event-block APU synthesis is exact for routed audible channel output" do
     native = audible_audio(:native)
     accelerated = audible_audio(Beamicom.GB.Nx.APUSynthRenderer)
@@ -61,10 +53,24 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
     assert complex_audio(Beamicom.GB.Nx.APUSynthRenderer) == complex_audio(:native)
   end
 
+  test "event-block synthesis keeps integer-only resident state" do
+    state = Beamicom.GB.Nx.APUSynthRenderer.prepare(APU.new(model: :cgb))
+
+    assert map_size(state) > 0
+    assert Enum.all?(state, fn {_key, tensor} -> Nx.type(tensor) == {:s, 32} end)
+
+    restored =
+      state
+      |> Beamicom.GB.Nx.APUSynthRenderer.snapshot()
+      |> Beamicom.GB.Nx.APUSynthRenderer.restore()
+
+    assert Enum.all?(restored, fn {_key, tensor} -> Nx.type(tensor) == {:s, 32} end)
+  end
+
   test "Nx wrapper compiles the core against both optional renderers" do
     assert Beamicom.GB.Nx.backends() == %{
              ppu: Beamicom.GB.Nx.PPURenderer,
-             apu: Beamicom.GB.Nx.APUBlockRenderer
+             apu: Beamicom.GB.Nx.APUSynthRenderer
            }
   end
 
@@ -186,6 +192,19 @@ defmodule Beamicom.GB.Nx.PPURendererTest do
       if model == :cgb do
         {ppu, []} = PPU.write(ppu, 0xFF68, 0)
         {ppu, []} = PPU.write(ppu, 0xFF69, 0x1F)
+        ppu
+      else
+        ppu
+      end
+
+    {ppu, _signals} = PPU.tick(ppu, 80 * 456 + PPU.hblank_dot(ppu, 80) - ppu.clock)
+    {ppu, []} = PPU.write(ppu, 0x8000, 0)
+    {ppu, []} = PPU.write(ppu, 0xFE00, 56)
+
+    ppu =
+      if model == :cgb do
+        {ppu, []} = PPU.write(ppu, 0xFF68, 0)
+        {ppu, []} = PPU.write(ppu, 0xFF69, 0)
         ppu
       else
         ppu

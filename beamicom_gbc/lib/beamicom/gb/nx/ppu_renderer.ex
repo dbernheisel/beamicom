@@ -5,8 +5,9 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     The live PPU sends a VRAM/OAM/palette snapshot, nine control bytes per
     scanline, and the memory writes that become visible during the frame. EXLA
-    reconstructs scanline memory, performs tile-map lookup, evaluates all forty
-    OAM entries, applies the first-ten rule, and composes all pixels.
+    reconstructs scanline memory once before performing tile-map lookup. Sprite
+    rendering selects the first ten line-eligible OAM entries, rasterizes only
+    their eight-pixel spans, and composes the complete frame.
     """
 
     import Nx.Defn
@@ -62,12 +63,12 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defn render_dmg_static(controls, vram, oam, palettes) do
       events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
-      render_dmg(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+      render_dmg_frame(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
     end
 
     defn render_cgb_static(controls, vram, oam, palettes) do
       events = Nx.tensor([[0, 0, 0, 0]], type: :s32)
-      render_cgb(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+      render_cgb_frame(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
     end
 
     defn render_dmg_background_static(controls, vram, _oam, _palettes) do
@@ -130,7 +131,12 @@ if Code.ensure_loaded?(Nx.Defn) do
       )
     end
 
-    defn render_dmg(controls, vram, oam, _palettes, events, event_count) do
+    defn render_dmg(controls, vram, oam, palettes, events, event_count) do
+      {vram, oam, palettes} = frame_memories(vram, oam, palettes, events, event_count)
+      render_dmg_frame(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+    end
+
+    defnp render_dmg_frame(controls, vram, oam, _palettes, events, event_count) do
       {bg_color, _bg_attrs} = background(vram, controls, events, event_count, false)
 
       {object_color, object_attrs, occupied} =
@@ -153,6 +159,11 @@ if Code.ensure_loaded?(Nx.Defn) do
     end
 
     defn render_cgb(controls, vram, oam, palettes, events, event_count) do
+      {vram, oam, palettes} = frame_memories(vram, oam, palettes, events, event_count)
+      render_cgb_frame(controls, vram, oam, palettes, events, Nx.tensor(0, type: :s32))
+    end
+
+    defnp render_cgb_frame(controls, vram, oam, palettes, events, event_count) do
       {bg_color, bg_attrs} = background(vram, controls, events, event_count, true)
 
       {object_color, object_attrs, occupied} =
@@ -272,7 +283,22 @@ if Code.ensure_loaded?(Nx.Defn) do
       height = Nx.select(band(column(controls, 0), 0x04) == 0, 8, 16)
       height = Nx.broadcast(height, {@height, 40})
       in_range = line >= y and line < y + height
-      selected = Nx.cumulative_sum(Nx.as_type(in_range, :s32), axis: 1) <= 10 and in_range
+
+      oam_indexes = Nx.iota({@height, 40}, axis: 1, type: :s32)
+
+      selected_indexes =
+        Nx.select(in_range, oam_indexes, 40)
+        |> Nx.argsort(axis: 1, stable: true)
+        |> Nx.slice_along_axis(0, 10, axis: 1)
+
+      selected = Nx.take_along_axis(in_range, selected_indexes, axis: 1)
+      y = Nx.take_along_axis(y, selected_indexes, axis: 1)
+      raw_x = Nx.take_along_axis(raw_x, selected_indexes, axis: 1)
+      left = Nx.take_along_axis(left, selected_indexes, axis: 1)
+      tile_number = Nx.take_along_axis(tile_number, selected_indexes, axis: 1)
+      attrs = Nx.take_along_axis(attrs, selected_indexes, axis: 1)
+      height = Nx.take_along_axis(height, selected_indexes, axis: 1)
+      line = Nx.take_along_axis(line, selected_indexes, axis: 1)
 
       source_y = line - y
       source_y = Nx.select(band(attrs, 0x40) != 0, height - 1 - source_y, source_y)
@@ -286,15 +312,14 @@ if Code.ensure_loaded?(Nx.Defn) do
 
       address = tile_number * 16 + band(source_y, 7) * 2
       address = address + Nx.select(cgb? and band(attrs, 0x08) != 0, 0x2000, 0)
-      sprite_lines = Nx.iota({@height, 40}, axis: 0, type: :s32)
+      sprite_lines = Nx.iota({@height, 10}, axis: 0, type: :s32)
       low = timed_read(vram, address, sprite_lines, 0, events, event_count)
       high = timed_read(vram, address + 1, sprite_lines, 0, events, event_count)
 
-      x = Nx.iota({@height, 40, @width}, axis: 2, type: :s32)
-      source_x = x - Nx.new_axis(left, 2)
-      safe_x = Nx.clip(source_x, 0, 7)
-      attrs3 = Nx.new_axis(attrs, 2) |> Nx.broadcast({@height, 40, @width})
-      bit = Nx.select(band(attrs3, 0x20) != 0, safe_x, 7 - safe_x)
+      source_x = Nx.iota({@height, 10, 8}, axis: 2, type: :s32)
+      screen_x = source_x + Nx.new_axis(left, 2)
+      attrs3 = Nx.new_axis(attrs, 2) |> Nx.broadcast({@height, 10, 8})
+      bit = Nx.select(band(attrs3, 0x20) != 0, source_x, 7 - source_x)
 
       color =
         bor(
@@ -302,27 +327,87 @@ if Code.ensure_loaded?(Nx.Defn) do
           band(shr(Nx.new_axis(high, 2), bit), 1) * 2
         )
 
-      enabled = (band(column(controls, 0), 0x02) != 0) |> Nx.new_axis(1)
+      enabled = (band(column(controls, 0), 0x02) != 0) |> Nx.new_axis(2)
 
       visible =
-        Nx.new_axis(selected, 2) and enabled and source_x >= 0 and source_x < 8 and color != 0
+        Nx.new_axis(selected, 2) and enabled and screen_x >= 0 and screen_x < @width and
+          color != 0
 
-      indexes = Nx.iota({@height, 40}, axis: 1, type: :s32)
-      score = if cgb?, do: indexes, else: raw_x * 64 + indexes
-      score = Nx.new_axis(score, 2) |> Nx.broadcast({@height, 40, @width})
-      winner = Nx.argmin(Nx.select(visible, score, 1_000_000), axis: 1) |> Nx.new_axis(1)
-      color = Nx.take_along_axis(color, winner, axis: 1) |> Nx.squeeze(axes: [1])
+      score = if cgb?, do: selected_indexes, else: raw_x * 64 + selected_indexes
+      rasterize_objects(color, attrs3, screen_x, visible, score)
+    end
 
-      attrs =
-        Nx.take_along_axis(Nx.broadcast(attrs3, {@height, 40, @width}), winner, axis: 1)
-        |> Nx.squeeze(axes: [1])
+    deftransformp rasterize_objects(color, attrs, screen_x, visible, score) do
+      canvas_width = @width + 8
+      empty_score = Nx.broadcast(Nx.tensor(1_000_000, type: :s32), {@height, canvas_width})
+      empty_value = Nx.broadcast(Nx.tensor(0, type: :s32), {@height, canvas_width})
+      lines = Nx.iota({@height, 8}, axis: 0, type: :s32)
+      sinks = Nx.add(@width, Nx.iota({@height, 8}, axis: 1, type: :s32))
 
-      {color, attrs, Nx.any(visible, axes: [1])}
+      {best, colors, attributes} =
+        Enum.reduce(0..9, {empty_score, empty_value, empty_value}, fn sprite,
+                                                                      {best, colors, attributes} ->
+          sprite_visible = visible[[.., sprite, ..]]
+          targets = Nx.select(sprite_visible, screen_x[[.., sprite, ..]], sinks)
+          indices = Nx.stack([lines, targets], axis: 2) |> Nx.reshape({@height * 8, 2})
+
+          candidate_score =
+            score[[.., sprite]]
+            |> Nx.reshape({@height, 1})
+            |> Nx.broadcast({@height, 8})
+
+          sprite_score = Nx.select(sprite_visible, candidate_score, 1_000_000)
+
+          layer_score = Nx.indexed_put(empty_score, indices, Nx.flatten(sprite_score))
+
+          layer_color =
+            Nx.indexed_put(empty_value, indices, Nx.flatten(color[[.., sprite, ..]]))
+
+          layer_attrs =
+            Nx.indexed_put(empty_value, indices, Nx.flatten(attrs[[.., sprite, ..]]))
+
+          better = Nx.less(layer_score, best)
+
+          {Nx.select(better, layer_score, best), Nx.select(better, layer_color, colors),
+           Nx.select(better, layer_attrs, attributes)}
+        end)
+
+      best = best[[.., 0..(@width - 1)]]
+      colors = colors[[.., 0..(@width - 1)]]
+      attributes = attributes[[.., 0..(@width - 1)]]
+      {colors, attributes, Nx.less(best, 1_000_000)}
+    end
+
+    defnp frame_memories(vram, oam, palettes, events, event_count) do
+      vram = vram |> Nx.as_type(:s32) |> Nx.broadcast({@height, @vram_size})
+      oam = oam |> Nx.as_type(:s32) |> Nx.broadcast({@height, @oam_size})
+      palettes = palettes |> Nx.as_type(:s32) |> Nx.broadcast({@height, @palette_size})
+
+      {_, vram, oam, palettes, _, _} =
+        while {index = Nx.tensor(0, type: :s32), vram, oam, palettes, events, event_count},
+              index < event_count do
+          event = events[index]
+          vram = apply_memory_event(vram, event, 0, @vram_size)
+          oam = apply_memory_event(oam, event, 1, @oam_size)
+          palettes = apply_memory_event(palettes, event, 2, @palette_size)
+          {index + 1, vram, oam, palettes, events, event_count}
+        end
+
+      {vram, oam, palettes}
+    end
+
+    defnp apply_memory_event(memory, event, kind, size) do
+      lines = Nx.iota({@height}, type: :s32)
+      address = Nx.clip(event[2], 0, size - 1) |> Nx.broadcast({@height})
+      indices = Nx.stack([lines, address], axis: 1)
+      current = Nx.gather(memory, indices)
+      active = event[1] == kind and lines >= event[0]
+      Nx.indexed_put(memory, indices, Nx.select(active, event[3], current))
     end
 
     defnp timed_read(memory, addresses, lines, kind, events, event_count) do
       addresses = Nx.as_type(addresses, :s32)
-      values = Nx.take(memory, addresses) |> Nx.as_type(:s32)
+      values = memory_read(memory, addresses, lines) |> Nx.as_type(:s32)
 
       {_, values, _, _, _, _} =
         while {index = Nx.tensor(0, type: :s32), values, addresses, lines, events, event_count},
@@ -334,6 +419,15 @@ if Code.ensure_loaded?(Nx.Defn) do
         end
 
       values
+    end
+
+    deftransformp memory_read(memory, addresses, lines) do
+      if Nx.rank(memory) == 1 do
+        Nx.take(memory, addresses)
+      else
+        axis = Nx.rank(addresses)
+        Nx.gather(memory, Nx.stack([Nx.as_type(lines, :s32), addresses], axis: axis))
+      end
     end
 
     defnp palette_gather(palettes, indexes) do
@@ -385,7 +479,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp compiled(model, kind, args) do
       key =
-        {__MODULE__, model, kind, :frame_memory_v2, Beamicom.GB.Nx.compiler_options()}
+        {__MODULE__, model, kind, :frame_memory_v4, Beamicom.GB.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->

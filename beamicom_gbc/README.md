@@ -7,7 +7,7 @@ shared coarse-grained video, input, and lifecycle boundaries.
 
 ## Optional Nx renderers
 
-The package also contains frame-wide PPU and block APU renderers backed by Nx
+The package also contains frame-wide PPU and event-driven APU renderers backed by Nx
 and a configured compiler. A consuming application opts in by including those
 optional dependencies directly and selecting the modules before the core compiles:
 
@@ -22,15 +22,15 @@ config :nx, :default_defn_options, compiler: EXLA, client: :host
 
 config :beamicom_gbc,
   ppu_renderer: Beamicom.GB.Nx.PPURenderer,
-  apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+  apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 ```
 
 Native-only consumers omit Nx and EXLA, and the optional modules are not
 compiled. Renderer selection is fixed at compile time. The PPU graph receives
 frame-start VRAM, OAM, palette RAM, scanline controls, and timestamped visible
 writes, then performs tile lookup and sprite evaluation for the 160×144 frame.
-`Beamicom.GB.Nx.APUSynthRenderer` remains available for full event-block audio
-synthesis; the default Nx APU renderer batches resolved channel levels.
+The Nx APU records control epochs and synthesizes the complete frame's samples
+with integer tensor operations.
 
 See [the Nx renderer design and benchmarks](NX.md) for payload details and
 measured single-instance results.
@@ -153,3 +153,16 @@ data.
 ```sh
 mix test
 ```
+
+For performance work, replaying a share-image state avoids measuring only a
+game's boot/intro path. The state contains the complete machine snapshot, while
+the separate ROM argument makes the cartridge identity check explicit:
+
+```sh
+mix gb.bench /path/to/game.gbc --state /path/to/gameplay.png \
+  --frames 240 --repeats 5
+```
+
+The task performs an untimed warmup, rejects mismatched ROM/state pairs and
+non-deterministic output, and reports the starting frame, input hashes, every
+run, and median FPS.

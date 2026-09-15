@@ -621,6 +621,7 @@ defmodule Beamicom.GB.Bus do
           ppu:
             %PPU{
               clock: clock,
+              transfer_end: transfer_end,
               registers: {lcdc, _, _, _, _, _, _, _, _, _}
             } = ppu,
           control: control,
@@ -639,7 +640,7 @@ defmodule Beamicom.GB.Bus do
     dots = if double_speed?, do: div(total, 2), else: clocks
     phase = if double_speed?, do: rem(total, 2), else: 0
     dot = rem(clock, @dots_per_line)
-    hblank_dot = if dot < @oam_dot, do: @dots_per_line, else: PPU.hblank_dot(ppu)
+    hblank_dot = if dot < @oam_dot, do: @dots_per_line, else: transfer_end
 
     before_boundary? =
       (lcdc &&& 0x80) == 0 or

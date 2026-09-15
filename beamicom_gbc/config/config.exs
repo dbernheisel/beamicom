@@ -5,6 +5,6 @@ import Config
 if System.get_env("BEAMICOM_NX") in ["1", "true", "yes", "on"] do
   config :beamicom_gbc,
     ppu_renderer: Beamicom.GB.Nx.PPURenderer,
-    apu_renderer: Beamicom.GB.Nx.APUBlockRenderer,
+    apu_renderer: Beamicom.GB.Nx.APUSynthRenderer,
     allow_runtime_renderers: config_env() == :test
 end

@@ -2,7 +2,7 @@ defmodule Beamicom.GB.MachineTest do
   use ExUnit.Case, async: true
 
   import Bitwise
-  alias Beamicom.GB.{Bus, Machine, PPU}
+  alias Beamicom.GB.{Bus, CPU, Machine, PPU}
 
   @frame_dots 456 * 154
 
@@ -41,6 +41,25 @@ defmodule Beamicom.GB.MachineTest do
     assert {PPU.ly(normal_bus.ppu), PPU.dot(normal_bus.ppu)} == {0, 0}
     assert {PPU.ly(double_bus.ppu), PPU.dot(double_bus.ppu)} == {0, 0}
     assert normal_bus.divider != double_bus.divider
+  end
+
+  test "HALT fast-forward matches one-M-cycle stepping at both CPU speeds" do
+    {:ok, %Machine{cpu: %CPU{} = cpu} = machine} = Machine.load(rom(0x80))
+
+    normal_bus = %{machine.bus | ie: 0x01, interrupt_flags: 0}
+
+    double_bus =
+      normal_bus
+      |> Bus.write(0xFF4D, 1)
+      |> then(&elem(Bus.stop(&1), 1))
+
+    for bus <- [normal_bus, double_bus] do
+      halted = %{machine | cpu: %CPU{cpu | run_state: :halted}, bus: bus}
+      target = halted.bus.ppu.frame_number
+
+      assert Machine.run_until_frame(halted) ==
+               run_until_frame_one_cycle_at_a_time(halted, target)
+    end
   end
 
   test "PPU STAT and VBlank signals become CPU-visible IF requests" do
@@ -215,6 +234,18 @@ defmodule Beamicom.GB.MachineTest do
   defp step(machine, count) do
     {machine, _m_cycles} = Machine.step(machine)
     step(machine, count - 1)
+  end
+
+  defp run_until_frame_one_cycle_at_a_time(machine, target) do
+    {machine, _m_cycles} = Machine.step(machine)
+
+    case machine.bus.ppu do
+      %PPU{frame_number: number, frame: frame} when number > target ->
+        {:ok, machine, number - 1, frame}
+
+      _ppu ->
+        run_until_frame_one_cycle_at_a_time(machine, target)
+    end
   end
 
   defp rom(cgb_flag \\ 0) do

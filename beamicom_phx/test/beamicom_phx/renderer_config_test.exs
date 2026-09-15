@@ -5,6 +5,6 @@ defmodule BeamicomPhx.RendererConfigTest do
     assert Beamicom.NES.PPU.configured_renderer() == Beamicom.NES.Nx.PPURenderer
     assert Beamicom.NES.Bus.configured_apu_renderer() == Beamicom.NES.Nx.APUBlockRenderer
     assert Beamicom.GB.PPU.configured_renderer() == Beamicom.GB.Nx.PPURenderer
-    assert Beamicom.GB.APU.configured_renderer() == Beamicom.GB.Nx.APUBlockRenderer
+    assert Beamicom.GB.APU.configured_renderer() == Beamicom.GB.Nx.APUSynthRenderer
   end
 end

@@ -12,7 +12,12 @@ defmodule Beamicom.GB.Machine do
 
   alias Beamicom.GB.{APU, Bus, CPU, Cartridge, PPU}
 
+  import Bitwise
+
   @max_instructions_per_frame 1_000_000
+  @dots_per_line 456
+  @vblank_start @dots_per_line * 144
+  @interrupt_timer 0x04
 
   @enforce_keys [:cpu, :bus, :model]
   defstruct @enforce_keys
@@ -80,16 +85,64 @@ defmodule Beamicom.GB.Machine do
 
   defp next_frame(machine, _target, 0), do: {:error, :frame_timeout, machine}
 
+  # HALT-heavy games otherwise return through CPU.step/2 once per idle
+  # M-cycle. With no enabled timer interrupt, the CPU cannot wake before the
+  # next LCD boundary, so advance there in one exact device tick. The consumed
+  # limit still matches the number of one-M-cycle HALT iterations replaced.
+  defp next_frame(
+         %__MODULE__{
+           cpu: %CPU{run_state: :halted},
+           bus:
+             %Bus{
+               ie: ie,
+               interrupt_flags: flags,
+               oam_dma: nil,
+               hdma_request: nil,
+               hblank_pending: 0,
+               ppu: %PPU{registers: {lcdc, _, _, _, _, _, _, _, _, _}}
+             } = bus
+         } = machine,
+         target,
+         remaining
+       )
+       when (ie &&& flags &&& 0x1F) == 0 and (ie &&& @interrupt_timer) == 0 and
+              (lcdc &&& 0x80) != 0 do
+    m_cycles = min(halt_m_cycles_to_lcd_event(bus), remaining)
+    machine = %{machine | bus: Bus.idle(bus, m_cycles)}
+    continue_to_frame(machine, target, remaining - m_cycles)
+  end
+
   defp next_frame(machine, target, remaining) do
     {machine, _m_cycles} = step(machine)
+    continue_to_frame(machine, target, remaining - 1)
+  end
 
+  defp continue_to_frame(machine, target, remaining) do
     case machine.bus.ppu do
       %PPU{frame_number: number, frame: frame} when number > target ->
         {:ok, machine, number - 1, frame}
 
       _ppu ->
-        next_frame(machine, target, remaining - 1)
+        next_frame(machine, target, remaining)
     end
+  end
+
+  defp halt_m_cycles_to_lcd_event(
+         %Bus{ppu: %PPU{clock: clock, transfer_end: transfer_end}} =
+           bus
+       ) do
+    dot = rem(clock, @dots_per_line)
+
+    dots =
+      cond do
+        clock >= @vblank_start -> @dots_per_line - dot
+        dot < 80 -> 80 - dot
+        dot < transfer_end -> transfer_end - dot
+        true -> @dots_per_line - dot
+      end
+
+    dots_per_m_cycle = if Bus.double_speed?(bus), do: 2, else: 4
+    div(dots + dots_per_m_cycle - 1, dots_per_m_cycle)
   end
 
   defp boot_options(opts) do

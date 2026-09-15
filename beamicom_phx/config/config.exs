@@ -18,7 +18,7 @@ config :beamicom_nes,
 
 config :beamicom_gbc,
   ppu_renderer: Beamicom.GB.Nx.PPURenderer,
-  apu_renderer: Beamicom.GB.Nx.APUBlockRenderer
+  apu_renderer: Beamicom.GB.Nx.APUSynthRenderer
 
 # Configure the endpoint
 config :beamicom_phx, BeamicomPhxWeb.Endpoint,

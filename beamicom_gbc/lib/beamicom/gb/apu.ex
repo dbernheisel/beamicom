@@ -17,7 +17,7 @@ defmodule Beamicom.GB.APU do
 
   import Bitwise
 
-  @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
+  @compile {:no_warn_undefined, Beamicom.GB.Nx.APUSynthRenderer}
   @renderer Application.compile_env(
               :beamicom_gbc,
               :apu_renderer,
@@ -86,8 +86,8 @@ defmodule Beamicom.GB.APU do
     %{apu | renderer_state: state}
   end
 
-  @doc "Selects inline native mixing or an optional block renderer."
-  @spec set_renderer(t(), :native | :nx_block | module()) :: t()
+  @doc "Selects inline native mixing or an optional deferred renderer."
+  @spec set_renderer(t(), :native | :nx | module()) :: t()
   def set_renderer(apu, :native),
     do: %{
       apu
@@ -100,8 +100,8 @@ defmodule Beamicom.GB.APU do
         render_dots: 0
     }
 
-  def set_renderer(apu, :nx_block),
-    do: set_renderer(apu, Beamicom.GB.Nx.APUBlockRenderer)
+  def set_renderer(apu, :nx),
+    do: set_renderer(apu, Beamicom.GB.Nx.APUSynthRenderer)
 
   def set_renderer(apu, renderer) when is_atom(renderer) do
     configured = %{

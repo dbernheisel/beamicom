@@ -1,23 +1,30 @@
 defmodule Mix.Tasks.Gb.Bench do
   @shortdoc "Measure deterministic uncapped Game Boy audio/video emulation"
   @moduledoc """
-  mix gb.bench ROM [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|elixir_block|nx_block|nx_synth]
+  mix gb.bench ROM [--state SAVE.png] [--frames 120] [--repeats 3] [--renderer native|nx] [--audio-renderer native|elixir_block|nx]
 
   Runs from either the dependency-free core or an optional renderer project.
   One complete untimed run warms loaded code and compiled renderer programs.
+  A share-image state can be supplied to replay gameplay instead of the boot
+  sequence; its cartridge identity must match ROM.
   """
 
   use Mix.Task
 
   @compile {:no_warn_undefined, Beamicom.GB.Nx.PPURenderer}
-  @compile {:no_warn_undefined, Beamicom.GB.Nx.APUBlockRenderer}
   @compile {:no_warn_undefined, Beamicom.GB.Nx.APUSynthRenderer}
 
   @impl true
   def run(args) do
     {opts, [path], []} =
       OptionParser.parse(args,
-        strict: [frames: :integer, repeats: :integer, renderer: :string, audio_renderer: :string]
+        strict: [
+          state: :string,
+          frames: :integer,
+          repeats: :integer,
+          renderer: :string,
+          audio_renderer: :string
+        ]
       )
 
     Mix.Task.run("app.start")
@@ -39,23 +46,27 @@ defmodule Mix.Tasks.Gb.Bench do
     ensure_compiled!(:ppu, renderer, configured_ppu)
     ensure_compiled!(:apu, audio_renderer, configured_apu)
     media = File.read!(path)
-    execute(media, frames)
-    runs = for _ <- 1..repeats, do: execute(media, frames)
+    {machine, state_sha256} = load_machine!(media, path, Keyword.get(opts, :state))
+    execute(machine, frames)
+    runs = for _ <- 1..repeats, do: execute(machine, frames)
 
     hashes = Enum.map(runs, &{&1.video_sha256, &1.audio_sha256})
     if length(Enum.uniq(hashes)) != 1, do: Mix.raise("non-deterministic output")
+    median_fps = runs |> Enum.map(& &1.fps) |> Enum.sort() |> median()
 
     IO.inspect(%{
       rom_sha256: hash(media),
+      state_sha256: state_sha256,
+      start_frame: machine.bus.ppu.frame_number,
       frames: frames,
       renderer: renderer_name(renderer),
       audio_renderer: renderer_name(audio_renderer),
+      median_fps: median_fps,
       runs: runs
     })
   end
 
-  defp execute(media, frames) do
-    {:ok, machine} = Beamicom.GB.System.load(media, [])
+  defp execute(machine, frames) do
     :erlang.garbage_collect()
 
     {microseconds, {_machine, video, audio}} =
@@ -74,6 +85,29 @@ defmodule Mix.Tasks.Gb.Bench do
     }
   end
 
+  defp load_machine!(media, _rom_path, nil) do
+    case Beamicom.GB.System.load(media, []) do
+      {:ok, machine} -> {machine, nil}
+      {:error, reason} -> Mix.raise("could not load ROM: #{inspect(reason)}")
+    end
+  end
+
+  defp load_machine!(media, rom_path, state_path) do
+    state = File.read!(state_path)
+
+    case Beamicom.GB.ShareImage.load_image(state, [Path.dirname(rom_path)]) do
+      {:ok, machine} ->
+        if hash(machine.bus.cartridge.rom) == hash(media) do
+          {machine, hash(state)}
+        else
+          Mix.raise("save-state cartridge does not match ROM")
+        end
+
+      {:error, reason} ->
+        Mix.raise("could not load save state: #{inspect(reason)}")
+    end
+  end
+
   defp renderer("native"), do: :native
 
   defp renderer("nx") do
@@ -85,16 +119,12 @@ defmodule Mix.Tasks.Gb.Bench do
   defp audio_renderer("native"), do: :native
   defp audio_renderer("elixir_block"), do: Beamicom.GB.APUBlockRenderer
 
-  defp audio_renderer("nx_block") do
-    ensure_renderer!(Beamicom.GB.Nx.APUBlockRenderer)
-  end
-
-  defp audio_renderer("nx_synth") do
+  defp audio_renderer("nx") do
     ensure_renderer!(Beamicom.GB.Nx.APUSynthRenderer)
   end
 
   defp audio_renderer(_),
-    do: Mix.raise("audio-renderer must be native, elixir_block, nx_block, or nx_synth")
+    do: Mix.raise("audio-renderer must be native, elixir_block, or nx")
 
   defp ensure_renderer!(module) do
     if Code.ensure_loaded?(module),
@@ -114,8 +144,15 @@ defmodule Mix.Tasks.Gb.Bench do
   defp renderer_name(:native), do: :native
   defp renderer_name(Beamicom.GB.APUBlockRenderer), do: :elixir_block
   defp renderer_name(Beamicom.GB.Nx.PPURenderer), do: :nx
-  defp renderer_name(Beamicom.GB.Nx.APUBlockRenderer), do: :nx_block
-  defp renderer_name(Beamicom.GB.Nx.APUSynthRenderer), do: :nx_synth
+  defp renderer_name(Beamicom.GB.Nx.APUSynthRenderer), do: :nx
+
+  defp median(values) do
+    midpoint = div(length(values), 2)
+
+    if rem(length(values), 2) == 1,
+      do: Enum.at(values, midpoint),
+      else: (Enum.at(values, midpoint - 1) + Enum.at(values, midpoint)) / 2
+  end
 
   defp hash(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
 end

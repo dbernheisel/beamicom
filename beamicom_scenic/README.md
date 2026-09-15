@@ -72,7 +72,7 @@ Keep the flag exported while compiling and running. When changing it for an
 existing build, force-recompile the affected path dependencies:
 
 ```sh
-cd /home/dbern/beamicom/beamicom_scenic
+cd /path/to/beamicom/beamicom_scenic
 export BEAMICOM_SCENIC_NX=1
 
 mise exec -- mix deps.get
@@ -94,7 +94,7 @@ Beamicom.GB.PPU.configured_renderer()
 #=> Beamicom.GB.Nx.PPURenderer
 
 Beamicom.GB.APU.configured_renderer()
-#=> Beamicom.GB.Nx.APUBlockRenderer
+#=> Beamicom.GB.Nx.APUSynthRenderer
 ```
 
 Normal atlas-first Nx video with the Nx block APU then needs no per-game renderer

@@ -209,10 +209,10 @@ defmodule Beamicom.GB.PPU do
 
   def mode(%__MODULE__{clock: clock}) when clock >= @vblank_start, do: 1
 
-  def mode(%__MODULE__{clock: clock} = ppu) do
+  def mode(%__MODULE__{clock: clock, transfer_end: transfer_end}) do
     case rem(clock, @dots_per_line) do
       dot when dot < @oam_dots -> 2
-      dot -> if dot < hblank_dot(ppu), do: 3, else: 0
+      dot -> if dot < transfer_end, do: 3, else: 0
     end
   end
 
@@ -436,13 +436,12 @@ defmodule Beamicom.GB.PPU do
              rem(clock, @dots_per_line) + dots < @oam_dots,
       do: {%{ppu | clock: clock + dots}, []}
 
-  def tick(%__MODULE__{clock: clock} = ppu, dots)
+  def tick(%__MODULE__{clock: clock, transfer_end: transfer_end} = ppu, dots)
       when dots > 0 and clock < @vblank_start and rem(clock, @dots_per_line) >= @oam_dots do
     dot = rem(clock, @dots_per_line)
-    hblank = hblank_dot(ppu)
 
-    if (dot < hblank and dot + dots < hblank) or
-         (dot >= hblank and dot + dots < @dots_per_line),
+    if (dot < transfer_end and dot + dots < transfer_end) or
+         (dot >= transfer_end and dot + dots < @dots_per_line),
        do: {%{ppu | clock: clock + dots}, []},
        else: advance(ppu, dots, [])
   end
@@ -474,13 +473,12 @@ defmodule Beamicom.GB.PPU do
     {@dots_per_line - dot, :line_end}
   end
 
-  defp next_event(%__MODULE__{clock: clock} = ppu) do
+  defp next_event(%__MODULE__{clock: clock, transfer_end: transfer_end}) do
     dot = rem(clock, @dots_per_line)
-    hblank = hblank_dot(ppu)
 
     cond do
       dot < @oam_dots -> {@oam_dots - dot, :transfer}
-      dot < hblank -> {hblank - dot, :hblank}
+      dot < transfer_end -> {transfer_end - dot, :hblank}
       true -> {@dots_per_line - dot, :line_end}
     end
   end

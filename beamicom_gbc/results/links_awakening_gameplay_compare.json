@@ -1,0 +1,17 @@
+{
+  "scope": "Link's Awakening DX Mabe Village save, frame 12311, no input, 240 frames, 5 repeats, native PPU, Elixir block APU",
+  "host": "AMD Ryzen AI Max+ 395, x86_64, Erlang/OTP 29.0.3, Elixir 1.20.2",
+  "rom_sha256": "c95dd3d9cb798e86c28e3269554e458d434bf3277b96cadf5bc81cfacfb5ee60",
+  "state_sha256": "a06e762a65320e88be4dcb5d9497ce7a6c782d51bf29b69e42c8f10791236265",
+  "video_sha256": "2c680f2c8d55920f6df5070c5b2425aa7e6f85ad58b4ef8aa119b2b6bc8c43dd",
+  "audio_sha256": "2a0e13ce1c971159b9904da7abf835001a381a311a632cd19dc2574852183ec4",
+  "before": {
+    "fps": [78.23981285036766, 77.58877368033619, 76.15764378404485, 79.42680323664223, 77.04504020948546],
+    "median_fps": 77.58877368033619
+  },
+  "after": {
+    "fps": [190.25483049087333, 190.49796167181012, 189.71162252446095, 190.08847034223845, 188.21049461717985],
+    "median_fps": 190.08847034223845,
+    "improvement_percent": 144.99
+  }
+}

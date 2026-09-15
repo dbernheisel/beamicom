@@ -5,7 +5,9 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     The core supplies control-state epochs bounded by register and frame-sequencer
     changes. Oscillator timers, phase, LFSR state, stereo routing, and PCM remain
-    resident in this renderer across frames.
+    resident in this renderer across frames. A short scalar pass resolves the
+    state at each control epoch, then all samples in the frame are synthesized
+    in one integer tensor operation.
     """
 
     import Nx.Defn
@@ -130,52 +132,60 @@ if Code.ensure_loaded?(Nx.Defn) do
     def restore(state), do: Nx.backend_copy(state, backend())
 
     defn run(state, rows, row_count) do
-      pcm = Nx.broadcast(Nx.tensor(0, type: :s16), {@steady_samples, 2})
-
-      {state, pcm, output, _, _, _} =
-        while {state, pcm, output = Nx.tensor(0, type: :s32), index = Nx.tensor(0, type: :s32),
-               rows, row_count},
-              index < row_count and output < @steady_samples do
-          row = rows[index]
-          state = apply_triggers(state, row)
-          {state, pcm, output} = synth_segment(state, row, pcm, output)
-          {state, pcm, output, index + 1, rows, row_count}
-        end
-
-      {state, pcm, output}
+      synth_frame(state, rows, row_count, Nx.iota({@steady_samples}, type: :s32))
     end
 
     defn run_boot(state, rows, row_count) do
-      pcm = Nx.broadcast(Nx.tensor(0, type: :s16), {@boot_samples, 2})
-
-      {state, pcm, output, _, _, _} =
-        while {state, pcm, output = Nx.tensor(0, type: :s32), index = Nx.tensor(0, type: :s32),
-               rows, row_count},
-              index < row_count and output < @boot_samples do
-          row = rows[index]
-          state = apply_triggers(state, row)
-          {state, pcm, output} = synth_segment(state, row, pcm, output)
-          {state, pcm, output, index + 1, rows, row_count}
-        end
-
-      {state, pcm, output}
+      synth_frame(state, rows, row_count, Nx.iota({@boot_samples}, type: :s32))
     end
 
-    defnp synth_segment(state, row, pcm, output) do
-      duration = row[0]
-      total = state.sample_phase + duration * @sample_rate
-      count = Nx.quotient(total, @clock_rate)
-      indexes = Nx.iota({@segment_samples}, type: :s32) + 1
+    defnp synth_frame(state, rows, row_count, sample_indexes) do
+      segment_states = broadcast_state(state, @capacity)
+      sample_capacity = Nx.axis_size(sample_indexes, 0)
+
+      segment_indexes =
+        Nx.broadcast(Nx.tensor(0, type: :s32), {sample_capacity + @segment_samples})
+
+      ordinals =
+        Nx.broadcast(Nx.tensor(1, type: :s32), {sample_capacity + @segment_samples})
+
+      segment_ordinals = Nx.iota({@segment_samples}, type: :s32) + 1
+
+      {state, segment_states, segment_indexes, ordinals, output, _, _, _, _} =
+        while {state, segment_states, segment_indexes, ordinals,
+               output = Nx.tensor(0, type: :s32), index = Nx.tensor(0, type: :s32), rows,
+               row_count, segment_ordinals},
+              index < row_count and output < sample_capacity do
+          row = rows[index]
+          state = apply_triggers(state, row)
+          segment_states = put_state(segment_states, state, index)
+          ids = Nx.broadcast(index, {@segment_samples})
+          segment_indexes = Nx.put_slice(segment_indexes, [output], ids)
+          ordinals = Nx.put_slice(ordinals, [output], segment_ordinals)
+
+          duration = row[0]
+          total = state.sample_phase + duration * @sample_rate
+          count = Nx.quotient(total, @clock_rate)
+          state = clock(state, row, duration)
+          state = %{state | sample_phase: total - count * @clock_rate}
+
+          {state, segment_states, segment_indexes, ordinals, output + count, index + 1, rows,
+           row_count, segment_ordinals}
+        end
+
+      segment_indexes = Nx.take(segment_indexes, sample_indexes)
+      sample_rows = Nx.take(rows, segment_indexes)
+      sample_states = take_state(segment_states, segment_indexes)
+      ordinal = Nx.take(ordinals, sample_indexes)
 
       offsets =
-        Nx.quotient(indexes * @clock_rate - state.sample_phase + @sample_rate - 1, @sample_rate)
+        Nx.quotient(
+          ordinal * @clock_rate - sample_states.sample_phase + @sample_rate - 1,
+          @sample_rate
+        )
 
-      sample_states = clock(state, row, offsets)
-      values = mix(sample_states, row)
-      pcm = Nx.put_slice(pcm, [output, 0], values)
-      state = clock(state, row, duration)
-      state = %{state | sample_phase: total - count * @clock_rate}
-      {state, pcm, output + count}
+      values = sample_states |> clock_samples(sample_rows, offsets) |> mix(sample_rows)
+      {state, values, output}
     end
 
     defnp apply_triggers(state, row) do
@@ -230,6 +240,51 @@ if Code.ensure_loaded?(Nx.Defn) do
       }
     end
 
+    defnp clock_samples(state, rows, dots) do
+      {p1_timer, p1_position} =
+        pulse_clock(
+          state.p1_timer,
+          state.p1_position,
+          rows[[.., 7]],
+          rows[[.., 4]] != 0,
+          dots
+        )
+
+      {p2_timer, p2_position} =
+        pulse_clock(
+          state.p2_timer,
+          state.p2_position,
+          rows[[.., 13]],
+          rows[[.., 10]] != 0,
+          dots
+        )
+
+      {wave_timer, wave_position, wave_sample} =
+        wave_clock_samples(
+          state.wave_timer,
+          state.wave_position,
+          state.wave_sample,
+          rows,
+          dots
+        )
+
+      {noise_timer, noise_lfsr} =
+        noise_clock_samples(state.noise_timer, state.noise_lfsr, rows, dots)
+
+      %{
+        state
+        | p1_timer: p1_timer,
+          p1_position: p1_position,
+          p2_timer: p2_timer,
+          p2_position: p2_position,
+          wave_timer: wave_timer,
+          wave_position: wave_position,
+          wave_sample: wave_sample,
+          noise_timer: noise_timer,
+          noise_lfsr: noise_lfsr
+      }
+    end
+
     defnp pulse_clock(timer, position, frequency, enabled, dots) do
       period = (2048 - frequency) * 4
       crossed = dots >= timer
@@ -263,6 +318,30 @@ if Code.ensure_loaded?(Nx.Defn) do
        Nx.select(active and crossed, next_sample, sample)}
     end
 
+    defnp wave_clock_samples(timer, position, sample, rows, dots) do
+      enabled = rows[[.., 16]] != 0
+      period = (2048 - rows[[.., 19]]) * 2
+      crossed = dots >= timer
+      after_first = Nx.max(dots - timer, 0)
+      steps = Nx.select(crossed, 1 + Nx.quotient(after_first, period), 0)
+      remainder = Nx.remainder(after_first, period)
+      reloaded = Nx.select(remainder == 0, period, period - remainder)
+      next_timer = Nx.select(crossed, reloaded, timer - dots)
+      next_position = band(position + steps, 31)
+      wave_ram = rows[[.., 21..36]]
+
+      byte =
+        wave_ram
+        |> Nx.take_along_axis(Nx.new_axis(Nx.quotient(next_position, 2), 1), axis: 1)
+        |> Nx.squeeze(axes: [1])
+
+      next_sample = Nx.select(band(next_position, 1) == 0, shr(byte, 4), band(byte, 15))
+      active = enabled and dots >= 0
+
+      {Nx.select(active, next_timer, timer), Nx.select(active, next_position, position),
+       Nx.select(active and crossed, next_sample, sample)}
+    end
+
     defnp noise_clock(timer, lfsr, row, dots) do
       enabled = row[37] != 0 and row[40] < 14
       period = Nx.take(Nx.tensor(@noise_periods, type: :s32), row[42]) * pow2(row[40])
@@ -277,15 +356,69 @@ if Code.ensure_loaded?(Nx.Defn) do
       {Nx.select(active, next_timer, timer), Nx.select(active, next_lfsr, lfsr)}
     end
 
-    defnp mix(state, row) do
-      p1 = pulse_output(state.p1_position, row[6], row[8], row[4] != 0, row[5] != 0)
-      p2 = pulse_output(state.p2_position, row[12], row[14], row[10] != 0, row[11] != 0)
-      wave = wave_output(state.wave_sample, row[18], row[16] != 0, row[17] != 0)
-      noise = noise_output(state.noise_lfsr, row[39], row[37] != 0, row[38] != 0)
-      route = row[3]
-      right = routed(p1, p2, wave, noise, band(route, 15)) * (band(row[2], 7) + 1) * 64
-      left = routed(p1, p2, wave, noise, shr(route, 4)) * (band(shr(row[2], 4), 7) + 1) * 64
-      master = row[1] != 0 and p1 >= -32_768
+    defnp noise_clock_samples(timer, lfsr, rows, dots) do
+      enabled = rows[[.., 37]] != 0 and rows[[.., 40]] < 14
+
+      period =
+        Nx.take(Nx.tensor(@noise_periods, type: :s32), rows[[.., 42]]) *
+          pow2(rows[[.., 40]])
+
+      crossed = dots >= timer
+      after_first = Nx.max(dots - timer, 0)
+      steps = Nx.select(crossed, 1 + Nx.quotient(after_first, period), 0)
+      remainder = Nx.remainder(after_first, period)
+      reloaded = Nx.select(remainder == 0, period, period - remainder)
+      next_timer = Nx.select(crossed, reloaded, timer - dots)
+      next_lfsr = noise_jump(lfsr, steps, rows[[.., 41]])
+      active = enabled and dots >= 0
+      {Nx.select(active, next_timer, timer), Nx.select(active, next_lfsr, lfsr)}
+    end
+
+    defnp mix(state, rows) do
+      p1 =
+        pulse_output(
+          state.p1_position,
+          rows[[.., 6]],
+          rows[[.., 8]],
+          rows[[.., 4]] != 0,
+          rows[[.., 5]] != 0
+        )
+
+      p2 =
+        pulse_output(
+          state.p2_position,
+          rows[[.., 12]],
+          rows[[.., 14]],
+          rows[[.., 10]] != 0,
+          rows[[.., 11]] != 0
+        )
+
+      wave =
+        wave_output(
+          state.wave_sample,
+          rows[[.., 18]],
+          rows[[.., 16]] != 0,
+          rows[[.., 17]] != 0
+        )
+
+      noise =
+        noise_output(
+          state.noise_lfsr,
+          rows[[.., 39]],
+          rows[[.., 37]] != 0,
+          rows[[.., 38]] != 0
+        )
+
+      route = rows[[.., 3]]
+
+      right =
+        routed(p1, p2, wave, noise, band(route, 15)) * (band(rows[[.., 2]], 7) + 1) * 64
+
+      left =
+        routed(p1, p2, wave, noise, shr(route, 4)) *
+          (band(shr(rows[[.., 2]], 4), 7) + 1) * 64
+
+      master = rows[[.., 1]] != 0 and p1 >= -32_768
       left = Nx.select(master, left, 0)
       right = Nx.select(master, right, 0)
       Nx.stack([left, right], axis: 1) |> Nx.clip(-32_768, 32_767) |> Nx.as_type(:s16)
@@ -353,6 +486,20 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp tensor_state(state),
       do: Map.new(state, fn {key, value} -> {key, Nx.tensor(value, type: :s32)} end)
+
+    deftransformp broadcast_state(state, size) do
+      Map.new(state, fn {key, value} -> {key, Nx.broadcast(value, {size})} end)
+    end
+
+    deftransformp put_state(destination, state, index) do
+      Map.new(destination, fn {key, values} ->
+        {key, Nx.put_slice(values, [index], Nx.reshape(Map.fetch!(state, key), {1}))}
+      end)
+    end
+
+    deftransformp take_state(state, indexes) do
+      Map.new(state, fn {key, values} -> {key, Nx.take(values, indexes)} end)
+    end
 
     defp compiled(kind, args) do
       key = {__MODULE__, kind, :compiled, Beamicom.GB.Nx.compiler_options()}
