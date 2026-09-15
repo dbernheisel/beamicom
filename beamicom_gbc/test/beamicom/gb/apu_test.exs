@@ -236,8 +236,8 @@ defmodule Beamicom.GB.APUTest do
     {1, <<0::little-signed-16, shifted::little-signed-16>>, _apu} =
       half |> APU.tick(89) |> APU.take_samples()
 
-    assert full == -960
-    assert shifted == 64
+    assert full < 0
+    assert shifted - full == 1_024
   end
 
   test "noise uses the documented divisor and mirrors feedback into bit 6 in 7-bit mode" do
@@ -315,15 +315,16 @@ defmodule Beamicom.GB.APUTest do
       |> APU.write(0xFF25, 0x02)
       |> APU.tick(96)
 
-    assert {1, <<0::little-signed-16, right::little-signed-16>>, _apu} = APU.take_samples(apu)
+    assert {1, <<0::little-signed-16, right::little-signed-16>>, apu} = APU.take_samples(apu)
     assert right > 0
 
-    left = APU.write(apu, 0xFF25, 0x20) |> Map.put(:samples, []) |> Map.put(:sample_count, 0)
+    left = APU.write(apu, 0xFF25, 0x20)
 
-    {1, <<left_sample::little-signed-16, 0::little-signed-16>>, _apu} =
+    {1, <<left_sample::little-signed-16, right_tail::little-signed-16>>, _apu} =
       left |> APU.tick(95) |> APU.take_samples()
 
     assert left_sample > 0
+    assert right_tail < 0
   end
 
   test "model controls powered-off length writes and is carried by mapped Bus" do
@@ -360,6 +361,33 @@ defmodule Beamicom.GB.APUTest do
 
     split = APU.new() |> APU.tick(1_234_567) |> APU.tick(@clock_rate - 1_234_567)
     assert {44_100, ^pcm, _split} = APU.take_samples(split)
+  end
+
+  test "CGB output capacitor removes channel DC faster than DMG hardware" do
+    dmg = constant_dac(:dmg) |> APU.tick(9_512)
+    cgb = constant_dac(:cgb) |> APU.tick(9_512)
+
+    assert {100, dmg_pcm, _dmg} = APU.take_samples(dmg)
+    assert {100, cgb_pcm, _cgb} = APU.take_samples(cgb)
+
+    assert {960, 960} = stereo_sample(dmg_pcm, 0)
+    assert {960, 960} = stereo_sample(cgb_pcm, 0)
+    assert elem(stereo_sample(cgb_pcm, 99), 0) == 0
+    assert elem(stereo_sample(dmg_pcm, 99), 0) > 600
+  end
+
+  test "output capacitor is continuous across PCM drains and disconnects with every DAC off" do
+    base = constant_dac(:cgb)
+    whole = base |> APU.tick(19_025) |> APU.take_samples()
+
+    {100, first_pcm, split} = base |> APU.tick(9_512) |> APU.take_samples()
+    {100, second_pcm, split} = split |> APU.tick(9_513) |> APU.take_samples()
+    split_pcm = first_pcm <> second_pcm
+    assert {200, ^split_pcm, _whole} = whole
+
+    disconnected = APU.write(split, 0xFF1A, 0) |> APU.tick(952)
+    assert {10, disconnected_pcm, _disconnected} = APU.take_samples(disconnected)
+    assert disconnected_pcm == :binary.copy(<<0>>, 40)
   end
 
   test "deferred advancement is identical at every observable APU boundary" do
@@ -487,6 +515,24 @@ defmodule Beamicom.GB.APUTest do
 
   defp powered, do: power_on(APU.new())
   defp power_on(apu), do: APU.write(apu, 0xFF26, 0x80)
+
+  defp constant_dac(model) do
+    APU.new(model: model)
+    |> power_on()
+    |> APU.write(0xFF1A, 0x80)
+    |> APU.write(0xFF1C, 0)
+    |> APU.write(0xFF24, 0)
+    |> APU.write(0xFF25, 0x44)
+  end
+
+  defp stereo_sample(pcm, index) do
+    offset = index * 4
+
+    <<_prefix::binary-size(^offset), left::little-signed-16, right::little-signed-16,
+      _rest::binary>> = pcm
+
+    {left, right}
+  end
 
   defp sweep_ready(period, shift, frequency) do
     powered()

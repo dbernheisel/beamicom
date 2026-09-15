@@ -16,7 +16,7 @@ defmodule Beamicom.Scenic.Component.MenuItem do
   def display_label(item) do
     suffix =
       cond do
-        slider?(item) -> "  #{item.slider.value} pct"
+        slider?(item) -> "  #{item.slider.value}"
         Map.get(item, :toggle, false) -> if(item.checked, do: "  ON", else: "  OFF")
         Map.get(item, :checked, false) -> "  ON"
         true -> ""
@@ -24,6 +24,12 @@ defmodule Beamicom.Scenic.Component.MenuItem do
 
     "  " <> item.label <> suffix
   end
+
+  @doc false
+  def layout_label(%{slider: slider} = item),
+    do: item |> put_in([:slider, :value], slider.max) |> display_label()
+
+  def layout_label(item), do: display_label(item)
 
   @doc false
   def slider?(%{slider: %{min: min, max: max, value: value}})
@@ -90,7 +96,7 @@ defmodule Beamicom.Scenic.Component.MenuItem do
   end
 
   defp slider_track(item, width) do
-    label_end = 15 + text_width(display_label(item))
+    label_end = 15 + text_width(layout_label(item))
     {label_end + @slider_gap, width - @slider_end_padding}
   end
 

@@ -130,6 +130,32 @@ defmodule Beamicom.NES.Nx.PPURendererTest do
     assert nonmatching.frame_ready.rgb == base.frame_ready.rgb
   end
 
+  test "lighting can select source rows within an emitting tile" do
+    base = scene(:nx)
+
+    lighting = [
+      radius: 1,
+      sigma: 0.5,
+      strength: 1.25,
+      emitters: [
+        [
+          layer: :sprite,
+          tile_space: :chr,
+          tiles: [2],
+          subpalettes: [0],
+          color_slots: [1],
+          rows: [0]
+        ]
+      ]
+    ]
+
+    lit = scene({PPURenderer, lighting: lighting})
+
+    assert lit.frame_ready.pixels == base.frame_ready.pixels
+    refute rgb_at(lit.frame_ready, 40, 31) == rgb_at(base.frame_ready, 40, 31)
+    assert rgb_at(lit.frame_ready, 40, 38) == rgb_at(base.frame_ready, 40, 38)
+  end
+
   test "lighting can identify sprites by logical PPU tile in CHR RAM" do
     base = scene(:nx, chr_ram: true)
 

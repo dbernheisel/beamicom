@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Gb.Shot do
       mix gb.shot <rom.gb|rom.gbc> [out.png] [frames] [palette]
 
   Model selection follows the cartridge header. Defaults are `gb-shot.png`,
-  one frame, and `dmg_green`; the palette argument applies to DMG frames only.
+  two frames, and `dmg_green`; the palette argument applies to DMG frames only.
   Supported DMG palettes are `dmg_green` and `grayscale`.
   """
 
@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Gb.Shot do
 
   defp capture(rom, rest) do
     output = Enum.at(rest, 0, "gb-shot.png")
-    frames = parse_frames(Enum.at(rest, 1, "1"))
+    frames = parse_frames(Enum.at(rest, 1, "2"))
     palette = parse_palette(Enum.at(rest, 2, "dmg_green"))
 
     machine =

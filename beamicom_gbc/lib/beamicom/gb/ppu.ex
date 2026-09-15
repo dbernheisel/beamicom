@@ -30,6 +30,8 @@ defmodule Beamicom.GB.PPU do
   @lines_per_frame 154
   @frame_dots @dots_per_line * @lines_per_frame
   @vblank_start @dots_per_line * @height
+  # CGB LCD retention outlasts one visible scanout by 3,640 double-speed ticks.
+  @cgb_frame_repeat_dots 1_820
   @oam_dots 80
   @minimum_transfer_end 252
 
@@ -83,6 +85,8 @@ defmodule Beamicom.GB.PPU do
             clock: 0,
             transfer_end: @minimum_transfer_end,
             frame_number: 0,
+            lcd_frame_state: :steady,
+            lcd_off_dots: 0,
             window_line: 0,
             stat_line: false,
             model: :dmg,
@@ -108,6 +112,8 @@ defmodule Beamicom.GB.PPU do
           clock: non_neg_integer(),
           transfer_end: 252..369,
           frame_number: non_neg_integer(),
+          lcd_frame_state: :steady | :suppress | :suppressed,
+          lcd_off_dots: 0..1821,
           window_line: 0..144,
           stat_line: boolean(),
           model: :dmg | :cgb,
@@ -323,6 +329,7 @@ defmodule Beamicom.GB.PPU do
             | clock: 0,
               transfer_end: @minimum_transfer_end,
               lines: [],
+              lcd_off_dots: lcd_off_dots(ppu, old_lcdc),
               window_line: 0,
               stat_line: false
           }
@@ -334,6 +341,7 @@ defmodule Beamicom.GB.PPU do
             | clock: 0,
               transfer_end: @minimum_transfer_end,
               lines: [],
+              lcd_frame_state: lcd_startup_state(ppu),
               window_line: 0,
               stat_line: false
           }
@@ -412,10 +420,13 @@ defmodule Beamicom.GB.PPU do
   @spec tick(t(), non_neg_integer()) :: {t(), [signal()]}
   def tick(%__MODULE__{} = ppu, 0), do: {ppu, []}
 
-  # LCD-off time does not advance and cannot produce mode/VBlank signals.
+  # LCD raster time stops and cannot produce mode/VBlank signals while the
+  # panel-retention timer continues to elapse.
   def tick(%__MODULE__{registers: {lcdc, _, _, _, _, _, _, _, _, _}} = ppu, dots)
-      when dots > 0 and (lcdc &&& 0x80) == 0,
-      do: {ppu, []}
+      when dots > 0 and (lcdc &&& 0x80) == 0 do
+    elapsed = min(ppu.lcd_off_dots + dots, @cgb_frame_repeat_dots + 1)
+    {%{ppu | lcd_off_dots: elapsed}, []}
+  end
 
   # CPU memory cycles almost always remain within the current LCD mode. Keep
   # those tiny advances out of the recursive boundary/event machinery; exact
@@ -493,7 +504,7 @@ defmodule Beamicom.GB.PPU do
   end
 
   defp handle_event(%__MODULE__{clock: @vblank_start} = ppu, :line_end) do
-    {frame, renderer_state} = finish_frame(ppu)
+    {frame, renderer_state, lcd_frame_state} = display_frame(ppu)
     number = ppu.frame_number
 
     ppu = %{
@@ -501,6 +512,8 @@ defmodule Beamicom.GB.PPU do
       | frame: frame,
         lines: [],
         frame_number: number + 1,
+        lcd_frame_state: lcd_frame_state,
+        lcd_off_dots: 0,
         renderer_state: renderer_state
     }
 
@@ -510,6 +523,24 @@ defmodule Beamicom.GB.PPU do
 
   defp handle_event(ppu, :line_end),
     do: refresh_stat(%{ppu | transfer_end: @minimum_transfer_end})
+
+  # The LCD panel does not present the first frame generated after LCDC.7 is
+  # enabled. DMG panels go blank; CGB panels briefly retain the previously
+  # presented frame, then decay to white. A CGB does not suppress two
+  # consecutive frames.
+  defp display_frame(%__MODULE__{lcd_frame_state: :suppress} = ppu) do
+    frame =
+      if ppu.model == :cgb and ppu.lcd_off_dots <= @cgb_frame_repeat_dots,
+        do: ppu.frame,
+        else: initial_frame(ppu.model)
+
+    {frame, ppu.renderer_state, :suppressed}
+  end
+
+  defp display_frame(ppu) do
+    {frame, renderer_state} = finish_frame(ppu)
+    {frame, renderer_state, :steady}
+  end
 
   defp finish_frame(%__MODULE__{renderer: :native} = ppu),
     do: {ppu.lines |> :lists.reverse() |> IO.iodata_to_binary(), nil}
@@ -528,6 +559,12 @@ defmodule Beamicom.GB.PPU do
 
     {deferred, ppu.renderer_state}
   end
+
+  defp lcd_startup_state(%__MODULE__{model: :cgb, lcd_frame_state: :suppressed}), do: :steady
+  defp lcd_startup_state(_ppu), do: :suppress
+
+  defp lcd_off_dots(ppu, old_lcdc),
+    do: if((old_lcdc &&& 0x80) == 0, do: ppu.lcd_off_dots, else: 0)
 
   @doc false
   def resolve_frame(%DeferredFrame{} = frame) do

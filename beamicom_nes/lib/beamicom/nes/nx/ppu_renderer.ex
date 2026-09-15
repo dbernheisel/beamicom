@@ -15,6 +15,7 @@ if Code.ensure_loaded?(Nx.Defn) do
     @lighting_scale 2
     @lighting_height div(@height, @lighting_scale)
     @lighting_width div(@width, @lighting_scale)
+    @lighting_intensity_scale 170
     @tiles 33
     @sprites 8
     @compiled_key {__MODULE__, :compiled}
@@ -105,6 +106,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       tiles = emitter |> Keyword.fetch!(:tiles) |> List.wrap()
       slots = emitter |> Keyword.get(:color_slots, [1, 2, 3]) |> List.wrap()
       subpalettes = emitter |> Keyword.get(:subpalettes, [0, 1, 2, 3]) |> List.wrap()
+      rows = emitter |> Keyword.get(:rows, 0..7) |> normalize_rows()
       intensity = Keyword.get(emitter, :intensity, 1.0)
       flicker = emitter |> Keyword.get(:flicker, false) |> normalize_flicker!()
 
@@ -123,15 +125,19 @@ if Code.ensure_loaded?(Nx.Defn) do
       unless subpalettes != [] and Enum.all?(subpalettes, &(&1 in 0..3)),
         do: raise(ArgumentError, "emitter :subpalettes must contain values 0 through 3")
 
-      unless is_number(intensity) and intensity >= 0 and intensity <= 1,
-        do: raise(ArgumentError, "emitter :intensity must be between 0 and 1")
+      unless rows != [] and Enum.all?(rows, &(&1 in 0..7)),
+        do: raise(ArgumentError, "emitter :rows must contain pattern rows 0 through 7")
+
+      unless is_number(intensity) and intensity >= 0 and intensity <= 1.5,
+        do: raise(ArgumentError, "emitter :intensity must be between 0 and 1.5")
 
       %{
         tile_space: tile_space,
         tiles: MapSet.new(tiles),
         slots: MapSet.new(slots),
         subpalettes: MapSet.new(subpalettes),
-        intensity: round(intensity * 255),
+        rows: MapSet.new(rows),
+        intensity: round(intensity * @lighting_intensity_scale),
         flicker: round(flicker * 255)
       }
     end
@@ -139,6 +145,9 @@ if Code.ensure_loaded?(Nx.Defn) do
     defp normalize_emitter!(_emitter) do
       raise ArgumentError, "each Nx PPU lighting emitter must be a keyword list"
     end
+
+    defp normalize_rows(%Range{} = rows), do: Enum.to_list(rows)
+    defp normalize_rows(rows), do: List.wrap(rows)
 
     defp normalize_flicker!(flicker) when flicker in [false, nil], do: 0.0
     defp normalize_flicker!(flicker) when flicker in [true, :organic], do: 0.18
@@ -156,13 +165,16 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp lighting_lut(tile_count, rules, tile_space) do
       values =
-        for tile <- 0..(tile_count - 1), subpalette <- 0..3, slot <- 0..3 do
+        for tile <- 0..(tile_count - 1),
+            subpalette <- 0..3,
+            slot <- 0..3,
+            row <- 0..7 do
           {intensity, flicker} =
             rules
             |> Enum.filter(&(&1.tile_space == tile_space))
             |> Enum.reduce({0, 0}, fn rule, {intensity, flicker} ->
               if MapSet.member?(rule.tiles, tile) and MapSet.member?(rule.subpalettes, subpalette) and
-                   MapSet.member?(rule.slots, slot),
+                   MapSet.member?(rule.slots, slot) and MapSet.member?(rule.rows, row),
                  do: {max(intensity, rule.intensity), max(flicker, rule.flicker)},
                  else: {intensity, flicker}
             end)
@@ -172,7 +184,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
       values
       |> Nx.tensor(type: :u16)
-      |> Nx.reshape({tile_count, 4, 4})
+      |> Nx.reshape({tile_count, 4, 4, 8})
       |> Nx.backend_copy(Beamicom.NES.Nx.backend())
     end
 
@@ -1289,10 +1301,12 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defn resolve_composed_emission(pixels, palette, color_mask, provenance, emitter_lut) do
       provenance = Nx.as_type(provenance, :s32)
-      tile = shr(provenance, 4)
+      source_ref = shr(provenance, 4)
+      tile = Nx.quotient(source_ref, 8)
+      row = band(source_ref, 7)
       subpalette = band(shr(provenance, 2), 0x03)
       pattern = band(provenance, 0x03)
-      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern], axis: 2))
+      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern, row], axis: 2))
       intensity = emission |> band(0xFF) |> Nx.as_type(:u8)
       flicker = emission |> shr(8) |> band(0xFF) |> Nx.as_type(:u8)
       colors = Nx.take(palette, Nx.as_type(pixels, :s32)) |> band(color_mask)
@@ -1329,7 +1343,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         master
         |> Nx.take(color_index)
         |> Nx.as_type(:f32)
-        |> Nx.multiply(Nx.new_axis(intensity / 255.0, 2))
+        |> Nx.multiply(Nx.new_axis(intensity / @lighting_intensity_scale, 2))
         |> Nx.reshape({@lighting_height, @lighting_scale, @lighting_width, @lighting_scale, 3})
         |> Nx.mean(axes: [1, 3])
 
@@ -1441,7 +1455,8 @@ if Code.ensure_loaded?(Nx.Defn) do
       front = Nx.select(band(attr, 32) == 0, 0x40, 0)
       subpalette = Nx.broadcast(band(attr, 3), {@height, 8})
       tile = Nx.quotient(ref, 8)
-      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern], axis: 2))
+      row = band(ref, 7)
+      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern, row], axis: 2))
       values = 16 + subpalette * 4 + pattern + front + Nx.as_type(emission, :s32) * 256
       Nx.indexed_put(pixels, indices, Nx.reshape(values, {@height * 8}))
     end
@@ -1500,9 +1515,11 @@ if Code.ensure_loaded?(Nx.Defn) do
       indices = Nx.stack([rows, columns], axis: 2) |> Nx.reshape({@height * 8, 2})
       front = Nx.select(band(attr, 32) == 0, 0x40, 0)
       subpalette = Nx.broadcast(band(attr, 3), {@height, 8})
-      tile = Nx.new_axis(Nx.as_type(stile[[.., rank]], :s32), 1)
-      tile = Nx.broadcast(tile, {@height, 8})
-      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern], axis: 2))
+      source_ref = Nx.new_axis(Nx.as_type(stile[[.., rank]], :s32), 1)
+      source_ref = Nx.broadcast(source_ref, {@height, 8})
+      tile = Nx.quotient(source_ref, 8)
+      row = band(source_ref, 7)
+      emission = Nx.gather(emitter_lut, Nx.stack([tile, subpalette, pattern, row], axis: 2))
       values = 16 + subpalette * 4 + pattern + front + Nx.as_type(emission, :s32) * 256
       Nx.indexed_put(pixels, indices, Nx.reshape(values, {@height * 8}))
     end

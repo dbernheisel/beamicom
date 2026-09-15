@@ -3,7 +3,7 @@ defmodule Beamicom.Scenic.PlayerTest do
 
   import Bitwise
 
-  alias Beamicom.Scenic.{Host, Player, SaveState, Shell, Shutdown}
+  alias Beamicom.Scenic.{Host, Player, SaveState, Settings, Shell, Shutdown}
 
   @discard_audio_command ["sh", "-c", "cat >/dev/null"]
 
@@ -96,6 +96,33 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert Process.whereis(Host) == host
     assert :sys.get_state(host).scenic == scenic
     assert :sys.get_state(host).tasks == tasks
+  end
+
+  test "a successful Game menu load persists the ROM history", %{path: path} do
+    assert :ok = Beamicom.Scenic.start()
+    host = Process.whereis(Host)
+    assert eventually(fn -> is_pid(:sys.get_state(host).shell) end)
+    shell = :sys.get_state(host).shell
+
+    assert {:noreply, loading_scene} =
+             Shell.handle_event(
+               {:menu_action, {:load_recent, path}},
+               nil,
+               :sys.get_state(shell)
+             )
+
+    assert loading_scene.assigns.pending_rom_path == path
+    assert_receive {:load_result, :ok, ^path} = loaded, 5_000
+    assert {:noreply, saved_scene} = Shell.handle_info(loaded, loading_scene)
+
+    assert saved_scene.assigns.settings.recent_roms == [path]
+    assert {:ok, %{recent_roms: [^path]}} = Settings.load()
+
+    assert eventually(fn -> not is_nil(:sys.get_state(shell).assigns.session) end)
+
+    assert eventually(fn ->
+             match?({:ok, [_surface]}, Scenic.Scene.child(:sys.get_state(shell), :game_surface))
+           end)
   end
 
   test "the configured native driver accepts its close behavior", %{

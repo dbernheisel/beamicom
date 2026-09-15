@@ -6,7 +6,8 @@ defmodule Beamicom.GB.Machine do
   and timing have one authoritative copy. CPU memory cycles advance timer
   T-cycles and base hardware dots in their hardware order. Instruction
   boundaries also execute pending OAM/GDMA work and HBlank-qualified HDMA
-  blocks, reporting their CPU stall cost to callers.
+  blocks, reporting their CPU stall cost to callers. HRAM-resident code runs
+  concurrently with OAM DMA, as it does on the hardware.
   """
 
   alias Beamicom.GB.{APU, Bus, CPU, Cartridge, PPU}
@@ -56,7 +57,8 @@ defmodule Beamicom.GB.Machine do
           {bus, 0}
 
         _ ->
-          Bus.run_dma(bus, cpu.run_state != :halted)
+          oam_dma_mode = if cpu.pc in 0xFF80..0xFFFE, do: :concurrent, else: :stall
+          Bus.run_dma(bus, cpu.run_state != :halted, oam_dma_mode)
       end
 
     {%{machine | cpu: cpu, bus: bus}, m_cycles + dma_cycles}

@@ -15,6 +15,7 @@ defmodule Beamicom.Scenic.SettingsTest do
     settings = %{
       Settings.defaults()
       | save_state_folder: "/tmp/beamicom states",
+        recent_roms: ["/roms/Metroid.nes", "/roms/Tetris.gb"],
         nes_video_filter: :svideo,
         nes_lighting: true,
         nes_remove_sprite_limit: true,
@@ -29,7 +30,8 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert {:ok, ^settings} = Settings.load(path)
 
     decoded = path |> File.read!() |> :json.decode()
-    assert decoded["version"] == 2
+    assert decoded["version"] == 3
+    assert decoded["recent_roms"] == ["/roms/Metroid.nes", "/roms/Tetris.gb"]
     assert decoded["nes_video_filter"] == "svideo"
     assert decoded["nes_lighting"] == true
     assert decoded["nes_remove_sprite_limit"] == true
@@ -47,6 +49,7 @@ defmodule Beamicom.Scenic.SettingsTest do
 
     assert {:ok, settings} = Settings.load(path)
     assert settings.nes_video_filter == :rgb
+    assert settings.recent_roms == []
     assert settings.nes_lighting == false
     assert settings.nes_remove_sprite_limit == false
     assert settings.nes_trim_borders == false
@@ -114,6 +117,33 @@ defmodule Beamicom.Scenic.SettingsTest do
       File.write!(path, :json.encode(%{"volume" => volume}))
       assert {:error, {:invalid_setting, :volume}} = Settings.load(path)
     end
+  end
+
+  test "remembering ROMs moves duplicates forward and keeps five paths" do
+    settings = Settings.defaults()
+
+    settings =
+      Enum.reduce(1..6, settings, fn index, settings ->
+        Settings.remember_rom(settings, "/roms/game-#{index}.nes")
+      end)
+
+    assert settings.recent_roms == [
+             "/roms/game-6.nes",
+             "/roms/game-5.nes",
+             "/roms/game-4.nes",
+             "/roms/game-3.nes",
+             "/roms/game-2.nes"
+           ]
+
+    settings = Settings.remember_rom(settings, "/roms/game-4.nes")
+
+    assert settings.recent_roms == [
+             "/roms/game-4.nes",
+             "/roms/game-6.nes",
+             "/roms/game-5.nes",
+             "/roms/game-3.nes",
+             "/roms/game-2.nes"
+           ]
   end
 
   defp temporary_path do

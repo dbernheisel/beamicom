@@ -84,6 +84,14 @@ defmodule Beamicom.GB.BusTest do
     end
   end
 
+  test "timer-off cycle fast path advances LCD panel decay while its raster is stopped" do
+    bus = mapped_bus(model: :cgb) |> Bus.write(0xFF40, 0)
+    bus = Bus.tick(bus, 2_000)
+
+    assert bus.ppu.clock == 0
+    assert bus.ppu.lcd_off_dots == 1_821
+  end
+
   test "each TAC clock selection increments TIMA on the selected falling edge" do
     for {select, period} <- [{0, 1024}, {1, 16}, {2, 64}, {3, 256}] do
       bus = Bus.new() |> Bus.write(0xFF07, 0x04 ||| select)
@@ -324,6 +332,19 @@ defmodule Beamicom.GB.BusTest do
       assert {double, 160} = Bus.run_dma(double)
       assert double.ppu.clock == 320
       assert double.divider == 640
+    end
+
+    test "OAM DMA can run alongside an HRAM wait routine" do
+      bus =
+        Enum.reduce(0..0x9F, mapped_bus(), fn offset, bus ->
+          Bus.write(bus, 0xC100 + offset, offset * 3 &&& 0xFF)
+        end)
+        |> Bus.write(0xFF46, 0xC1)
+
+      assert {bus, 0} = Bus.run_dma(bus, true, :concurrent)
+      assert bus.oam_dma == nil
+      assert bus.divider == 0
+      assert bus.ppu.oam == for(offset <- 0..0x9F, into: <<>>, do: <<offset * 3 &&& 0xFF>>)
     end
 
     test "CGB general DMA copies complete blocks to the selected VRAM bank" do

@@ -64,22 +64,24 @@ defmodule Beamicom.Scenic.RuntimeTest do
         {Runtime, system: TenFpsSystem, machine: 0, output: output, pace: true, speed: 1.0}
       )
 
-    assert_receive {:video_frame, :timer_test, 0}, 200
+    assert_receive {:video_frame, :timer_test, 0}, to_timeout(millisecond: 200)
     assert %VideoFrame{number: 0} = Output.latest_video(output)
 
-    Process.sleep(10)
+    generation = :sys.get_state(runtime).generation
     Runtime.pause(runtime)
-    :sys.get_state(runtime)
-    Process.sleep(80)
+    assert %{paused: true, generation: paused_generation} = :sys.get_state(runtime)
+    assert paused_generation > generation
+
     Runtime.resume(runtime)
 
-    assert_receive {:video_frame, :timer_test, 1}, 100
+    assert_receive {:video_frame, :timer_test, 1}, to_timeout(millisecond: 100)
     assert %VideoFrame{number: 1} = Output.latest_video(output)
 
-    # The pre-pause deadline is now about 10ms away. If it survived, it would
-    # produce a burst here and establish a duplicate timer chain.
-    refute_receive {:video_frame, :timer_test, _number}, 50
-    assert_receive {:video_frame, :timer_test, 2}, 100
+    send(runtime, {:tick, generation})
+    :sys.get_state(runtime)
+    refute_received {:video_frame, :timer_test, _number}
+
+    assert_receive {:video_frame, :timer_test, 2}, to_timeout(millisecond: 200)
     assert %VideoFrame{number: 2} = Output.latest_video(output)
   end
 
