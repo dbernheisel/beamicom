@@ -24,25 +24,30 @@ defmodule Beamicom.GB.APU do
               Beamicom.GB.APUBlockRenderer
             )
   @dynamic_renderers Application.compile_env(:beamicom_gbc, :allow_runtime_renderers, false)
+  @sample_renderer @dynamic_renderers or @renderer != Beamicom.GB.Nx.APUSynthRenderer
 
   @clock_rate 4_194_304
   @sample_rate 44_100
   @sequencer_period 8_192
-  @silence <<0::little-signed-16, 0::little-signed-16>>
   @blank_wave :binary.copy(<<0>>, 16)
   @zero_registers List.duplicate(0, 23) |> List.to_tuple()
 
   @read_masks {0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF,
                0xBF, 0xFF, 0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00}
 
-  @duty_rows {
-    {0, 0, 0, 0, 0, 0, 0, 1},
-    {1, 0, 0, 0, 0, 0, 0, 1},
-    {1, 0, 0, 0, 0, 1, 1, 1},
-    {0, 1, 1, 1, 1, 1, 1, 0}
-  }
+  if @sample_renderer do
+    @silence <<0::little-signed-16, 0::little-signed-16>>
 
-  @dac_levels {15, 13, 11, 9, 7, 5, 3, 1, -1, -3, -5, -7, -9, -11, -13, -15}
+    @duty_rows {
+      {0, 0, 0, 0, 0, 0, 0, 1},
+      {1, 0, 0, 0, 0, 0, 0, 1},
+      {1, 0, 0, 0, 0, 1, 1, 1},
+      {0, 1, 1, 1, 1, 1, 1, 0}
+    }
+
+    @dac_levels {15, 13, 11, 9, 7, 5, 3, 1, -1, -3, -5, -7, -9, -11, -13, -15}
+  end
+
   @noise_divisors {8, 16, 32, 48, 64, 80, 96, 112}
 
   alias __MODULE__.{HighPass, Noise, Pulse, Wave}
@@ -400,40 +405,42 @@ defmodule Beamicom.GB.APU do
      }}
   end
 
-  defp advance(apu, 0), do: apu
+  if @sample_renderer do
+    defp advance(apu, 0), do: apu
 
-  defp advance(apu, dots) do
-    to_sample = div(@clock_rate - apu.sample_phase + @sample_rate - 1, @sample_rate)
-    to_sequence = @sequencer_period - apu.sequencer_phase
-    distance = min(dots, min(to_sample, to_sequence))
-    apu = advance_channels(apu, distance)
-    sample_phase = apu.sample_phase + distance * @sample_rate
-    sequence_phase = apu.sequencer_phase + distance
-    apu = %{apu | sample_phase: sample_phase, sequencer_phase: sequence_phase}
+    defp advance(apu, dots) do
+      to_sample = div(@clock_rate - apu.sample_phase + @sample_rate - 1, @sample_rate)
+      to_sequence = @sequencer_period - apu.sequencer_phase
+      distance = min(dots, min(to_sample, to_sequence))
+      apu = advance_channels(apu, distance)
+      sample_phase = apu.sample_phase + distance * @sample_rate
+      sequence_phase = apu.sequencer_phase + distance
+      apu = %{apu | sample_phase: sample_phase, sequencer_phase: sequence_phase}
 
-    apu =
-      if sample_phase >= @clock_rate do
-        sample = renderer_sample(apu)
+      apu =
+        if sample_phase >= @clock_rate do
+          sample = renderer_sample(apu)
 
-        %{
+          %{
+            apu
+            | sample_phase: sample_phase - @clock_rate,
+              samples: [sample | apu.samples],
+              sample_dacs: [dac_sample(apu) | apu.sample_dacs],
+              sample_count: apu.sample_count + 1
+          }
+        else
           apu
-          | sample_phase: sample_phase - @clock_rate,
-            samples: [sample | apu.samples],
-            sample_dacs: [dac_sample(apu) | apu.sample_dacs],
-            sample_count: apu.sample_count + 1
-        }
-      else
-        apu
-      end
+        end
 
-    apu =
-      if sequence_phase == @sequencer_period do
-        apu |> Map.put(:sequencer_phase, 0) |> clock_frame_sequencer()
-      else
-        apu
-      end
+      apu =
+        if sequence_phase == @sequencer_period do
+          apu |> Map.put(:sequencer_phase, 0) |> clock_frame_sequencer()
+        else
+          apu
+        end
 
-    advance(apu, dots - distance)
+      advance(apu, dots - distance)
+    end
   end
 
   if @dynamic_renderers or @renderer == Beamicom.GB.Nx.APUSynthRenderer do
@@ -465,67 +472,71 @@ defmodule Beamicom.GB.APU do
     end
   end
 
-  defp advance_channels(apu, dots) do
-    %{
-      apu
-      | ch1: advance_pulse(apu.ch1, dots),
-        ch2: advance_pulse(apu.ch2, dots),
-        ch3: advance_wave(apu.ch3, apu.wave_ram, dots),
-        ch4: advance_noise(apu.ch4, dots)
-    }
-  end
+  if @sample_renderer do
+    defp advance_channels(apu, dots) do
+      %{
+        apu
+        | ch1: advance_pulse(apu.ch1, dots),
+          ch2: advance_pulse(apu.ch2, dots),
+          ch3: advance_wave(apu.ch3, apu.wave_ram, dots),
+          ch4: advance_noise(apu.ch4, dots)
+      }
+    end
 
-  defp advance_pulse(%Pulse{enabled: false} = ch, _dots), do: ch
+    defp advance_pulse(%Pulse{enabled: false} = ch, _dots), do: ch
 
-  defp advance_pulse(%Pulse{} = ch, dots) when dots < ch.timer,
-    do: %{ch | timer: ch.timer - dots}
+    defp advance_pulse(%Pulse{} = ch, dots) when dots < ch.timer,
+      do: %{ch | timer: ch.timer - dots}
 
-  defp advance_pulse(%Pulse{} = ch, dots) do
-    period = pulse_period(ch.frequency)
-    after_first = dots - ch.timer
-    steps = 1 + div(after_first, period)
-    remainder = after_first - (steps - 1) * period
-    timer = if remainder == 0, do: period, else: period - remainder
-    %{ch | timer: timer, duty_pos: ch.duty_pos + steps &&& 7}
-  end
+    defp advance_pulse(%Pulse{} = ch, dots) do
+      period = pulse_period(ch.frequency)
+      after_first = dots - ch.timer
+      steps = 1 + div(after_first, period)
+      remainder = after_first - (steps - 1) * period
+      timer = if remainder == 0, do: period, else: period - remainder
+      %{ch | timer: timer, duty_pos: ch.duty_pos + steps &&& 7}
+    end
 
-  defp advance_wave(%Wave{enabled: false} = ch, _wave, _dots), do: ch
+    defp advance_wave(%Wave{enabled: false} = ch, _wave, _dots), do: ch
 
-  defp advance_wave(%Wave{} = ch, _wave, dots) when dots < ch.timer,
-    do: %{ch | timer: ch.timer - dots}
+    defp advance_wave(%Wave{} = ch, _wave, dots) when dots < ch.timer,
+      do: %{ch | timer: ch.timer - dots}
 
-  defp advance_wave(%Wave{} = ch, wave, dots) do
-    period = wave_period(ch.frequency)
-    after_first = dots - ch.timer
-    steps = 1 + div(after_first, period)
-    remainder = after_first - (steps - 1) * period
-    timer = if remainder == 0, do: period, else: period - remainder
-    position = ch.position + steps &&& 31
-    byte = :binary.at(wave, position >>> 1)
-    sample = if (position &&& 1) == 0, do: byte >>> 4, else: byte &&& 0x0F
-    %{ch | timer: timer, position: position, sample_buffer: sample}
-  end
+    defp advance_wave(%Wave{} = ch, wave, dots) do
+      period = wave_period(ch.frequency)
+      after_first = dots - ch.timer
+      steps = 1 + div(after_first, period)
+      remainder = after_first - (steps - 1) * period
+      timer = if remainder == 0, do: period, else: period - remainder
+      position = ch.position + steps &&& 31
+      byte = :binary.at(wave, position >>> 1)
+      sample = if (position &&& 1) == 0, do: byte >>> 4, else: byte &&& 0x0F
+      %{ch | timer: timer, position: position, sample_buffer: sample}
+    end
 
-  defp advance_noise(%Noise{enabled: false} = ch, _dots), do: ch
-  defp advance_noise(%Noise{shift: shift} = ch, _dots) when shift >= 14, do: ch
-  defp advance_noise(%Noise{} = ch, dots) when dots < ch.timer, do: %{ch | timer: ch.timer - dots}
+    defp advance_noise(%Noise{enabled: false} = ch, _dots), do: ch
+    defp advance_noise(%Noise{shift: shift} = ch, _dots) when shift >= 14, do: ch
 
-  defp advance_noise(%Noise{} = ch, dots) do
-    period = noise_period(ch)
-    after_first = dots - ch.timer
-    steps = 1 + div(after_first, period)
-    remainder = rem(after_first, period)
-    timer = if remainder == 0, do: period, else: period - remainder
-    %{ch | timer: timer, lfsr: advance_lfsr(ch.lfsr, steps, ch.width7)}
-  end
+    defp advance_noise(%Noise{} = ch, dots) when dots < ch.timer,
+      do: %{ch | timer: ch.timer - dots}
 
-  defp advance_lfsr(lfsr, 0, _width7), do: lfsr
+    defp advance_noise(%Noise{} = ch, dots) do
+      period = noise_period(ch)
+      after_first = dots - ch.timer
+      steps = 1 + div(after_first, period)
+      remainder = rem(after_first, period)
+      timer = if remainder == 0, do: period, else: period - remainder
+      %{ch | timer: timer, lfsr: advance_lfsr(ch.lfsr, steps, ch.width7)}
+    end
 
-  defp advance_lfsr(lfsr, steps, width7) do
-    feedback = bxor(lfsr, lfsr >>> 1) &&& 1
-    lfsr = lfsr >>> 1 ||| feedback <<< 14
-    lfsr = if width7, do: (lfsr &&& bxor(0x40, 0x7FFF)) ||| feedback <<< 6, else: lfsr
-    advance_lfsr(lfsr, steps - 1, width7)
+    defp advance_lfsr(lfsr, 0, _width7), do: lfsr
+
+    defp advance_lfsr(lfsr, steps, width7) do
+      feedback = bxor(lfsr, lfsr >>> 1) &&& 1
+      lfsr = lfsr >>> 1 ||| feedback <<< 14
+      lfsr = if width7, do: (lfsr &&& bxor(0x40, 0x7FFF)) ||| feedback <<< 6, else: lfsr
+      advance_lfsr(lfsr, steps - 1, width7)
+    end
   end
 
   defp clock_sequencer_units(apu, step) do
@@ -621,26 +632,28 @@ defmodule Beamicom.GB.APU do
     end
   end
 
-  defp sample_levels(apu) do
-    <<pulse_output(apu.ch1)::little-signed-16, pulse_output(apu.ch2)::little-signed-16,
-      wave_output(apu.ch3, apu.wave_ram)::little-signed-16,
-      noise_output(apu.ch4)::little-signed-16, elem(apu.registers, 20)::little-signed-16,
-      elem(apu.registers, 21)::little-signed-16>>
+  if @sample_renderer do
+    defp sample_levels(apu) do
+      <<pulse_output(apu.ch1)::little-signed-16, pulse_output(apu.ch2)::little-signed-16,
+        wave_output(apu.ch3, apu.wave_ram)::little-signed-16,
+        noise_output(apu.ch4)::little-signed-16, elem(apu.registers, 20)::little-signed-16,
+        elem(apu.registers, 21)::little-signed-16>>
+    end
+
+    defp append_silence(apu, 0), do: {apu.samples, apu.sample_dacs}
+
+    defp append_silence(%__MODULE__{renderer: :native} = apu, count),
+      do: {
+        [:binary.copy(@silence, count) | apu.samples],
+        append_dac_samples(apu.sample_dacs, count, 0)
+      }
+
+    defp append_silence(apu, count),
+      do: {
+        [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples],
+        append_dac_samples(apu.sample_dacs, count, 0)
+      }
   end
-
-  defp append_silence(apu, 0), do: {apu.samples, apu.sample_dacs}
-
-  defp append_silence(%__MODULE__{renderer: :native} = apu, count),
-    do: {
-      [:binary.copy(@silence, count) | apu.samples],
-      append_dac_samples(apu.sample_dacs, count, 0)
-    }
-
-  defp append_silence(apu, count),
-    do: {
-      [:binary.copy(<<0::size(6 * 16)>>, count) | apu.samples],
-      append_dac_samples(apu.sample_dacs, count, 0)
-    }
 
   defp append_dac_samples(samples, 0, _enabled), do: samples
 
@@ -690,32 +703,36 @@ defmodule Beamicom.GB.APU do
       defp advance_renderer(apu, dots), do: advance(apu, dots)
     end
 
-    if @renderer == :native do
-      defp renderer_sample(apu), do: mix_sample(apu)
-    else
-      defp renderer_sample(apu), do: sample_levels(apu)
+    if @sample_renderer do
+      if @renderer == :native do
+        defp renderer_sample(apu), do: mix_sample(apu)
+      else
+        defp renderer_sample(apu), do: sample_levels(apu)
+      end
     end
   end
 
-  defp advance_silence(apu, dots) do
-    total = apu.sample_phase + dots * @sample_rate
-    count = div(total, @clock_rate)
-    phase = total - count * @clock_rate
-    seq_total = apu.sequencer_phase + dots
-    seq_ticks = div(seq_total, @sequencer_period)
-    seq_phase = seq_total - seq_ticks * @sequencer_period
+  if @sample_renderer do
+    defp advance_silence(apu, dots) do
+      total = apu.sample_phase + dots * @sample_rate
+      count = div(total, @clock_rate)
+      phase = total - count * @clock_rate
+      seq_total = apu.sequencer_phase + dots
+      seq_ticks = div(seq_total, @sequencer_period)
+      seq_phase = seq_total - seq_ticks * @sequencer_period
 
-    {samples, sample_dacs} = append_silence(apu, count)
+      {samples, sample_dacs} = append_silence(apu, count)
 
-    %{
-      apu
-      | sample_phase: phase,
-        samples: samples,
-        sample_dacs: sample_dacs,
-        sample_count: apu.sample_count + count,
-        sequencer_phase: seq_phase,
-        sequencer_step: apu.sequencer_step + seq_ticks &&& 7
-    }
+      %{
+        apu
+        | sample_phase: phase,
+          samples: samples,
+          sample_dacs: sample_dacs,
+          sample_count: apu.sample_count + count,
+          sequencer_phase: seq_phase,
+          sequencer_step: apu.sequencer_step + seq_ticks &&& 7
+      }
+    end
   end
 
   if @dynamic_renderers or @renderer == Beamicom.GB.Nx.APUSynthRenderer do
@@ -803,26 +820,28 @@ defmodule Beamicom.GB.APU do
     end
   end
 
-  defp pulse_output(%Pulse{dac: false}), do: 0
-  defp pulse_output(%Pulse{enabled: false}), do: 15
+  if @sample_renderer do
+    defp pulse_output(%Pulse{dac: false}), do: 0
+    defp pulse_output(%Pulse{enabled: false}), do: 15
 
-  defp pulse_output(ch) do
-    bit = elem(elem(@duty_rows, ch.duty), ch.duty_pos)
-    elem(@dac_levels, bit * ch.volume)
+    defp pulse_output(ch) do
+      bit = elem(elem(@duty_rows, ch.duty), ch.duty_pos)
+      elem(@dac_levels, bit * ch.volume)
+    end
+
+    defp wave_output(%Wave{dac: false}, _wave), do: 0
+    defp wave_output(%Wave{enabled: false}, _wave), do: 15
+    defp wave_output(%Wave{level: 0}, _wave), do: 15
+
+    defp wave_output(ch, _wave) do
+      shift = ch.level - 1
+      elem(@dac_levels, ch.sample_buffer >>> shift)
+    end
+
+    defp noise_output(%Noise{dac: false}), do: 0
+    defp noise_output(%Noise{enabled: false}), do: 15
+    defp noise_output(ch), do: elem(@dac_levels, (bxor(ch.lfsr, 1) &&& 1) * ch.volume)
   end
-
-  defp wave_output(%Wave{dac: false}, _wave), do: 0
-  defp wave_output(%Wave{enabled: false}, _wave), do: 15
-  defp wave_output(%Wave{level: 0}, _wave), do: 15
-
-  defp wave_output(ch, _wave) do
-    shift = ch.level - 1
-    elem(@dac_levels, ch.sample_buffer >>> shift)
-  end
-
-  defp noise_output(%Noise{dac: false}), do: 0
-  defp noise_output(%Noise{enabled: false}), do: 15
-  defp noise_output(ch), do: elem(@dac_levels, (bxor(ch.lfsr, 1) &&& 1) * ch.volume)
 
   if @dynamic_renderers or @renderer == :native do
     defp clamp16(sample) when sample < -32_768, do: -32_768
