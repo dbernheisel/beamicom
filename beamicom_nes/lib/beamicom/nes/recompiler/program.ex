@@ -12,7 +12,7 @@ defmodule Beamicom.NES.Recompiler.Program do
 
   @doc "Dispatch one generated block or one interpreter fallback instruction."
   def step(%__MODULE__{} = program, %Console{} = console) do
-    known? = program.module.known_block?(console.cpu.pc)
+    known? = program.module.known_console?(console)
     {next, count} = program.module.dispatch(console)
 
     if known? do

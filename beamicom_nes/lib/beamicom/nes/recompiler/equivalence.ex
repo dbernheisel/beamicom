@@ -74,7 +74,10 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
     %{
       cpu: Map.take(cpu, @cpu_fields),
       ram: bus.ram,
-      wram: bus.wram
+      wram: bus.wram,
+      mapper: bus.mapper,
+      prg_banks: bus.prg_banks,
+      mapper_state: bus.mapper_state
     }
   end
 
@@ -115,7 +118,7 @@ defmodule Beamicom.NES.Recompiler.Equivalence do
     expected = snapshot(expected)
     actual = snapshot(actual)
 
-    Enum.find_value([:cpu, :ram, :wram], fn field ->
+    Enum.find_value([:cpu, :ram, :wram, :mapper, :prg_banks, :mapper_state], fn field ->
       expected_value = Map.fetch!(expected, field)
       actual_value = Map.fetch!(actual, field)
 

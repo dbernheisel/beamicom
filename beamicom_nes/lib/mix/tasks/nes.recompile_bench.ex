@@ -3,12 +3,14 @@ defmodule Mix.Tasks.Nes.RecompileBench do
   @moduledoc """
   Usage:
 
-      mix nes.recompile_bench ROM [--instructions 100000] [--ram-writes 1000000]
+      mix nes.recompile_bench ROM [--instructions 100000] [--profile-instructions 250000]
+                                  [--ram-writes 1000000]
 
-  Mapper-0 ROMs report interpreter and generated-block throughput. Other
-  mappers report 100% fallback coverage instead of presenting an inapplicable
-  generated speedup. The RAM microbenchmark compares the current 2 KiB
-  binary-copy write with one `:atomics.put/3` per write.
+  Mapper-0 ROMs use vector-root recursive discovery. MMC5 ROMs first run the
+  interpreter for the requested profile interval, then compile the observed PRG
+  mappings; unobserved mappings and executable PRG-RAM fall back. Other mappers
+  report 100% fallback coverage. The RAM microbenchmark compares the current
+  2 KiB binary-copy write with one `:atomics.put/3` per write.
   """
 
   use Mix.Task
@@ -16,12 +18,14 @@ defmodule Mix.Tasks.Nes.RecompileBench do
   import Bitwise
 
   alias Beamicom.NES.{Cart, Console}
-  alias Beamicom.NES.Recompiler.{Generator, Program}
+  alias Beamicom.NES.Recompiler.{Generator, MMC5Profile, Program}
 
   @impl true
   def run(args) do
     {options, paths, invalid} =
-      OptionParser.parse(args, strict: [instructions: :integer, ram_writes: :integer])
+      OptionParser.parse(args,
+        strict: [instructions: :integer, profile_instructions: :integer, ram_writes: :integer]
+      )
 
     case {paths, invalid} do
       {[path], []} -> benchmark(path, options)
@@ -34,8 +38,9 @@ defmodule Mix.Tasks.Nes.RecompileBench do
     {:ok, cart} = Cart.parse(media)
     instructions = Keyword.get(options, :instructions, 100_000)
     ram_writes = Keyword.get(options, :ram_writes, 1_000_000)
+    profile_instructions = Keyword.get(options, :profile_instructions, 250_000)
 
-    if instructions < 1 or ram_writes < 1,
+    if instructions < 1 or profile_instructions < 1 or ram_writes < 1,
       do: Mix.raise("instruction and RAM-write counts must be positive")
 
     start = Console.load_binary(media)
@@ -43,10 +48,14 @@ defmodule Mix.Tasks.Nes.RecompileBench do
     {interpreter_us, _console} = :timer.tc(fn -> run_interpreter(start, instructions) end)
     interpreter_ips = rate(instructions, interpreter_us)
 
+    {compile_us, compile_result} =
+      :timer.tc(fn -> compile(cart, start, profile_instructions) end)
+
     generated =
-      case Generator.compile(cart) do
+      case compile_result do
         {:ok, program} ->
           benchmark_generated(program, start, instructions, interpreter_ips)
+          |> Map.put(:compile_wall_us, compile_us)
 
         {:error, {:unsupported_mapper, mapper}} ->
           %{
@@ -63,6 +72,7 @@ defmodule Mix.Tasks.Nes.RecompileBench do
       rom_sha256: Base.encode16(:crypto.hash(:sha256, media), case: :lower),
       mapper: cart.mapper,
       requested_instructions: instructions,
+      profile_instructions: if(cart.mapper == 5, do: profile_instructions, else: 0),
       interpreter: %{wall_us: interpreter_us, instructions_per_second: interpreter_ips},
       generated: generated,
       ram_store_microbenchmark: ram_benchmark(ram_writes),
@@ -72,6 +82,15 @@ defmodule Mix.Tasks.Nes.RecompileBench do
 
     IO.puts(:json.encode(result))
   end
+
+  defp compile(%Cart{mapper: 5} = cart, start, profile_instructions) do
+    with {:ok, profile, _console} <- MMC5Profile.capture(start, profile_instructions),
+         {:ok, program} <- Generator.compile(cart, profile) do
+      {:ok, %{program | discovery: Map.put(program.discovery, :profile, profile)}}
+    end
+  end
+
+  defp compile(cart, _start, _profile_instructions), do: Generator.compile(cart)
 
   defp benchmark_generated(program, start, target, interpreter_ips) do
     {_warm_console, _warm_count} = run_generated(program, start, min(target, 2_000))
@@ -97,7 +116,18 @@ defmodule Mix.Tasks.Nes.RecompileBench do
       fallback_instructions: fallback,
       fallback_percent: percent(fallback, compiled + fallback)
     }
+    |> maybe_profile_stats(program.discovery)
   end
+
+  defp maybe_profile_stats(result, %{mapper: 5, profile: profile}) do
+    Map.put(result, :profile, %{
+      mapping_signatures: MapSet.size(profile.signatures),
+      mapping_changes: profile.mapping_changes,
+      hot_instruction_identities: map_size(profile.hits)
+    })
+  end
+
+  defp maybe_profile_stats(result, _discovery), do: result
 
   defp run_interpreter(console, count) do
     Enum.reduce(1..count, console, fn _, console -> Console.step(console) end)
