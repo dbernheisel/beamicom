@@ -373,6 +373,29 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(data, 256 * 3, 3) == <<0, 255, 0>>
   end
 
+  test "scanline capture does not blank earlier rows when the frame ends forced blank" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> write_cgram_color(0, 0x001F)
+      |> PPU.begin_frame(true)
+
+    ppu = Enum.reduce(1..100, ppu, fn line, ppu -> PPU.capture_scanline(ppu, line) end)
+    ppu = PPU.write(ppu, 0x2100, 0x8F)
+    ppu = Enum.reduce(101..224, ppu, fn line, ppu -> PPU.capture_scanline(ppu, line) end)
+    data = PPU.render_frame(ppu).data
+
+    assert binary_part(data, 0, 3) == <<255, 0, 0>>
+    assert binary_part(data, 99 * 256 * 3, 3) == <<255, 0, 0>>
+    assert binary_part(data, 100 * 256 * 3, 3) == <<0, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(ppu, objects) == data
+    end
+  end
+
   test "renders Mode 7's interleaved tilemap and pixel data" do
     ppu =
       PPU.new()

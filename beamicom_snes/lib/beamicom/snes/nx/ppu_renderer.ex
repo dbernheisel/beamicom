@@ -6,7 +6,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     @width 256
     @height 224
-    @control_columns 40
+    @control_columns 41
 
     @doc "Compiles every supported control-shape variant before realtime playback starts."
     def warmup do
@@ -89,7 +89,8 @@ if Code.ensure_loaded?(Nx.Defn) do
             elem(state, 28),
             elem(state, 29),
             elem(state, 30),
-            if(elem(state, 31), do: 1, else: 0)
+            if(elem(state, 31), do: 1, else: 0),
+            if(elem(state, 0), do: 1, else: 0)
           ]
         end)
 
@@ -220,7 +221,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       enabled = enabled and not window_mode_applies(band(shr(select, 4), 3), color_window)
       mixed = blend(first, second, Nx.select(fixed_fallback, band(math, 0xBF), math))
       color = Nx.select(enabled, mixed, first)
-      brightness = column(controls, 0)
+      brightness = Nx.select(column(controls, 40) != 0, 0, column(controls, 0))
 
       Nx.stack(
         [
@@ -302,7 +303,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       enabled = Nx.select(main_layer == 4, enabled and main_index >= 192, enabled)
       math = Nx.select(fixed_fallback, band(math, 0xBF), math)
       color = Nx.select(enabled, blend(first, second, math), first)
-      brightness = column(controls, 0)
+      brightness = Nx.select(column(controls, 40) != 0, 0, column(controls, 0))
 
       Nx.stack(
         [
@@ -357,7 +358,7 @@ if Code.ensure_loaded?(Nx.Defn) do
       enabled = Nx.select(main_layer == 4, enabled and main_index >= 192, enabled)
       math = Nx.select(fixed_fallback, band(math, 0xBF), math)
       color = Nx.select(enabled, blend(first, second, math), first)
-      brightness = column(controls, 0)
+      brightness = Nx.select(column(controls, 40) != 0, 0, column(controls, 0))
 
       Nx.stack(
         [
@@ -777,7 +778,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp compiled(args, variant) do
       key =
-        {__MODULE__, :background_obj_v5, variant, Beamicom.SNES.Nx.compiler_options()}
+        {__MODULE__, :background_obj_v6, variant, Beamicom.SNES.Nx.compiler_options()}
 
       case :persistent_term.get(key, nil) do
         nil ->

@@ -481,10 +481,11 @@ defmodule Beamicom.SNES.PPU do
   @spec render_frame(t()) :: frame()
   def render_frame(%__MODULE__{} = ppu) do
     height = if ppu.overscan?, do: 239, else: 224
+    scanlines = scanline_states(ppu, height)
 
     data =
       cond do
-        ppu.force_blank? or ppu.brightness == 0 ->
+        is_nil(scanlines) and (ppu.force_blank? or ppu.brightness == 0) ->
           :binary.copy(<<0, 0, 0>>, @width * height)
 
         nx_renderer?(ppu) ->
@@ -499,8 +500,6 @@ defmodule Beamicom.SNES.PPU do
             | vram: ppu.vram |> :array.to_list() |> :erlang.list_to_binary(),
               oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()
           }
-
-          scanlines = scanline_states(ppu, height)
 
           workers =
             :beamicom_snes
@@ -748,29 +747,33 @@ defmodule Beamicom.SNES.PPU do
       row_ppu =
         if scanlines, do: apply_visual_state(render_ppu, elem(scanlines, y)), else: render_ppu
 
-      main_layers = render_layers(row_ppu, row_ppu.main_screen)
-      sub_layers = render_layers(row_ppu, row_ppu.sub_screen)
+      if row_ppu.force_blank? or row_ppu.brightness == 0 do
+        {:binary.copy(<<0, 0, 0>>, @width), {tile_cache, color_cache, obj_cache}}
+      else
+        main_layers = render_layers(row_ppu, row_ppu.main_screen)
+        sub_layers = render_layers(row_ppu, row_ppu.sub_screen)
 
-      {row_palette, row_color_data, color_cache} =
-        if scanlines do
-          cached_color_data(row_ppu, color_cache)
-        else
-          {palette, color_data, color_cache}
-        end
+        {row_palette, row_color_data, color_cache} =
+          if scanlines do
+            cached_color_data(row_ppu, color_cache)
+          else
+            {palette, color_data, color_cache}
+          end
 
-      {row, tile_cache, obj_cache} =
-        render_row(
-          row_ppu,
-          row_palette,
-          row_color_data,
-          main_layers,
-          sub_layers,
-          y,
-          tile_cache,
-          obj_cache
-        )
+        {row, tile_cache, obj_cache} =
+          render_row(
+            row_ppu,
+            row_palette,
+            row_color_data,
+            main_layers,
+            sub_layers,
+            y,
+            tile_cache,
+            obj_cache
+          )
 
-      {row, {tile_cache, color_cache, obj_cache}}
+        {row, {tile_cache, color_cache, obj_cache}}
+      end
     end)
     |> elem(0)
   end
