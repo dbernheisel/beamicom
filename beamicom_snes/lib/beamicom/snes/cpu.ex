@@ -17,6 +17,7 @@ defmodule Beamicom.SNES.CPU do
   @compile {:inline,
             execute_deferred: 2,
             fetch8: 2,
+            read_bus: 2,
             accumulator_width: 1,
             index_width: 1,
             merge_accumulator: 3,
@@ -296,17 +297,7 @@ defmodule Beamicom.SNES.CPU do
       end
 
     address = cpu.db <<< 16 ||| address
-    {bus, _clocks} = Bus.write(bus, address, value)
-
-    bus =
-      if width == 16 do
-        {bus, _clocks} =
-          Bus.write(bus, (address &&& 0xFF0000) ||| (address + 1 &&& 0xFFFF), value >>> 8)
-
-        bus
-      else
-        bus
-      end
+    {bus, _clocks} = write_width(bus, address, value, width)
 
     {:ok, cpu, bus}
   end
@@ -332,8 +323,8 @@ defmodule Beamicom.SNES.CPU do
     {pointer, cpu, bus} = fetch16(cpu, bus)
     pointer = cpu.pb <<< 16 ||| (pointer + cpu.x &&& 0xFFFF)
     {bus, _clocks} = Bus.idle(bus)
-    {low, bus, _clocks} = Bus.read(bus, pointer)
-    {high, bus, _clocks} = Bus.read(bus, next_bank_address(pointer))
+    {low, bus, _clocks} = read_bus(bus, pointer)
+    {high, bus, _clocks} = read_bus(bus, next_bank_address(pointer))
     {:ok, %{cpu | pc: low ||| high <<< 8}, bus}
   end
 
@@ -609,8 +600,7 @@ defmodule Beamicom.SNES.CPU do
 
   defp execute(0x0B, cpu, bus) do
     {bus, _clocks} = Bus.idle(bus)
-    {cpu, bus} = push(cpu, bus, cpu.d >>> 8)
-    {cpu, bus} = push(cpu, bus, cpu.d)
+    {cpu, bus} = push_effective_word(cpu, bus, cpu.d)
     {:ok, cpu, bus}
   end
 
@@ -630,7 +620,9 @@ defmodule Beamicom.SNES.CPU do
           pull_width(cpu, bus, index_width(cpu))
 
         0xAB ->
-          {value, cpu, bus} = pull(cpu, bus)
+          {value, cpu, bus} =
+            if cpu.emulation?, do: pull_emulation_linear(cpu, bus), else: pull(cpu, bus)
+
           {value, cpu, bus, 8}
 
         0xFA ->
@@ -651,23 +643,24 @@ defmodule Beamicom.SNES.CPU do
 
   defp execute(0x2B, cpu, bus) do
     {bus, _clocks} = Bus.idle(bus, 2)
-    {value, cpu, bus, 16} = pull_width(cpu, bus, 16)
+
+    {value, cpu, bus} =
+      if cpu.emulation?, do: pull_emulation_linear_word(cpu, bus), else: pull_word(cpu, bus)
+
     {:ok, %{cpu | d: value} |> set_zn(value, 16), bus}
   end
 
   # PEA, PEI, and PER push 16-bit effective values high byte first.
   defp execute(0xF4, cpu, bus) do
     {value, cpu, bus} = fetch16(cpu, bus)
-    {cpu, bus} = push(cpu, bus, value >>> 8)
-    {cpu, bus} = push(cpu, bus, value)
+    {cpu, bus} = push_effective_word(cpu, bus, value)
     {:ok, cpu, bus}
   end
 
   defp execute(0xD4, cpu, bus) do
     {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {value, bus} = read_pointer16(bus, pointer)
-    {cpu, bus} = push(cpu, bus, value >>> 8)
-    {cpu, bus} = push(cpu, bus, value)
+    {cpu, bus} = push_effective_word(cpu, bus, value)
     {:ok, cpu, bus}
   end
 
@@ -676,16 +669,19 @@ defmodule Beamicom.SNES.CPU do
     displacement = if relative >= 0x8000, do: relative - 0x10000, else: relative
     value = cpu.pc + displacement &&& 0xFFFF
     {bus, _clocks} = Bus.idle(bus)
-    {cpu, bus} = push(cpu, bus, value >>> 8)
-    {cpu, bus} = push(cpu, bus, value)
+    {cpu, bus} = push_effective_word(cpu, bus, value)
     {:ok, cpu, bus}
   end
 
   defp execute(opcode, cpu, bus) when opcode in [0x44, 0x54] do
     {destination_bank, cpu, bus} = fetch8(cpu, bus)
     {source_bank, cpu, bus} = fetch8(cpu, bus)
-    {value, bus, _clocks} = Bus.read(bus, source_bank <<< 16 ||| cpu.x)
-    {bus, _clocks} = Bus.write(bus, destination_bank <<< 16 ||| cpu.y, value)
+    index_mask = if(index_width(cpu) == 8, do: 0xFF, else: 0xFFFF)
+    {value, bus, _clocks} = read_bus(bus, source_bank <<< 16 ||| (cpu.x &&& index_mask))
+
+    {bus, _clocks} =
+      Bus.write(bus, destination_bank <<< 16 ||| (cpu.y &&& index_mask), value)
+
     {bus, _clocks} = Bus.idle(bus, 2)
     delta = if opcode == 0x54, do: 1, else: -1
     a = cpu.a - 1 &&& 0xFFFF
@@ -693,8 +689,8 @@ defmodule Beamicom.SNES.CPU do
     cpu = %{
       cpu
       | a: a,
-        x: cpu.x + delta &&& 0xFFFF,
-        y: cpu.y + delta &&& 0xFFFF,
+        x: cpu.x + delta &&& index_mask,
+        y: cpu.y + delta &&& index_mask,
         db: destination_bank,
         pc: if(a == 0xFFFF, do: cpu.pc, else: cpu.pc - 3 &&& 0xFFFF)
     }
@@ -729,9 +725,16 @@ defmodule Beamicom.SNES.CPU do
     {bank, cpu, bus} = fetch8(cpu, bus)
     return = cpu.pc - 1 &&& 0xFFFF
     {bus, _clocks} = Bus.idle(bus)
-    {cpu, bus} = push(cpu, bus, cpu.pb)
-    {cpu, bus} = push(cpu, bus, return >>> 8)
-    {cpu, bus} = push(cpu, bus, return)
+
+    {cpu, bus} =
+      if cpu.emulation? do
+        push_emulation_linear(cpu, bus, [cpu.pb, return >>> 8, return])
+      else
+        {cpu, bus} = push(cpu, bus, cpu.pb)
+        {cpu, bus} = push(cpu, bus, return >>> 8)
+        push(cpu, bus, return)
+      end
+
     {:ok, %{cpu | pb: bank, pc: target}, bus}
   end
 
@@ -740,10 +743,17 @@ defmodule Beamicom.SNES.CPU do
     pointer = cpu.pb <<< 16 ||| (pointer + cpu.x &&& 0xFFFF)
     return = cpu.pc - 1 &&& 0xFFFF
     {bus, _clocks} = Bus.idle(bus)
-    {low, bus, _clocks} = Bus.read(bus, pointer)
-    {high, bus, _clocks} = Bus.read(bus, next_bank_address(pointer))
-    {cpu, bus} = push(cpu, bus, return >>> 8)
-    {cpu, bus} = push(cpu, bus, return)
+    {low, bus, _clocks} = read_bus(bus, pointer)
+    {high, bus, _clocks} = read_bus(bus, next_bank_address(pointer))
+
+    {cpu, bus} =
+      if cpu.emulation? do
+        push_emulation_linear(cpu, bus, [return >>> 8, return])
+      else
+        {cpu, bus} = push(cpu, bus, return >>> 8)
+        push(cpu, bus, return)
+      end
+
     {:ok, %{cpu | pc: low ||| high <<< 8}, bus}
   end
 
@@ -756,9 +766,17 @@ defmodule Beamicom.SNES.CPU do
 
   defp execute(0x6B, cpu, bus) do
     {bus, _clocks} = Bus.idle(bus, 2)
-    {low, cpu, bus} = pull(cpu, bus)
-    {high, cpu, bus} = pull(cpu, bus)
-    {bank, cpu, bus} = pull(cpu, bus)
+
+    {low, high, bank, cpu, bus} =
+      if cpu.emulation? do
+        pull_emulation_linear_long(cpu, bus)
+      else
+        {low, cpu, bus} = pull(cpu, bus)
+        {high, cpu, bus} = pull(cpu, bus)
+        {bank, cpu, bus} = pull(cpu, bus)
+        {low, high, bank, cpu, bus}
+      end
+
     {:ok, %{cpu | pb: bank, pc: (low ||| high <<< 8) + 1 &&& 0xFFFF}, bus}
   end
 
@@ -784,8 +802,42 @@ defmodule Beamicom.SNES.CPU do
   end
 
   defp fetch8(cpu, bus) do
-    {value, bus, _clocks} = Bus.read(bus, cpu.pb <<< 16 ||| cpu.pc)
+    {value, bus, _clocks} = read_bus(bus, cpu.pb <<< 16 ||| cpu.pc)
     {value, %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}, bus}
+  end
+
+  defp read_bus(%SystemBus{} = bus, address) do
+    address = address &&& 0xFFFFFF
+    bank = address >>> 16
+    offset = address &&& 0xFFFF
+
+    cond do
+      bank in 0x7E..0x7F ->
+        value = :array.get(address - 0x7E0000, bus.wram)
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
+
+      (bank in 0x00..0x3F or bank in 0x80..0xBF) and offset < 0x2000 ->
+        value = :array.get(offset, bus.wram)
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
+
+      bus.cartridge.layout == :lorom and
+          (offset >= 0x8000 or bank in 0x40..0x6F or bank in 0xC0..0xEF) ->
+        clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
+        raw_offset = (bank &&& 0x7F) <<< 15 ||| (offset &&& 0x7FFF)
+
+        rom_offset =
+          if raw_offset < bus.cartridge.size,
+            do: raw_offset,
+            else: Beamicom.SNES.Cartridge.mirror_offset(raw_offset, bus.cartridge.size)
+
+        value = :binary.at(bus.cartridge.rom, rom_offset)
+
+        {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks},
+         clocks}
+
+      true ->
+        SystemBus.cpu_read(bus, address)
+    end
   end
 
   defp fetch16(cpu, bus) do
@@ -808,12 +860,18 @@ defmodule Beamicom.SNES.CPU do
     {operand, cpu, bus} = fetch8(cpu, bus)
     extra = if (cpu.d &&& 0xFF) != 0 or indexed?, do: 1, else: 0
     {bus, _clocks} = if extra == 1, do: Bus.idle(bus), else: {bus, 0}
-    {cpu.d + operand + index &&& 0xFFFF, cpu, bus}
+
+    address =
+      if indexed? and cpu.emulation? and (cpu.d &&& 0xFF) == 0,
+        do: (cpu.d &&& 0xFF00) ||| (operand + index &&& 0xFF),
+        else: cpu.d + operand + index &&& 0xFFFF
+
+    {address, cpu, bus}
   end
 
   defp absolute_address(cpu, bus, index) do
     {operand, cpu, bus} = fetch16(cpu, bus)
-    {cpu.db <<< 16 ||| (operand + index &&& 0xFFFF), cpu, bus}
+    {(cpu.db <<< 16 ||| operand) + index &&& 0xFFFFFF, cpu, bus}
   end
 
   defp resolve_address(:dp, cpu, bus), do: direct_address(cpu, bus, 0, false)
@@ -838,7 +896,7 @@ defmodule Beamicom.SNES.CPU do
 
   defp resolve_address(:dpix, cpu, bus) do
     {pointer, cpu, bus} = direct_address(cpu, bus, cpu.x, true)
-    {address, bus} = read_pointer16(bus, pointer)
+    {address, bus} = read_dp_indexed_pointer16(bus, pointer, cpu.emulation?)
     {cpu.db <<< 16 ||| address, cpu, bus}
   end
 
@@ -851,7 +909,7 @@ defmodule Beamicom.SNES.CPU do
   defp resolve_address(:dpiy, cpu, bus) do
     {pointer, cpu, bus} = direct_address(cpu, bus, 0, false)
     {address, bus} = read_pointer16(bus, pointer)
-    {cpu.db <<< 16 ||| (address + cpu.y &&& 0xFFFF), cpu, bus}
+    {(cpu.db <<< 16 ||| address) + cpu.y &&& 0xFFFFFF, cpu, bus}
   end
 
   defp resolve_address(:dpil, cpu, bus) do
@@ -870,29 +928,40 @@ defmodule Beamicom.SNES.CPU do
     {pointer, cpu, bus} = resolve_address(:sr, cpu, bus)
     {address, bus} = read_pointer16(bus, pointer)
     {bus, _clocks} = Bus.idle(bus)
-    {cpu.db <<< 16 ||| (address + cpu.y &&& 0xFFFF), cpu, bus}
+    {(cpu.db <<< 16 ||| address) + cpu.y &&& 0xFFFFFF, cpu, bus}
   end
 
   defp read_pointer16(bus, address) do
-    {low, bus, _clocks} = Bus.read(bus, address)
-    {high, bus, _clocks} = Bus.read(bus, address + 1 &&& 0xFFFF)
+    {low, bus, _clocks} = read_bus(bus, address)
+    {high, bus, _clocks} = read_bus(bus, address + 1 &&& 0xFFFF)
+    {low ||| high <<< 8, bus}
+  end
+
+  defp read_dp_indexed_pointer16(bus, address, emulation?) do
+    high_address =
+      if emulation?,
+        do: (address &&& 0xFF00) ||| (address + 1 &&& 0xFF),
+        else: address + 1 &&& 0xFFFF
+
+    {low, bus, _clocks} = read_bus(bus, address)
+    {high, bus, _clocks} = read_bus(bus, high_address)
     {low ||| high <<< 8, bus}
   end
 
   defp read_pointer24(bus, address) do
     {word, bus} = read_pointer16(bus, address)
-    {bank, bus, _clocks} = Bus.read(bus, address + 2 &&& 0xFFFF)
+    {bank, bus, _clocks} = read_bus(bus, address + 2 &&& 0xFFFF)
     {word ||| bank <<< 16, bus}
   end
 
   defp read_width(bus, address, 8) do
-    {value, bus, clocks} = Bus.read(bus, address)
+    {value, bus, clocks} = read_bus(bus, address)
     {value, bus, clocks}
   end
 
   defp read_width(bus, address, 16) do
-    {low, bus, low_clocks} = Bus.read(bus, address)
-    {high, bus, high_clocks} = Bus.read(bus, next_bank_address(address))
+    {low, bus, low_clocks} = read_bus(bus, address)
+    {high, bus, high_clocks} = read_bus(bus, address + 1 &&& 0xFFFFFF)
     {low ||| high <<< 8, bus, low_clocks + high_clocks}
   end
 
@@ -900,7 +969,7 @@ defmodule Beamicom.SNES.CPU do
 
   defp write_width(bus, address, value, 16) do
     {bus, low_clocks} = Bus.write(bus, address, value)
-    {bus, high_clocks} = Bus.write(bus, next_bank_address(address), value >>> 8)
+    {bus, high_clocks} = Bus.write(bus, address + 1 &&& 0xFFFFFF, value >>> 8)
     {bus, low_clocks + high_clocks}
   end
 
@@ -1235,8 +1304,8 @@ defmodule Beamicom.SNES.CPU do
     pushed_p = if cpu.emulation?, do: cpu.p &&& bnot(@x), else: cpu.p
     {cpu, bus} = push(cpu, bus, pushed_p)
     vector = interrupt_vector(cpu.emulation?, kind)
-    {low, bus, _clocks} = Bus.read(bus, vector)
-    {high, bus, _clocks} = Bus.read(bus, vector + 1)
+    {low, bus, _clocks} = read_bus(bus, vector)
+    {high, bus, _clocks} = read_bus(bus, vector + 1)
 
     cpu = %{
       cpu
@@ -1261,8 +1330,8 @@ defmodule Beamicom.SNES.CPU do
     pushed_p = if cpu.emulation?, do: cpu.p ||| @x, else: cpu.p
     {cpu, bus} = push(cpu, bus, pushed_p)
     vector = interrupt_vector(cpu.emulation?, kind)
-    {low, bus, _clocks} = Bus.read(bus, vector)
-    {high, bus, _clocks} = Bus.read(bus, vector + 1)
+    {low, bus, _clocks} = read_bus(bus, vector)
+    {high, bus, _clocks} = read_bus(bus, vector + 1)
 
     cpu = %{
       cpu
@@ -1294,14 +1363,63 @@ defmodule Beamicom.SNES.CPU do
     {%{cpu | s: s}, bus}
   end
 
+  defp push_emulation_linear(cpu, bus, values) do
+    {bus, s} =
+      Enum.reduce(values, {bus, cpu.s}, fn value, {bus, s} ->
+        {bus, _clocks} = Bus.write(bus, s, value)
+        {bus, s - 1 &&& 0xFFFF}
+      end)
+
+    {%{cpu | s: 0x0100 ||| (s &&& 0xFF)}, bus}
+  end
+
+  defp push_effective_word(%{emulation?: true} = cpu, bus, value),
+    do: push_emulation_linear(cpu, bus, [value >>> 8, value])
+
+  defp push_effective_word(cpu, bus, value) do
+    {cpu, bus} = push(cpu, bus, value >>> 8)
+    push(cpu, bus, value)
+  end
+
   defp pull(cpu, bus) do
     s =
       if cpu.emulation?,
         do: 0x0100 ||| (cpu.s + 1 &&& 0xFF),
         else: cpu.s + 1 &&& 0xFFFF
 
-    {value, bus, _clocks} = Bus.read(bus, s)
+    {value, bus, _clocks} = read_bus(bus, s)
     {value, %{cpu | s: s}, bus}
+  end
+
+  defp pull_emulation_linear(cpu, bus) do
+    address = cpu.s + 1 &&& 0xFFFF
+    {value, bus, _clocks} = read_bus(bus, address)
+    {value, %{cpu | s: 0x0100 ||| (address &&& 0xFF)}, bus}
+  end
+
+  defp pull_emulation_linear_word(cpu, bus) do
+    low_address = cpu.s + 1 &&& 0xFFFF
+    high_address = low_address + 1 &&& 0xFFFF
+    {low, bus, _clocks} = read_bus(bus, low_address)
+    {high, bus, _clocks} = read_bus(bus, high_address)
+    {low ||| high <<< 8, %{cpu | s: 0x0100 ||| (high_address &&& 0xFF)}, bus}
+  end
+
+  defp pull_emulation_linear_long(cpu, bus) do
+    low_address = cpu.s + 1 &&& 0xFFFF
+    high_address = low_address + 1 &&& 0xFFFF
+    bank_address = high_address + 1 &&& 0xFFFF
+    {low, bus, _clocks} = read_bus(bus, low_address)
+    {high, bus, _clocks} = read_bus(bus, high_address)
+    {bank, bus, _clocks} = read_bus(bus, bank_address)
+    cpu = %{cpu | s: 0x0100 ||| (bank_address &&& 0xFF)}
+    {low, high, bank, cpu, bus}
+  end
+
+  defp pull_word(cpu, bus) do
+    {low, cpu, bus} = pull(cpu, bus)
+    {high, cpu, bus} = pull(cpu, bus)
+    {low ||| high <<< 8, cpu, bus}
   end
 
   defp pull_width(cpu, bus, 8) do
@@ -1318,7 +1436,9 @@ defmodule Beamicom.SNES.CPU do
   defp accumulator_width(cpu), do: if((cpu.p &&& @m) == 0, do: 16, else: 8)
   defp index_width(cpu), do: if((cpu.p &&& @x) == 0, do: 16, else: 8)
 
-  defp merge_accumulator(accumulator, value, 8), do: (accumulator &&& 0xFF00) ||| value
+  defp merge_accumulator(accumulator, value, 8),
+    do: (accumulator &&& 0xFF00) ||| (value &&& 0xFF)
+
   defp merge_accumulator(_accumulator, value, 16), do: value
 
   defp mask_width(value, 8), do: value &&& 0xFF

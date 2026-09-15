@@ -261,6 +261,17 @@ defmodule Beamicom.SNES.Bus do
     {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + 8}, 8}
   end
 
+  defp cpu_read_rom(%{cartridge: %{layout: :lorom, rom: rom, size: size}} = bus, address)
+       when (address &&& 0xFFFF) >= 0x8000 or (address >>> 16) in 0x40..0x6F or
+              (address >>> 16) in 0xC0..0xEF do
+    clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
+    raw_offset = (address >>> 16 &&& 0x7F) <<< 15 ||| (address &&& 0x7FFF)
+    offset = if raw_offset < size, do: raw_offset, else: Cartridge.mirror_offset(raw_offset, size)
+    value = :binary.at(rom, offset)
+
+    {value, %{bus | open_bus: value, cpu_pending_clocks: bus.cpu_pending_clocks + clocks}, clocks}
+  end
+
   defp cpu_read_rom(bus, address) do
     clocks = if bus.fast_rom? and address >= 0x800000, do: 6, else: 8
 

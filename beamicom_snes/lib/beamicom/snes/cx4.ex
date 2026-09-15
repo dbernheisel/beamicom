@@ -102,7 +102,7 @@ defmodule Beamicom.SNES.Cx4 do
 
     case offset do
       @load_offset -> load_memory(cx4, cartridge)
-      @command_offset -> execute(cx4, value &&& 0xFF)
+      @command_offset -> execute(cx4, value &&& 0xFF, cartridge)
       _ -> cx4
     end
   end
@@ -125,7 +125,7 @@ defmodule Beamicom.SNES.Cx4 do
     %{cx4 | ram: ram, load_count: cx4.load_count + 1}
   end
 
-  defp execute(cx4, command) do
+  defp execute(cx4, command, cartridge) do
     count = Map.get(cx4.command_counts, command, 0) + 1
 
     cx4 = %{
@@ -140,9 +140,164 @@ defmodule Beamicom.SNES.Cx4 do
       mode == 0x0E and command < 0x40 and (command &&& 3) == 0 ->
         put_unsigned(cx4, 0x1F80, command >>> 2, 1)
 
+      command == 0x00 ->
+        execute_sprite(cx4, mode, cartridge)
+
       true ->
         execute_command(cx4, command)
     end
+  end
+
+  defp execute_sprite(cx4, 0x00, cartridge), do: build_oam(cx4, cartridge)
+
+  defp execute_sprite(cx4, _mode, _cartridge) do
+    %{cx4 | unknown_commands: MapSet.put(cx4.unknown_commands, 0x00)}
+  end
+
+  defp build_oam(cx4, cartridge) do
+    first_sprite = unsigned(cx4, 0x626, 1)
+    first_oam_offset = first_sprite * 4
+    ram = clear_oam_y(cx4.ram, 0x1FD, first_oam_offset)
+    object_count = :array.get(0x620, ram)
+
+    ram =
+      if object_count == 0 or first_sprite >= 128 do
+        ram
+      else
+        global_x = array_unsigned(ram, 0x621, 2)
+        global_y = array_unsigned(ram, 0x623, 2)
+
+        state = %{
+          ram: ram,
+          oam_offset: first_oam_offset,
+          high_offset: 0x200 + (first_sprite >>> 2),
+          high_shift: (first_sprite &&& 3) * 2,
+          remaining: 128 - first_sprite
+        }
+
+        process_objects(state, cartridge, object_count, 0x220, global_x, global_y).ram
+      end
+
+    %{cx4 | ram: ram}
+  end
+
+  defp clear_oam_y(ram, offset, first_oam_offset) when offset > first_oam_offset do
+    ram
+    |> then(&:array.set(offset, 0xE0, &1))
+    |> clear_oam_y(offset - 4, first_oam_offset)
+  end
+
+  defp clear_oam_y(ram, _offset, _first_oam_offset), do: ram
+
+  defp process_objects(state, _cartridge, 0, _source, _global_x, _global_y), do: state
+  defp process_objects(%{remaining: 0} = state, _cartridge, _count, _source, _x, _y), do: state
+
+  defp process_objects(state, cartridge, count, source, global_x, global_y) do
+    ram = state.ram
+    sprite_x = signed_width(array_unsigned(ram, source, 2) - global_x, 16)
+    sprite_y = signed_width(array_unsigned(ram, source + 2, 2) - global_y, 16)
+    name = :array.get(source + 5, ram)
+    attributes = :array.get(source + 4, ram) ||| :array.get(source + 6, ram)
+    descriptor = array_unsigned(ram, source + 7, 3)
+    part_count = Cartridge.read_or(cartridge, descriptor, 0)
+
+    state =
+      if part_count == 0 do
+        append_oam(
+          state,
+          sprite_x,
+          sprite_y,
+          name,
+          attributes,
+          if((sprite_x &&& 0x100) != 0, do: 3, else: 2)
+        )
+      else
+        process_parts(
+          state,
+          cartridge,
+          part_count,
+          descriptor + 1,
+          sprite_x,
+          sprite_y,
+          name,
+          attributes
+        )
+      end
+
+    process_objects(state, cartridge, count - 1, source + 16, global_x, global_y)
+  end
+
+  defp process_parts(state, _cartridge, 0, _descriptor, _x, _y, _name, _attributes),
+    do: state
+
+  defp process_parts(
+         %{remaining: 0} = state,
+         _cartridge,
+         _count,
+         _descriptor,
+         _x,
+         _y,
+         _name,
+         _attributes
+       ),
+       do: state
+
+  defp process_parts(state, cartridge, count, descriptor, sprite_x, sprite_y, name, attributes) do
+    flags = Cartridge.read_or(cartridge, descriptor, 0)
+    part_x = Cartridge.read_or(cartridge, descriptor + 1, 0) |> signed_width(8)
+    part_y = Cartridge.read_or(cartridge, descriptor + 2, 0) |> signed_width(8)
+    tile = Cartridge.read_or(cartridge, descriptor + 3, 0)
+    size = if (flags &&& 0x20) != 0, do: 16, else: 8
+    part_x = if (attributes &&& 0x40) != 0, do: -part_x - size, else: part_x
+    part_y = if (attributes &&& 0x80) != 0, do: -part_y - size, else: part_y
+    x = part_x + sprite_x
+    y = part_y + sprite_y
+
+    state =
+      if x in -16..272 and y in -16..224 do
+        high =
+          if((x &&& 0x100) != 0, do: 1, else: 0) ||| if((flags &&& 0x20) != 0, do: 2, else: 0)
+
+        append_oam(state, x, y, name + tile, bxor(attributes, flags &&& 0xC0), high)
+      else
+        state
+      end
+
+    process_parts(
+      state,
+      cartridge,
+      count - 1,
+      descriptor + 4,
+      sprite_x,
+      sprite_y,
+      name,
+      attributes
+    )
+  end
+
+  defp append_oam(state, x, y, name, attributes, high_bits) do
+    offset = state.oam_offset
+
+    ram =
+      state.ram
+      |> then(&:array.set(offset, x &&& 0xFF, &1))
+      |> then(&:array.set(offset + 1, y &&& 0xFF, &1))
+      |> then(&:array.set(offset + 2, name &&& 0xFF, &1))
+      |> then(&:array.set(offset + 3, attributes &&& 0xFF, &1))
+
+    high = :array.get(state.high_offset, ram)
+    high = (high &&& bnot(3 <<< state.high_shift)) ||| high_bits <<< state.high_shift
+    ram = :array.set(state.high_offset, high &&& 0xFF, ram)
+    next_shift = state.high_shift + 2 &&& 6
+
+    %{
+      state
+      | ram: ram,
+        oam_offset: offset + 4,
+        high_offset: state.high_offset + if(next_shift == 0, do: 1, else: 0),
+        high_shift: next_shift,
+        remaining: state.remaining - 1
+    }
   end
 
   # Immediate ROM signature used by software to identify a Cx4.
@@ -239,8 +394,12 @@ defmodule Beamicom.SNES.Cx4 do
   end
 
   defp unsigned(cx4, offset, bytes) do
+    array_unsigned(cx4.ram, offset, bytes)
+  end
+
+  defp array_unsigned(ram, offset, bytes) do
     Enum.reduce(0..(bytes - 1), 0, fn index, value ->
-      value ||| :array.get(offset + index, cx4.ram) <<< (index * 8)
+      value ||| :array.get(offset + index, ram) <<< (index * 8)
     end)
   end
 

@@ -16,9 +16,11 @@ defmodule Beamicom.SNES.PPU do
   import Bitwise
 
   @compile {:no_warn_undefined, Beamicom.SNES.Nx.PPURenderer}
+  @compile {:inline, vram_byte: 2}
 
   @width 256
   @render_workers 4
+  @blank_object_row :binary.copy(<<0, 0>>, @width)
   @mode0_layers [
     {:obj, 3},
     {:bg, 0, 2, 1},
@@ -589,23 +591,59 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp build_nx_object_rows(ppu, height, scanlines) do
-    object_ppu = %{ppu | oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary()}
+    object_ppu = %{
+      ppu
+      | oam: ppu.oam |> :array.to_list() |> :erlang.list_to_binary(),
+        vram: nx_object_vram(ppu)
+    }
 
-    {entries, _cache} =
-      Enum.map_reduce(0..(height - 1), %{}, fn y, cache ->
-        row_ppu =
-          if scanlines, do: apply_visual_state(object_ppu, elem(scanlines, y)), else: object_ppu
+    entries =
+      if scanlines do
+        {entries, _cache} =
+          Enum.map_reduce(0..(height - 1), %{}, fn y, cache ->
+            row_ppu = apply_visual_state(object_ppu, elem(scanlines, y))
+            {sprites, cache} = cached_obj_sprites(row_ppu, cache)
+            selected = select_obj_sprites(sprites, y)
+            {object_row_entry(row_ppu, selected), cache}
+          end)
 
-        {sprites, cache} = cached_obj_sprites(row_ppu, cache)
-        selected = select_obj_sprites(sprites, y)
-        pages = obj_row_vram_pages(row_ppu, selected)
-        versions = obj_page_versions(row_ppu, pages)
-        row = render_nx_obj_row(row_ppu, selected)
-        {{obj_state(row_ppu), selected, pages, versions, row}, cache}
-      end)
+        entries
+      else
+        selected_rows = object_ppu |> parse_obj_sprites() |> bucket_obj_sprites(height)
+
+        for y <- 0..(height - 1) do
+          object_row_entry(object_ppu, Map.get(selected_rows, y, {0, []}) |> elem(1))
+        end
+      end
 
     entries = List.to_tuple(entries)
     {entries |> Tuple.to_list() |> Enum.map(&elem(&1, 4)), entries}
+  end
+
+  defp object_row_entry(ppu, selected) do
+    pages = obj_row_vram_pages(ppu, selected)
+    versions = obj_page_versions(ppu, pages)
+    row = render_nx_obj_row(ppu, selected)
+    {obj_state(ppu), selected, pages, versions, row}
+  end
+
+  defp bucket_obj_sprites(sprites, height) do
+    Enum.reduce(sprites, %{}, fn {x, y, size, tile, attributes}, rows ->
+      Enum.reduce(0..(size - 1), rows, fn row, rows ->
+        screen_y = y + row &&& 0xFF
+
+        if screen_y < height do
+          {count, selected} = Map.get(rows, screen_y, {0, []})
+
+          if count < 32,
+            do:
+              Map.put(rows, screen_y, {count + 1, [{x, row, size, tile, attributes} | selected]}),
+            else: rows
+        else
+          rows
+        end
+      end)
+    end)
   end
 
   defp refresh_nx_object_rows(ppu, entries) do
@@ -635,6 +673,8 @@ defmodule Beamicom.SNES.PPU do
     {rows, entries |> Enum.reverse() |> List.to_tuple()}
   end
 
+  defp render_nx_obj_row(_ppu, []), do: @blank_object_row
+
   defp render_nx_obj_row(ppu, sprites) do
     {pixels, _priorities} = render_selected_obj_row(ppu, sprites)
 
@@ -645,6 +685,8 @@ defmodule Beamicom.SNES.PPU do
       end
     end
   end
+
+  defp obj_row_vram_pages(_ppu, []), do: []
 
   defp obj_row_vram_pages(ppu, sprites) do
     sprites
@@ -683,6 +725,21 @@ defmodule Beamicom.SNES.PPU do
     |> Tuple.to_list()
     |> Enum.uniq()
     |> Enum.map(&{&1, object_vram_versions(ppu, &1)})
+  end
+
+  defp nx_object_vram(ppu) do
+    process_key = {__MODULE__, :nx_object_vram}
+
+    case Process.get(process_key) do
+      {identity, version, binary}
+      when identity == ppu.cache_identity and version == ppu.vram_version ->
+        binary
+
+      _other ->
+        binary = ppu.vram |> :array.to_list() |> :erlang.list_to_binary()
+        Process.put(process_key, {ppu.cache_identity, ppu.vram_version, binary})
+        binary
+    end
   end
 
   defp render_rows(rows, render_ppu, scanlines, palette, color_data) do
@@ -1128,13 +1185,128 @@ defmodule Beamicom.SNES.PPU do
     name_offset = if (attributes &&& 1) != 0, do: ((ppu.obsel >>> 3 &&& 3) + 1) * 0x2000, else: 0
     base = (ppu.obsel &&& 0x07) * 0x4000 + name_offset
 
-    Enum.reduce(0..(size - 1), pixels, fn output_x, pixels ->
-      screen_x = x + output_x
+    render_obj_tiles(
+      ppu.vram,
+      pixels,
+      x,
+      size,
+      tile,
+      source_y,
+      hflip?,
+      priority,
+      palette_base,
+      base,
+      0
+    )
+  end
 
+  defp render_obj_tiles(
+         _vram,
+         pixels,
+         _x,
+         size,
+         _tile,
+         _source_y,
+         _hflip?,
+         _priority,
+         _palette_base,
+         _base,
+         output_start
+       )
+       when output_start >= size,
+       do: pixels
+
+  defp render_obj_tiles(
+         vram,
+         pixels,
+         x,
+         size,
+         tile,
+         source_y,
+         hflip?,
+         priority,
+         palette_base,
+         base,
+         output_start
+       ) do
+    first_source_x = if hflip?, do: size - 1 - output_start, else: output_start
+    obj_tile = tile + div(first_source_x, 8) + div(source_y, 8) * 16 &&& 0xFF
+    address = base + obj_tile * 32 + (source_y &&& 7) * 2
+
+    pixels =
+      render_obj_tile_pixels(
+        pixels,
+        x,
+        size,
+        hflip?,
+        priority,
+        palette_base,
+        output_start,
+        0,
+        vram_byte(vram, address),
+        vram_byte(vram, address + 1),
+        vram_byte(vram, address + 16),
+        vram_byte(vram, address + 17)
+      )
+
+    render_obj_tiles(
+      vram,
+      pixels,
+      x,
+      size,
+      tile,
+      source_y,
+      hflip?,
+      priority,
+      palette_base,
+      base,
+      output_start + 8
+    )
+  end
+
+  defp render_obj_tile_pixels(
+         pixels,
+         _x,
+         _size,
+         _hflip?,
+         _priority,
+         _palette_base,
+         _output_start,
+         8,
+         _plane0,
+         _plane1,
+         _plane2,
+         _plane3
+       ),
+       do: pixels
+
+  defp render_obj_tile_pixels(
+         pixels,
+         x,
+         size,
+         hflip?,
+         priority,
+         palette_base,
+         output_start,
+         tile_x,
+         plane0,
+         plane1,
+         plane2,
+         plane3
+       ) do
+    output_x = output_start + tile_x
+    screen_x = x + output_x
+
+    pixels =
       if screen_x in 0..255 do
         source_x = if hflip?, do: size - 1 - output_x, else: output_x
-        obj_tile = tile + div(source_x, 8) + div(source_y, 8) * 16 &&& 0xFF
-        color = obj_tile_color(ppu.vram, base, obj_tile, source_x &&& 7, source_y &&& 7)
+        bit = 7 - (source_x &&& 7)
+
+        color =
+          (plane0 >>> bit &&& 1) |||
+            (plane1 >>> bit &&& 1) <<< 1 |||
+            (plane2 >>> bit &&& 1) <<< 2 |||
+            (plane3 >>> bit &&& 1) <<< 3
 
         if color == 0,
           do: pixels,
@@ -1142,17 +1314,21 @@ defmodule Beamicom.SNES.PPU do
       else
         pixels
       end
-    end)
-  end
 
-  defp obj_tile_color(vram, base, tile, x, y) do
-    address = base + tile * 32 + y * 2
-    bit = 7 - x
-
-    (vram_byte(vram, address) >>> bit &&& 1) |||
-      (vram_byte(vram, address + 1) >>> bit &&& 1) <<< 1 |||
-      (vram_byte(vram, address + 16) >>> bit &&& 1) <<< 2 |||
-      (vram_byte(vram, address + 17) >>> bit &&& 1) <<< 3
+    render_obj_tile_pixels(
+      pixels,
+      x,
+      size,
+      hflip?,
+      priority,
+      palette_base,
+      output_start,
+      tile_x + 1,
+      plane0,
+      plane1,
+      plane2,
+      plane3
+    )
   end
 
   defp obj_sizes(0), do: {8, 16}

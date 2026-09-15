@@ -356,26 +356,25 @@ defmodule Beamicom.SNES.SPC700 do
   # Word moves/arithmetic.
   defp execute(0xBA, spc) do
     {dp, spc} = fetch(spc)
-    {word, spc} = read_word(spc, direct(spc, dp))
+    {word, spc} = read_dp_word(spc, dp)
     {:ok, %{spc | a: word &&& 0xFF, y: word >>> 8} |> set_nz16(word), 5}
   end
 
   defp execute(0xDA, spc) do
     {dp, spc} = fetch(spc)
-    {:ok, write_word(spc, direct(spc, dp), spc.a ||| spc.y <<< 8), 5}
+    {:ok, write_dp_word(spc, dp, spc.a ||| spc.y <<< 8), 5}
   end
 
   defp execute(op, spc) when op in [0x1A, 0x3A] do
     {dp, spc} = fetch(spc)
-    address = direct(spc, dp)
-    {word, spc} = read_word(spc, address)
+    {word, spc} = read_dp_word(spc, dp)
     word = word + if(op == 0x3A, do: 1, else: -1) &&& 0xFFFF
-    {:ok, write_word(set_nz16(spc, word), address, word), 6}
+    {:ok, write_dp_word(set_nz16(spc, word), dp, word), 6}
   end
 
   defp execute(op, spc) when op in [0x5A, 0x7A, 0x9A] do
     {dp, spc} = fetch(spc)
-    {right, spc} = read_word(spc, direct(spc, dp))
+    {right, spc} = read_dp_word(spc, dp)
     left = spc.a ||| spc.y <<< 8
 
     case op do
@@ -842,14 +841,17 @@ defmodule Beamicom.SNES.SPC700 do
     {low ||| high <<< 8, spc}
   end
 
+  defp write_dp_word(spc, dp, value) do
+    spc
+    |> write(direct(spc, dp), value)
+    |> write(direct(spc, dp + 1 &&& 0xFF), value >>> 8)
+  end
+
   defp read_word(spc, address) do
     {low, spc} = read(spc, address)
     {high, spc} = read(spc, address + 1 &&& 0xFFFF)
     {low ||| high <<< 8, spc}
   end
-
-  defp write_word(spc, address, value),
-    do: spc |> write(address, value) |> write(address + 1 &&& 0xFFFF, value >>> 8)
 
   defp read(spc, address) do
     address = address &&& 0xFFFF
