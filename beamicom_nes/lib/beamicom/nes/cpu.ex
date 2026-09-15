@@ -92,8 +92,14 @@ defmodule Beamicom.NES.CPU do
   """
   def step(cpu, bus) do
     opcode = peek(bus, cpu.pc)
-    cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
     {op, mode, cyc} = opcode_info(opcode)
+    step_known(cpu, bus, op, mode, cyc)
+  end
+
+  @doc false
+  def step_known(cpu, bus, op, mode, cyc)
+      when is_atom(op) and is_atom(mode) and is_integer(cyc) and cyc > 0 do
+    cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
     {addr, crossed, cpu, bus} = resolve(mode, cpu, bus)
     penalty = if crossed and op in @read_ops and mode in @penalty_modes, do: 1, else: 0
     # Only the PPU advance is split around the memory access (for exact NMI /

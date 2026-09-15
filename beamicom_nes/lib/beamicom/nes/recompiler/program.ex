@@ -26,6 +26,17 @@ defmodule Beamicom.NES.Recompiler.Program do
     {next, count}
   end
 
+  @doc "Run block transitions until the absolute CPU cycle budget is reached."
+  def run_until(%__MODULE__{} = program, %Console{} = console, target_cycles)
+      when is_integer(target_cycles) do
+    if console.cpu.cycles >= target_cycles do
+      console
+    else
+      {console, _count} = step(program, console)
+      run_until(program, console, target_cycles)
+    end
+  end
+
   @doc "Return generated/fallback transition and instruction totals."
   def statistics(%__MODULE__{stats: stats}) do
     %{

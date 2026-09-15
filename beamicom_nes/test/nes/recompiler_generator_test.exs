@@ -100,6 +100,21 @@ defmodule Beamicom.NES.Recompiler.GeneratorTest do
     assert stats.compiled_instructions >= stats.compiled_blocks
   end
 
+  test "frame-budget loop yields only after crossing its absolute cycle target" do
+    prg =
+      :binary.copy(<<0x02>>, 0x4000)
+      |> put_bytes(0x8000, <<0xEA, 0x4C, 0x00, 0x80>>)
+      |> put_vector(0xFFFA, 0x8000)
+      |> put_vector(0xFFFC, 0x8000)
+      |> put_vector(0xFFFE, 0x8000)
+
+    assert {:ok, program} = Generator.compile(%Cart{mapper: 0, prg_rom: prg})
+    result = Program.run_until(program, console(prg, 0x8000), 20)
+
+    assert result.cpu.cycles >= 20
+    assert result.cpu.cycles < 25
+  end
+
   defp console(prg, pc) do
     bus = %Bus{
       ram: <<0::size(0x800 * 8)>>,

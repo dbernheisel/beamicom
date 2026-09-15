@@ -62,4 +62,13 @@ defmodule Beamicom.NES.Recompiler.EquivalenceTest do
              is_atom(operation) and is_atom(mode) and is_integer(cycles) and cycles > 0
            end)
   end
+
+  test "known-opcode entry point matches normal opcode fetch and decode" do
+    start = console(<<0xA9, 0x80>>)
+    expected = Console.step(start)
+    {cpu, bus} = CPU.step_known(start.cpu, start.bus, :LDA, :imm, 2)
+
+    assert Equivalence.snapshot(%Console{cpu: cpu, bus: bus}) ==
+             Equivalence.snapshot(expected)
+  end
 end

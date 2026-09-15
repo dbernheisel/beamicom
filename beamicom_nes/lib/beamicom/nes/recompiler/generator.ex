@@ -63,7 +63,13 @@ defmodule Beamicom.NES.Recompiler.Generator do
     block_definitions =
       Enum.map(blocks, fn block ->
         name = block_name(block.start)
-        addresses = block.addresses
+
+        instructions =
+          Enum.map(block.addresses, fn address ->
+            instruction = Map.fetch!(discovery.instructions, address)
+
+            {address, instruction.operation, instruction.mode, instruction.base_cycles}
+          end)
 
         quote do
           @doc false
@@ -77,7 +83,7 @@ defmodule Beamicom.NES.Recompiler.Generator do
               cycles,
               ram,
               context,
-              unquote(addresses)
+              unquote(Macro.escape(instructions))
             )
           end
         end
