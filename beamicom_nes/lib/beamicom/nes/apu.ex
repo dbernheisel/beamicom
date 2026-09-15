@@ -5,8 +5,9 @@ defmodule Beamicom.NES.APU do
   mixer. Clocked per CPU cycle by `tick/2`, emitting 44.1kHz mono samples that a
   sink drains with `take_samples/1`.
 
-  DMC (delta modulation) is stubbed — its sample DMA is deferred (ponytail: add
-  when a game needs it).
+  DMC output, looping, status, and IRQ timing are modeled natively. The current
+  DMA path preloads a sample and therefore does not yet model per-byte CPU stalls
+  or a mid-sample PRG bank switch.
 
   ## Sources
     * NESdev Wiki — APU, APU pulse/triangle/noise, APU Frame Counter, APU Mixer.
@@ -65,6 +66,7 @@ defmodule Beamicom.NES.APU do
             m5p2_timer: 0,
             m5p2_seq: 0,
             sample_acc: 0.0,
+            sample_ratio: @rate_ratio,
             samples: [],
             # Optional output adapters retain waveform/filter state separately.
             # The native copy then advances only state visible to the CPU.
@@ -126,6 +128,12 @@ defmodule Beamicom.NES.APU do
 
   @doc false
   def set_output(apu, enabled) when is_boolean(enabled), do: %{apu | output_enabled: enabled}
+
+  @doc false
+  def set_renderer_sample_rate(apu, sample_rate)
+      when is_integer(sample_rate) and sample_rate > 0 do
+    %{apu | sample_ratio: sample_rate / @cpu_hz}
+  end
 
   @doc false
   def set_external_dmc_samples(apu, samples) when is_list(samples),
@@ -473,7 +481,7 @@ defmodule Beamicom.NES.APU do
   end
 
   # Cycles until the next 44.1kHz sample point (always ≥ 1).
-  defp to_sample(apu), do: max(1, ceil((1.0 - apu.sample_acc) / @rate_ratio))
+  defp to_sample(apu), do: max(1, ceil((1.0 - apu.sample_acc) / apu.sample_ratio))
 
   # Cycles until the next frame-sequencer boundary (steps + the sequence wrap).
   defp to_frame(%{seq_cycle: sc}) when sc < 7457, do: 7457 - sc
@@ -510,7 +518,7 @@ defmodule Beamicom.NES.APU do
           noise_timer: nt,
           noise_shift: ns,
           seq_cycle: apu.seq_cycle + dc,
-          sample_acc: apu.sample_acc + dc * @rate_ratio,
+          sample_acc: apu.sample_acc + dc * apu.sample_ratio,
           apu_tick: apu.apu_tick != (rem(dc, 2) == 1)
       }
       |> frame_action()
@@ -530,7 +538,7 @@ defmodule Beamicom.NES.APU do
   # This copy retains the frame/MMC5 sequencers, length/envelope/sweep state,
   # DMC state, and IRQs because the CPU can observe them during the frame.
   defp advance_control(apu, dc) do
-    sample_total = apu.sample_acc + dc * @rate_ratio
+    sample_total = apu.sample_acc + dc * apu.sample_ratio
 
     {sample_acc, silent_samples} =
       if apu.dmc != nil or apu.sunsoft5b != nil do

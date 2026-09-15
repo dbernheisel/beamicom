@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Nes.Bench do
   @compile {:no_warn_undefined, :tprof}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.PPURenderer}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.APUBlockRenderer}
+  @compile {:no_warn_undefined, Beamicom.NES.Nx.FrameAPURenderer}
   @compile {:no_warn_undefined, Beamicom.NES.Nx.BlarggNTSC.Renderer}
 
   @impl true
@@ -91,7 +92,8 @@ defmodule Mix.Tasks.Nes.Bench do
         "native" -> :native
         "elixir_block" -> Beamicom.NES.APUBlockRenderer
         "nx_block" -> Beamicom.NES.Nx.APUBlockRenderer
-        _ -> Mix.raise("audio-renderer must be native, elixir_block, or nx_block")
+        "nx_frame48" -> Beamicom.NES.Nx.FrameAPURenderer
+        _ -> Mix.raise("audio-renderer must be native, elixir_block, nx_block, or nx_frame48")
       end
 
     if audio_renderer_module != :native and not Code.ensure_loaded?(audio_renderer_module),
@@ -134,6 +136,7 @@ defmodule Mix.Tasks.Nes.Bench do
         renderer: renderer,
         video_filter: video_filter_atom,
         audio_renderer: String.to_atom(audio_renderer),
+        audio_sample_rate: Beamicom.NES.Bus.configured_audio_sample_rate(),
         rgb_consumers: rgb_consumers,
         runs: runs
       }
@@ -235,7 +238,8 @@ defmodule Mix.Tasks.Nes.Bench do
         %{
           :native => "native",
           Beamicom.NES.APUBlockRenderer => "elixir_block",
-          Beamicom.NES.Nx.APUBlockRenderer => "nx_block"
+          Beamicom.NES.Nx.APUBlockRenderer => "nx_block",
+          Beamicom.NES.Nx.FrameAPURenderer => "nx_frame48"
         },
         renderer
       )

@@ -141,7 +141,7 @@ defmodule Beamicom.NES.Runtime do
     bus = put_in(bus.ppu.frame_ready, frame)
     console = %{console | bus: bus}
     Output.publish(frame)
-    Output.publish_audio(sample_count, pcm)
+    Output.publish_audio(sample_count, pcm, Bus.audio_sample_rate(bus))
 
     state
     |> Map.merge(%{console: console, frame: frame.number, published: state.published + 1})
@@ -168,7 +168,7 @@ defmodule Beamicom.NES.Runtime do
         {%{console | bus: bus}, state.frame, state.published, sample_count, pcm}
       end
 
-    Output.publish_audio(sample_count, pcm)
+    Output.publish_audio(sample_count, pcm, Bus.audio_sample_rate(console.bus))
 
     state
     |> Map.merge(%{console: console, frame: frame, published: published})

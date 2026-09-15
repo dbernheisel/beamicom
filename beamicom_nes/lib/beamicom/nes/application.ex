@@ -11,7 +11,7 @@ defmodule Beamicom.NES.Application do
       [
         # A/V output fan-out hub; the Runtime loop is started on demand per ROM.
         Beamicom.NES.Output
-      ] ++ frame_video_loader()
+      ] ++ frame_video_loader() ++ frame_apu_loader()
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
@@ -24,6 +24,18 @@ defmodule Beamicom.NES.Application do
       path when is_binary(path) ->
         if Code.ensure_loaded?(Beamicom.NES.Nx.FrameVideoExecutable),
           do: [{Beamicom.NES.Nx.FrameVideoExecutable, path: path}],
+          else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp frame_apu_loader do
+    case Application.get_env(:beamicom_nes, :frame_apu_executable) do
+      path when is_binary(path) ->
+        if Code.ensure_loaded?(Beamicom.NES.Nx.FrameAPUExecutable),
+          do: [{Beamicom.NES.Nx.FrameAPUExecutable, path: path}],
           else: []
 
       _ ->

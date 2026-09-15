@@ -2,10 +2,15 @@ if Code.ensure_loaded?(Nx.Defn) do
   defmodule Beamicom.NES.Nx.BlockAPU do
     @moduledoc "Timestamped Nx audio blocks: vector waveform evaluation between control events, sequential filters."
     import Nx.Defn
-    alias Beamicom.NES.Nx.APU
+    alias Beamicom.NES.Nx.{APU, FrameAudioMath}
 
     @ratio 44_100 / 1_789_773
+    @oversample_ratio 192_000 / 1_789_773
     @width 128
+    @oversample_capacity 3200
+    @input_capacity 4096
+    @hp90_192k 0.997063
+    @lp14k_192k 0.314193
 
     # Binary powers of the exact 15-bit linear noise transition. Arbitrary jumps
     # within an epoch require 13 stages, applied across all sample times at once.
@@ -61,6 +66,36 @@ if Code.ensure_loaded?(Nx.Defn) do
         end
 
       {s, pcm, count, cycles - pos, index}
+    end
+
+    @doc "Synthesize at 192 kHz, then windowed-sinc decimate to one fixed 800-sample 48 kHz frame."
+    defn run_frame_48(s, events, event_count, cycles, dmc, expansion, kernel) do
+      {s, pos, index, samples, count, _, _, _, _, _} =
+        while {s, pos = Nx.tensor(0, type: :s32), index = Nx.tensor(0, type: :s32),
+               samples = Nx.broadcast(Nx.tensor(0, type: :f32), {@oversample_capacity}),
+               count = Nx.tensor(0, type: :s32), events, event_count, cycles, dmc, expansion},
+              count < @oversample_capacity and
+                (pos < cycles or (index < event_count and events[index][0] == pos)) do
+          next_write = Nx.select(index < event_count, events[index][0], cycles + 1)
+
+          if next_write == pos do
+            s = Beamicom.NES.Nx.APUWrites.apply(s, events[index][1], events[index][2])
+            {s, pos, index + 1, samples, count, events, event_count, cycles, dmc, expansion}
+          else
+            dc = Nx.min(cycles - pos, Nx.min(next_write - pos, boundary(s)))
+            {s, used, samples, count} = oversampled_segment(s, dc, samples, count, dmc, expansion)
+            {s, pos + used, index, samples, count, events, event_count, cycles, dmc, expansion}
+          end
+        end
+
+      # NTSC frames are slightly shorter than 1/60 second. The public frame
+      # contract is fixed at 800 samples, so extend the final filtered level to
+      # 3200 before the 4x decimator. Oscillator state advances only real cycles.
+      last = samples[Nx.max(count - 1, 0)]
+      valid = Nx.iota({@oversample_capacity}, type: :s32) < count
+      samples = Nx.select(valid, samples, last)
+      pcm = FrameAudioMath.decimate_4x(samples, kernel)
+      {s, pcm, Nx.tensor(800, type: :s32), cycles - pos, index, count}
     end
 
     defn boundary(s) do
@@ -125,6 +160,52 @@ if Code.ensure_loaded?(Nx.Defn) do
         end
 
       {%{final | sample_acc: acc, f_hp: hp, f_hp_x: previous, f_lp: lp}, used, pcm, count + n}
+    end
+
+    defnp oversampled_segment(s, dc, samples, count, dmc, expansion) do
+      {acc, used, n, offsets, _, _} =
+        while {acc = s.sample_acc, used = Nx.tensor(0, type: :s32), n = Nx.tensor(0, type: :s32),
+               offsets = Nx.broadcast(Nx.tensor(0, type: :s32), {@width}), dc, count},
+              used < dc and n < @width and count + n < @oversample_capacity do
+          step =
+            Nx.min(
+              dc - used,
+              Nx.max(
+                1,
+                Nx.as_type(
+                  Nx.ceil((1.0 - acc) / Nx.tensor(@oversample_ratio, type: :f64)),
+                  :s32
+                )
+              )
+            )
+
+          acc = acc + Nx.as_type(step, :f64) * Nx.tensor(@oversample_ratio, type: :f64)
+          emit = acc >= 1.0
+          used = used + step
+          offsets = Nx.put_slice(offsets, [n], Nx.reshape(used, {1}))
+          {Nx.select(emit, acc - 1.0, acc), used, n + Nx.as_type(emit, :s32), offsets, dc, count}
+        end
+
+      sample_indices = Nx.min(count + Nx.iota({@width}, type: :s32), @input_capacity - 1)
+
+      values =
+        APU.mix(clock(s, offsets), Nx.take(dmc, sample_indices)) +
+          Nx.take(expansion, sample_indices)
+
+      final = clock(s, used)
+
+      {hp, previous, lp, samples, _, _, _, _} =
+        while {hp = s.f_hp, previous = s.f_hp_x, lp = s.f_lp, samples,
+               i = Nx.tensor(0, type: :s32), values, n, count},
+              i < n do
+          x = values[i]
+          hp = Nx.tensor(@hp90_192k, type: :f64) * (hp + x - previous)
+          lp = lp + Nx.tensor(@lp14k_192k, type: :f64) * (hp - lp)
+          samples = Nx.put_slice(samples, [count + i], Nx.reshape(Nx.as_type(lp, :f32), {1}))
+          {hp, x, lp, samples, i + 1, values, n, count}
+        end
+
+      {%{final | sample_acc: acc, f_hp: hp, f_hp_x: previous, f_lp: lp}, used, samples, count + n}
     end
 
     defn clock(s, dc) do

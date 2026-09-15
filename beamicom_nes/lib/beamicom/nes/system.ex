@@ -28,7 +28,11 @@ defmodule Beamicom.NES.System do
         pixel_formats: [{:native, :nes_framebuffer}],
         frame_rate: 60.0988
       },
-      audio: %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
+      audio: %{
+        sample_rate: Bus.configured_audio_sample_rate(),
+        channels: 1,
+        sample_format: :s16le
+      }
     }
   end
 
@@ -55,7 +59,7 @@ defmodule Beamicom.NES.System do
 
     audio = %AudioChunk{
       system: :nes,
-      sample_rate: 44_100,
+      sample_rate: Bus.audio_sample_rate(bus),
       channels: 1,
       sample_format: :s16le,
       frame_count: sample_count,

@@ -38,9 +38,17 @@ defmodule Beamicom.NES.Output do
   def publish_audio(0, <<>>), do: :ok
 
   def publish_audio(sample_count, pcm) when is_integer(sample_count) and is_binary(pcm) do
+    publish_audio(sample_count, pcm, @sample_rate)
+  end
+
+  @doc "Publish signed-16-bit little-endian mono PCM at an explicit sample rate."
+  def publish_audio(0, <<>>, _sample_rate), do: :ok
+
+  def publish_audio(sample_count, pcm, sample_rate)
+      when is_integer(sample_count) and is_binary(pcm) and is_integer(sample_rate) do
     publish_audio_chunk(%AudioChunk{
       system: :nes,
-      sample_rate: @sample_rate,
+      sample_rate: sample_rate,
       channels: 1,
       sample_format: :s16le,
       frame_count: sample_count,

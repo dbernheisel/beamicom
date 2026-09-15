@@ -92,6 +92,23 @@ defmodule Beamicom.NES.Bus do
   @doc "APU renderer selected when this core build was compiled."
   def configured_apu_renderer, do: @apu_renderer
 
+  @doc "Output sample rate selected by the compiled-in APU renderer."
+  def configured_audio_sample_rate do
+    if @apu_renderer != :native and Code.ensure_loaded?(@apu_renderer) and
+         function_exported?(@apu_renderer, :sample_rate, 0),
+       do: apply(@apu_renderer, :sample_rate, []),
+       else: 44_100
+  end
+
+  @doc "Output sample rate for a live bus."
+  def audio_sample_rate(%__MODULE__{apu_renderer: :native}), do: 44_100
+
+  def audio_sample_rate(%__MODULE__{apu_renderer: renderer}) do
+    if function_exported?(renderer, :sample_rate, 0),
+      do: apply(renderer, :sample_rate, []),
+      else: 44_100
+  end
+
   def new(%Beamicom.NES.Cart{} = cart, ppu \\ nil) do
     apu = Beamicom.NES.APU.new()
     {apu, renderer_state} = prepare_apu_renderer(apu)
@@ -122,7 +139,19 @@ defmodule Beamicom.NES.Bus do
       unless Code.ensure_loaded?(@apu_renderer) and function_exported?(@apu_renderer, :prepare, 1),
         do: raise("invalid NES APU renderer: #{inspect(@apu_renderer)}")
 
-      {Beamicom.NES.APU.set_output(apu, false), apply(@apu_renderer, :prepare, [apu])}
+      control = Beamicom.NES.APU.set_output(apu, false)
+
+      control =
+        if function_exported?(@apu_renderer, :sample_input_rate, 0) do
+          Beamicom.NES.APU.set_renderer_sample_rate(
+            control,
+            apply(@apu_renderer, :sample_input_rate, [])
+          )
+        else
+          control
+        end
+
+      {control, apply(@apu_renderer, :prepare, [apu])}
     end
   end
 

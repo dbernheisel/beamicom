@@ -2,9 +2,14 @@ defmodule Beamicom.NES.NxTest do
   use ExUnit.Case, async: false
 
   test "wrapper compiles the core against both optional renderers" do
+    apu_renderer =
+      if System.get_env("BEAMICOM_AUDIO_48") in ["1", "true", "yes", "on"],
+        do: Beamicom.NES.Nx.FrameAPURenderer,
+        else: Beamicom.NES.Nx.APUBlockRenderer
+
     assert Beamicom.NES.Nx.backends() == %{
              ppu: Beamicom.NES.Nx.PPURenderer,
-             apu: Beamicom.NES.Nx.APUBlockRenderer
+             apu: apu_renderer
            }
   end
 
