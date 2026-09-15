@@ -199,6 +199,53 @@ defmodule Beamicom.SNES.BusTest do
     assert bus.coprocessor.unknown_commands == MapSet.new()
   end
 
+  test "Cx4 vector, polar, and coordinate transforms produce fixed-width results" do
+    {:ok, cartridge} =
+      :lorom |> SNESTestROM.build(cartridge_type: 0xF3) |> Cartridge.load()
+
+    bus =
+      Bus.new(cartridge)
+      |> write_registers([
+        {0x007F80, 3},
+        {0x007F83, 4},
+        {0x007F86, 10},
+        {0x007F4D, 2}
+      ])
+
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x0D)
+    assert {Bus.peek(bus, 0x007F89), Bus.peek(bus, 0x007F8C)} == {5, 7}
+
+    bus = write_registers(bus, [{0x007F80, 0}, {0x007F81, 0}, {0x007F83, 0}, {0x007F84, 1}])
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x10)
+    assert read_cx4(bus, 0x7F86, 3) == 255
+    assert read_cx4(bus, 0x7F89, 3) == 0
+
+    bus = write_registers(bus, [{0x007F80, 128}, {0x007F81, 0}, {0x007F83, 1}, {0x007F84, 0}])
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x13)
+    assert read_cx4(bus, 0x7F86, 3) == 0
+    assert read_cx4(bus, 0x7F89, 3) == 255
+
+    bus =
+      write_registers(bus, [
+        {0x007F81, 10},
+        {0x007F82, 0},
+        {0x007F84, 0xEC},
+        {0x007F85, 0xFF},
+        {0x007F87, 30},
+        {0x007F88, 0},
+        {0x007F89, 0},
+        {0x007F8A, 0},
+        {0x007F8B, 0},
+        {0x007F90, 0},
+        {0x007F91, 1}
+      ])
+
+    {bus, 8} = Bus.write(bus, 0x007F4F, 0x2D)
+    assert read_cx4(bus, 0x7F80, 2) == 10
+    assert read_cx4(bus, 0x7F83, 2) == 0xFFEC
+    assert bus.coprocessor.unknown_commands == MapSet.new()
+  end
+
   test "prices WRAM, MMIO, JOYSER, slow ROM, and fast ROM accesses", %{bus: bus} do
     assert Bus.access_clocks(bus, 0x7E0000) == 8
     assert Bus.access_clocks(bus, 0x002100) == 6
@@ -310,5 +357,18 @@ defmodule Beamicom.SNES.BusTest do
     bus = Bus.advance_master(bus, 4224)
     assert {status, _bus, 6} = Bus.read(bus, 0x004212)
     assert (status &&& 1) == 0
+  end
+
+  defp write_registers(bus, registers) do
+    Enum.reduce(registers, bus, fn {address, value}, bus ->
+      {bus, _clocks} = Bus.write(bus, address, value)
+      bus
+    end)
+  end
+
+  defp read_cx4(bus, address, bytes) do
+    Enum.reduce(0..(bytes - 1), 0, fn index, value ->
+      value ||| Bus.peek(bus, address + index) <<< (index * 8)
+    end)
   end
 end

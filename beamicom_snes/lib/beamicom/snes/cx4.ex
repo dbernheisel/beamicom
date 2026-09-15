@@ -344,9 +344,7 @@ defmodule Beamicom.SNES.Cx4 do
   defp scale_matrix(384, x_scale, y_scale), do: {0, y_scale, -x_scale, 0}
 
   defp scale_matrix(angle, x_scale, y_scale) do
-    radians = (angle &&& 0x1FF) * 2 * :math.pi() / 512
-    sine = round(:math.sin(radians) * 32_767)
-    cosine = round(:math.cos(radians) * 32_767)
+    {sine, cosine} = trig(angle)
 
     {
       signed_width((cosine * x_scale) >>> 15, 16),
@@ -416,6 +414,41 @@ defmodule Beamicom.SNES.Cx4 do
     put_unsigned(cx4, 0x1F80, result, 2)
   end
 
+  defp execute_command(cx4, 0x0D) do
+    x = signed(cx4, 0x1F80, 2)
+    y = signed(cx4, 0x1F83, 2)
+    target = signed(cx4, 0x1F86, 2)
+
+    {new_x, new_y} =
+      if x == 0 and y == 0 do
+        {0, 0}
+      else
+        ratio = target / :math.sqrt(x * x + y * y)
+        {trunc(x * ratio * 0.98), trunc(y * ratio * 0.99)}
+      end
+
+    cx4 |> put_unsigned(0x1F89, new_x, 2) |> put_unsigned(0x1F8C, new_y, 2)
+  end
+
+  defp execute_command(cx4, 0x10) do
+    angle = unsigned(cx4, 0x1F80, 2)
+    radius = signed(cx4, 0x1F83, 2)
+    {sine, cosine} = trig(angle)
+    x = (radius * cosine * 2) >>> 16
+    raw_y = (radius * sine * 2) >>> 16
+    y = raw_y - (raw_y >>> 6)
+    cx4 |> put_unsigned(0x1F86, x, 3) |> put_unsigned(0x1F89, y, 3)
+  end
+
+  defp execute_command(cx4, 0x13) do
+    angle = unsigned(cx4, 0x1F80, 2)
+    radius = unsigned(cx4, 0x1F83, 2)
+    {sine, cosine} = trig(angle)
+    x = (radius * cosine * 2) >>> 8
+    y = (radius * sine * 2) >>> 8
+    cx4 |> put_unsigned(0x1F86, x, 3) |> put_unsigned(0x1F89, y, 3)
+  end
+
   defp execute_command(cx4, 0x15) do
     x = signed(cx4, 0x1F80, 2)
     y = signed(cx4, 0x1F83, 2)
@@ -471,6 +504,19 @@ defmodule Beamicom.SNES.Cx4 do
     put_unsigned(cx4, 0x1F80, result, 3)
   end
 
+  defp execute_command(cx4, 0x2D) do
+    x = signed(cx4, 0x1F81, 2)
+    y = signed(cx4, 0x1F84, 2)
+    z = signed(cx4, 0x1F87, 2)
+    rotate_x = unsigned(cx4, 0x1F89, 1)
+    rotate_y = unsigned(cx4, 0x1F8A, 1)
+    rotate_z = unsigned(cx4, 0x1F8B, 1)
+    scale = signed(cx4, 0x1F90, 2)
+
+    {x, y} = transform_coordinates(x, y, z, rotate_x, rotate_y, rotate_z, scale)
+    cx4 |> put_unsigned(0x1F80, x, 2) |> put_unsigned(0x1F83, y, 2)
+  end
+
   defp execute_command(cx4, 0x40) do
     sum = Enum.reduce(0..0x7FF, 0, fn offset, acc -> acc + :array.get(offset, cx4.ram) end)
     put_unsigned(cx4, 0x1F80, sum, 2)
@@ -510,10 +556,28 @@ defmodule Beamicom.SNES.Cx4 do
   end
 
   defp fixed_tangent(angle) do
-    radians = angle * :math.pi() / 256
-    sine = round(:math.sin(radians) * 32_767)
-    cosine = round(:math.cos(radians) * 32_767)
+    {sine, cosine} = trig(angle)
     if cosine == 0, do: -0x80000000, else: div(sine <<< 16, cosine)
+  end
+
+  defp trig(angle) do
+    radians = (angle &&& 0x1FF) * 2 * :math.pi() / 512
+    {round(:math.sin(radians) * 32_767), round(:math.cos(radians) * 32_767)}
+  end
+
+  defp transform_coordinates(x, y, z, rotate_x, rotate_y, rotate_z, scale) do
+    radians_x = -rotate_x * 2 * :math.pi() / 128
+    y2 = y * :math.cos(radians_x) - z * :math.sin(radians_x)
+    z2 = y * :math.sin(radians_x) + z * :math.cos(radians_x)
+
+    radians_y = -rotate_y * 2 * :math.pi() / 128
+    x2 = x * :math.cos(radians_y) + z2 * :math.sin(radians_y)
+
+    radians_z = -rotate_z * 2 * :math.pi() / 128
+    transformed_x = x2 * :math.cos(radians_z) - y2 * :math.sin(radians_z)
+    transformed_y = x2 * :math.sin(radians_z) + y2 * :math.cos(radians_z)
+
+    {trunc(transformed_x * scale / 256), trunc(transformed_y * scale / 256)}
   end
 
   defp signed_width(value, bits) do
