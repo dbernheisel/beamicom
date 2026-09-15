@@ -30,8 +30,9 @@ if Code.ensure_loaded?(Nx.Defn) do
       nametables = Nx.broadcast(state[4], {@height})
       capacity = Nx.axis_size(writes, 0)
 
-      {ctrls, masks, scroll_x, scroll_y, nametables, _latch} =
-        while {ctrls, masks, scroll_x, scroll_y, nametables, latch = state[6]},
+      {ctrls, masks, scroll_x, scroll_y, nametables, _latch, _writes, _valid_count, _lines} =
+        while {ctrls, masks, scroll_x, scroll_y, nametables, latch = state[6], writes,
+               valid_count, lines},
               index <- 0..(capacity - 1),
               unroll: 8 do
           cycle = writes[index][0]
@@ -52,7 +53,10 @@ if Code.ensure_loaded?(Nx.Defn) do
             Nx.select(first_scroll and lines >= scanline, value, scroll_x),
             Nx.select(second_scroll and lines >= scanline, value, scroll_y),
             Nx.select(ctrl_write, band(value, 3), nametables),
-            Nx.select(scroll_write, 1 - latch, latch)
+            Nx.select(scroll_write, 1 - latch, latch),
+            writes,
+            valid_count,
+            lines
           }
         end
 
