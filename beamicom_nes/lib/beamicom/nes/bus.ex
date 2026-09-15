@@ -132,28 +132,6 @@ defmodule Beamicom.NES.Bus do
     Mapper.reset(bus)
   end
 
-  @doc "Copy CPU RAM into the mutable representation used by generated code."
-  def mutable_ram({:atomics, ref} = ram) when is_reference(ref), do: ram
-
-  def mutable_ram(ram) when is_binary(ram) and byte_size(ram) == 0x800 do
-    ref = :atomics.new(0x800, signed: false)
-
-    for <<value <- ram>>, reduce: 1 do
-      index ->
-        :atomics.put(ref, index, value)
-        index + 1
-    end
-
-    {:atomics, ref}
-  end
-
-  @doc "Return a stable binary snapshot of either supported CPU RAM representation."
-  def ram_binary(ram) when is_binary(ram), do: ram
-
-  def ram_binary({:atomics, ref}) when is_reference(ref) do
-    for index <- 1..0x800, into: <<>>, do: <<:atomics.get(ref, index)>>
-  end
-
   if @apu_renderer == :native do
     defp prepare_apu_renderer(apu), do: {apu, nil}
   else
@@ -318,9 +296,6 @@ defmodule Beamicom.NES.Bus do
   def peek(%__MODULE__{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
     do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
 
-  def peek(%__MODULE__{ram: {:atomics, ram}}, addr) when addr in 0x0000..0x1FFF,
-    do: :atomics.get(ram, (addr &&& 0x07FF) + 1)
-
   def peek(%__MODULE__{} = bus, addr) when addr in 0x0000..0x1FFF,
     do: :binary.at(bus.ram, addr &&& 0x07FF)
 
@@ -404,12 +379,6 @@ defmodule Beamicom.NES.Bus do
   # Strobe high resets the read index (and holds it there); dropping it latches.
   defp strobe_pad(pad, true), do: %{pad | strobe: true, index: 0}
   defp strobe_pad(pad, false), do: %{pad | strobe: false}
-
-  def write(%__MODULE__{ram: {:atomics, ram}} = bus, addr, val)
-      when addr in 0x0000..0x1FFF do
-    :atomics.put(ram, (addr &&& 0x07FF) + 1, val &&& 0xFF)
-    bus
-  end
 
   def write(%__MODULE__{} = bus, addr, val) when addr in 0x0000..0x1FFF do
     i = addr &&& 0x07FF

@@ -92,19 +92,9 @@ defmodule Beamicom.NES.CPU do
   """
   def step(cpu, bus) do
     opcode = peek(bus, cpu.pc)
-    {op, mode, cyc} = opcode_info(opcode)
-    step_known(cpu, bus, op, mode, cyc)
-  end
-
-  @doc false
-  def step_known(cpu, bus, op, mode, cyc)
-      when is_atom(op) and is_atom(mode) and is_integer(cyc) and cyc > 0 do
     cpu = %{cpu | pc: cpu.pc + 1 &&& 0xFFFF}
+    {op, mode, cyc} = decode(opcode)
     {addr, crossed, cpu, bus} = resolve(mode, cpu, bus)
-    execute_resolved(cpu, bus, op, mode, cyc, addr, crossed)
-  end
-
-  defp execute_resolved(cpu, bus, op, mode, cyc, addr, crossed) do
     penalty = if crossed and op in @read_ops and mode in @penalty_modes, do: 1, else: 0
     # Only the PPU advance is split around the memory access (for exact NMI /
     # register-read dot timing). The APU + mapper-IRQ flush is batched/lazy and the
@@ -120,24 +110,6 @@ defmodule Beamicom.NES.CPU do
     # `exec`. Avoid the post-access poll/suppress calls for every other memory
     # access (the overwhelming common case); PPU register mirrors share the low
     # three address bits, so this remains exact for $2000-$3FFF.
-    complete_instruction(cpu, bus, cyc, penalty, extra, addr, poll)
-  end
-
-  defp static_prepare(cpu, bus, size, cyc, penalty) do
-    cpu = %{cpu | pc: cpu.pc + size &&& 0xFFFF}
-    {cpu, bus} = tick_ppu_cycles(cpu, bus, cyc + penalty - 1)
-    {cpu, bus, cpu.nmi_pending}
-  end
-
-  @doc false
-  def aot_prepare(cpu, bus, size, cyc, penalty),
-    do: static_prepare(cpu, bus, size, cyc, penalty)
-
-  @doc false
-  def aot_complete(cpu, bus, cyc, penalty, extra, addr, poll),
-    do: complete_instruction(cpu, bus, cyc, penalty, extra, addr, poll)
-
-  defp complete_instruction(cpu, bus, cyc, penalty, extra, addr, poll) do
     {cpu, bus} = post_access_nmi(cpu, bus, addr)
     {cpu, bus} = tick_ppu_cycles(cpu, bus, 1 + extra)
     bus = Bus.flush_ticks(bus, cyc + penalty + extra)
@@ -264,9 +236,6 @@ defmodule Beamicom.NES.CPU do
 
   defp peek(%Bus{prg: prg, prg_banks: banks}, addr) when addr >= 0x8000,
     do: :binary.at(prg, elem(banks, (addr - 0x8000) >>> 13) + (addr &&& 0x1FFF))
-
-  defp peek(%Bus{ram: {:atomics, ram}}, addr) when addr in 0x0000..0x1FFF,
-    do: :atomics.get(ram, (addr &&& 0x07FF) + 1)
 
   defp peek(%Bus{ram: ram}, addr) when addr in 0x0000..0x1FFF,
     do: :binary.at(ram, addr &&& 0x07FF)
@@ -954,6 +923,5 @@ defmodule Beamicom.NES.CPU do
             |> List.to_tuple()
           end).()
 
-  @doc "Opcode metadata used by tooling that must stay aligned with the interpreter."
-  def opcode_info(op) when is_integer(op) and op in 0..255, do: elem(@table, op)
+  defp decode(op), do: elem(@table, op)
 end
