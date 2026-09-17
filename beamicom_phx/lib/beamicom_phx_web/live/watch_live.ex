@@ -26,7 +26,7 @@ defmodule BeamicomPhxWeb.WatchLive do
         do: Emulator.profile(),
         else: nil
 
-    # `held` = controller buttons currently down (the NES controller is stateful, so
+    # `held` = controller buttons currently down (console controllers are stateful, so
     # we resend the whole set on every change). Server mode also accepts a dropped
     # ROM to (re)load the emulator.
     socket =
@@ -152,7 +152,7 @@ defmodule BeamicomPhxWeb.WatchLive do
           </div>
         </div>
         <p class="crt__controls">
-          Arrows = D-pad &nbsp;·&nbsp; X = A &nbsp;·&nbsp; Z = B &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
+          Arrows = D-pad &nbsp;·&nbsp; X/Z/S/A = A/B/X/Y &nbsp;·&nbsp; Q/W = L/R &nbsp;·&nbsp; Enter = Start &nbsp;·&nbsp; Shift = Select
         </p>
         <div
           id="gamepad"

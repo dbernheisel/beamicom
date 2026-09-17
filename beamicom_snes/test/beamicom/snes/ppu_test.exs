@@ -5,6 +5,33 @@ defmodule Beamicom.SNES.PPUTest do
 
   alias Beamicom.SNES.PPU
 
+  test "preserves every low horizontal scroll bit across the two writes" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x210D, 0x04)
+      |> PPU.write(0x210D, 0x00)
+
+    assert elem(ppu.bg_hofs, 0) == 4
+
+    ppu =
+      ppu
+      |> PPU.write(0x210D, 0x05)
+      |> PPU.write(0x210D, 0x01)
+
+    assert elem(ppu.bg_hofs, 0) == 0x105
+  end
+
+  test "keeps the horizontal and shared scroll latches separate" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x210D, 0x04)
+      |> PPU.write(0x210E, 0xAA)
+      |> PPU.write(0x210E, 0x00)
+      |> PPU.write(0x210D, 0x01)
+
+    assert elem(ppu.bg_hofs, 0) == 0x104
+  end
+
   test "writes VRAM words with configurable increment timing" do
     ppu =
       PPU.new()
@@ -24,6 +51,78 @@ defmodule Beamicom.SNES.PPUTest do
     assert ppu.vmadd == 1
   end
 
+  test "buffers VRAM reads and reloads before incrementing on low-byte reads" do
+    ppu =
+      PPU.new()
+      |> write_vram_byte(0x0000, 0x11)
+      |> write_vram_byte(0x0001, 0x22)
+      |> write_vram_byte(0x0002, 0x33)
+      |> write_vram_byte(0x0003, 0x44)
+      |> PPU.write(0x2115, 0x00)
+      |> PPU.write(0x2116, 0x00)
+      |> PPU.write(0x2117, 0x00)
+
+    assert {0x11, ppu} = PPU.read(ppu, 0x2139, 0)
+    assert ppu.vmadd == 1
+    assert {0x11, ppu} = PPU.read(ppu, 0x2139, 0)
+    assert ppu.vmadd == 2
+    assert {0x33, ppu} = PPU.read(ppu, 0x2139, 0)
+    assert ppu.vmadd == 3
+  end
+
+  test "buffers VRAM reads and reloads before incrementing on high-byte reads" do
+    ppu =
+      PPU.new()
+      |> write_vram_byte(0x0000, 0x11)
+      |> write_vram_byte(0x0001, 0x22)
+      |> write_vram_byte(0x0002, 0x33)
+      |> write_vram_byte(0x0003, 0x44)
+      |> PPU.write(0x2115, 0x80)
+      |> PPU.write(0x2116, 0x00)
+      |> PPU.write(0x2117, 0x00)
+
+    assert {0x22, ppu} = PPU.read(ppu, 0x213A, 0)
+    assert ppu.vmadd == 1
+    assert {0x22, ppu} = PPU.read(ppu, 0x213A, 0)
+    assert ppu.vmadd == 2
+    assert {0x44, ppu} = PPU.read(ppu, 0x213A, 0)
+    assert ppu.vmadd == 3
+  end
+
+  test "writes and reads CGRAM through a shared two-byte phase" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2121, 0x12)
+      |> PPU.write(0x2122, 0xCD)
+      |> PPU.write(0x2122, 0xAB)
+      |> PPU.write(0x2121, 0x12)
+
+    assert {0xCD, ppu} = PPU.read(ppu, 0x213B, 0)
+    assert ppu.cgadd == 0x12
+    assert ppu.cgram_second_byte?
+
+    assert {0xAB, ppu} = PPU.read(ppu, 0x213B, 0xCD)
+    assert ppu.cgadd == 0x13
+    refute ppu.cgram_second_byte?
+  end
+
+  test "keeps the CGRAM write latch intact when a read supplies the low-byte phase" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2121, 0)
+      |> PPU.write(0x2122, 0x34)
+      |> PPU.write(0x2122, 0x12)
+      |> PPU.write(0x2121, 1)
+
+    assert {0, ppu} = PPU.read(ppu, 0x213B, 0)
+    assert ppu.cgram_second_byte?
+
+    ppu = PPU.write(ppu, 0x2122, 0x56)
+    assert :array.get(1, ppu.cgram) == 0x5634
+    assert ppu.cgadd == 2
+    refute ppu.cgram_second_byte?
+  end
+
   test "renders a Mode 1 planar BG tile to native RGB24" do
     ppu =
       PPU.new()
@@ -31,7 +130,7 @@ defmodule Beamicom.SNES.PPUTest do
       |> PPU.write(0x2105, 0x01)
       |> PPU.write(0x2107, 0x04)
       |> PPU.write(0x212C, 0x01)
-      |> write_vram_byte(0x0000, 0x80)
+      |> write_vram_byte(0x0002, 0x80)
       |> write_vram_byte(0x0800, 0x00)
       |> write_vram_byte(0x0801, 0x00)
       |> PPU.write(0x2121, 1)
@@ -43,6 +142,30 @@ defmodule Beamicom.SNES.PPUTest do
     assert frame.height == 224
     assert byte_size(frame.data) == 256 * 224 * 3
     assert binary_part(frame.data, 0, 6) == <<255, 0, 0, 0, 0, 0>>
+  end
+
+  test "the hidden first hardware scanline advances the visible BG source row" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2107, 0x04)
+      |> PPU.write(0x212C, 0x01)
+      |> write_vram_byte(0x0000, 0x80)
+      |> write_vram_byte(0x0003, 0x80)
+      |> write_vram_byte(0x0800, 0x00)
+      |> write_vram_byte(0x0801, 0x00)
+      |> write_cgram_color(1, 0x001F)
+      |> write_cgram_color(2, 0x7C00)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 0) == <<0, 0, 255>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(ppu, objects) == frame.data
+    end
   end
 
   test "applies master brightness in 5-bit space before DAC expansion" do
@@ -74,44 +197,84 @@ defmodule Beamicom.SNES.PPUTest do
   end
 
   test "MOSAIC repeats each enabled background's upper-left pixel in screen-aligned blocks" do
-    base =
-      PPU.new()
-      |> PPU.write(0x2100, 0x0F)
-      |> PPU.write(0x2105, 0x01)
-      |> PPU.write(0x2107, 0x04)
-      |> PPU.write(0x2108, 0x08)
-      # BG1 and BG2 use separate copies of the same test tile.
-      |> PPU.write(0x210B, 0x10)
-      |> write_vram_byte(0x0800, 0x00)
-      |> write_vram_byte(0x0801, 0x00)
-      |> write_vram_byte(0x1000, 0x00)
-      |> write_vram_byte(0x1001, 0x00)
-      # Row 0 begins with palette colors 1, 2; row 1 begins with color 3.
-      |> write_vram_byte(0x0000, 0x80)
-      |> write_vram_byte(0x0001, 0x40)
-      |> write_vram_byte(0x0002, 0x80)
-      |> write_vram_byte(0x0003, 0x80)
-      |> write_vram_byte(0x2000, 0x80)
-      |> write_vram_byte(0x2001, 0x40)
-      |> write_vram_byte(0x2002, 0x80)
-      |> write_vram_byte(0x2003, 0x80)
-      |> write_cgram_color(1, 0x001F)
-      |> write_cgram_color(2, 0x7C00)
-      |> write_cgram_color(3, 0x03E0)
+    base = mosaic_test_ppu()
 
     # Size nibble 1 means 2x2. Enabling BG1 repeats horizontally and vertically.
     bg1 = base |> PPU.write(0x212C, 0x01) |> PPU.write(0x2106, 0x11)
     assert bg1.mosaic == 0x11
     frame = PPU.render_frame(bg1)
-    assert binary_part(frame.data, 0, 6) == <<255, 0, 0, 255, 0, 0>>
-    assert binary_part(frame.data, 256 * 3, 6) == <<255, 0, 0, 255, 0, 0>>
+    assert binary_part(frame.data, 0, 6) == <<0, 255, 0, 0, 255, 0>>
+    assert binary_part(frame.data, 256 * 3, 6) == <<0, 255, 0, 0, 255, 0>>
 
     # BG1's enable bit must not affect BG2; BG2's own bit enables the same effect.
     bg2 = base |> PPU.write(0x212C, 0x02) |> PPU.write(0x2106, 0x11)
-    assert binary_part(PPU.render_frame(bg2).data, 0, 6) == <<255, 0, 0, 0, 0, 255>>
+    assert binary_part(PPU.render_frame(bg2).data, 0, 6) == <<0, 255, 0, 0, 0, 0>>
 
     bg2 = PPU.write(bg2, 0x2106, 0x12)
-    assert binary_part(PPU.render_frame(bg2).data, 0, 6) == <<255, 0, 0, 255, 0, 0>>
+    assert binary_part(PPU.render_frame(bg2).data, 0, 6) == <<0, 255, 0, 0, 255, 0>>
+  end
+
+  test "MOSAIC vertical phase starts at the first visible scanline each frame" do
+    ppu =
+      mosaic_test_ppu()
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x2106, 0x11)
+      |> PPU.begin_frame(true)
+      |> capture_frame_scanlines()
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 0) == <<0, 255, 0>>
+    assert pixel_at(frame.data, 0, 1) == <<0, 255, 0>>
+  end
+
+  test "enabling MOSAIC mid-frame starts a new vertical block" do
+    ppu =
+      mosaic_test_ppu()
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x2106, 0x10)
+      |> PPU.begin_frame(true)
+      |> PPU.capture_scanline(1)
+      |> PPU.write(0x2106, 0x11)
+      |> capture_scanlines(2..224)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 0) == <<0, 255, 0>>
+    assert pixel_at(frame.data, 0, 1) == <<0, 0, 255>>
+    assert pixel_at(frame.data, 0, 2) == <<0, 0, 255>>
+  end
+
+  test "changing MOSAIC size mid-frame reloads its vertical phase" do
+    ppu =
+      mosaic_test_ppu()
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x2106, 0x11)
+      |> PPU.begin_frame(true)
+      |> PPU.capture_scanline(1)
+      |> PPU.write(0x2106, 0x21)
+      |> capture_scanlines(2..224)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 1) == <<0, 0, 255>>
+    assert pixel_at(frame.data, 0, 2) == <<0, 0, 255>>
+    assert pixel_at(frame.data, 0, 3) == <<0, 0, 255>>
+  end
+
+  test "writing an unchanged MOSAIC value does not reload its vertical phase" do
+    ppu =
+      mosaic_test_ppu()
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x2106, 0x11)
+      |> PPU.begin_frame(true)
+      |> PPU.capture_scanline(1)
+      |> PPU.write(0x2106, 0x11)
+      |> capture_scanlines(2..224)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 1) == <<0, 255, 0>>
   end
 
   test "Mode 7 EXTBG uses BG1's mosaic bit vertically and BG2's horizontally" do
@@ -158,7 +321,7 @@ defmodule Beamicom.SNES.PPUTest do
       # BG2 tile 0 has raw color 1 at x=0.
       |> write_vram_byte(0x1000, 0x00)
       |> write_vram_byte(0x1001, 0x00)
-      |> write_vram_byte(0x2000, 0x80)
+      |> write_vram_byte(0x2002, 0x80)
       |> PPU.write(0x2121, 1)
       |> PPU.write(0x2122, 0x1F)
       |> PPU.write(0x2122, 0x00)
@@ -185,13 +348,44 @@ defmodule Beamicom.SNES.PPUTest do
       |> write_vram_byte(0x1001, 0x00)
       |> write_vram_byte(0x1800, 0x00)
       |> write_vram_byte(0x1801, 0x04)
-      |> write_vram_byte(0x2000, 0x80)
-      |> write_vram_byte(0x4000, 0x80)
+      |> write_vram_byte(0x2002, 0x80)
+      |> write_vram_byte(0x4002, 0x80)
       |> write_cgram_color(1, 0x001F)
       |> write_cgram_color(5, 0x7C00)
 
     frame = PPU.render_frame(ppu)
     assert binary_part(frame.data, 0, 3) == <<123, 0, 123>>
+  end
+
+  test "halves color addition before saturating each component" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2108, 0x08)
+      |> PPU.write(0x2109, 0x0C)
+      |> PPU.write(0x210B, 0x10)
+      |> PPU.write(0x210C, 0x02)
+      |> PPU.write(0x212C, 0x02)
+      |> PPU.write(0x212D, 0x04)
+      |> PPU.write(0x2130, 0x02)
+      |> PPU.write(0x2131, 0x42)
+      |> write_vram_byte(0x1000, 0x00)
+      |> write_vram_byte(0x1001, 0x00)
+      |> write_vram_byte(0x1800, 0x00)
+      |> write_vram_byte(0x1801, 0x04)
+      |> write_vram_byte(0x2002, 0x80)
+      |> write_vram_byte(0x4002, 0x80)
+      |> write_cgram_color(1, 0x001F)
+      |> write_cgram_color(5, 0x001F)
+
+    native = PPU.render_frame(ppu).data
+    assert binary_part(native, 0, 3) == <<255, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(ppu, objects) == native
+    end
   end
 
   test "uses unhalved fixed color when the selected sub-screen is uncovered" do
@@ -209,7 +403,7 @@ defmodule Beamicom.SNES.PPUTest do
       |> PPU.write(0x2132, 0x5F)
       |> write_vram_byte(0x0800, 0x00)
       |> write_vram_byte(0x0801, 0x00)
-      |> write_vram_byte(0x0000, 0x80)
+      |> write_vram_byte(0x0002, 0x80)
       |> write_cgram_color(1, 0x001F)
 
     # An empty sub screen falls back to fixed green and disables halving, so
@@ -236,6 +430,30 @@ defmodule Beamicom.SNES.PPUTest do
     assert configured.data == baseline.data
   end
 
+  test "clips the main screen to black while color math is disabled" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2125, 0x20)
+      |> PPU.write(0x2126, 0)
+      |> PPU.write(0x2127, 127)
+      |> PPU.write(0x2130, 0x80)
+      |> write_cgram_color(0, 0x001F)
+
+    for ppu <- [ppu, PPU.write(ppu, 0x212E, 0x01)] do
+      native = PPU.render_frame(ppu).data
+
+      assert binary_part(native, 0, 3) == <<0, 0, 0>>
+      assert binary_part(native, 200 * 3, 3) == <<255, 0, 0>>
+
+      if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+        objects = :binary.copy(<<0, 0>>, 256 * 224)
+        assert Beamicom.SNES.Nx.PPURenderer.render(ppu, objects) == native
+      end
+    end
+  end
+
   test "decodes window selector pairs as enable then invert" do
     base =
       PPU.new()
@@ -246,7 +464,7 @@ defmodule Beamicom.SNES.PPUTest do
       |> PPU.write(0x212E, 0x01)
       |> PPU.write(0x2126, 0)
       |> PPU.write(0x2127, 127)
-      |> write_vram_byte(0x0000, 0xFF)
+      |> write_vram_byte(0x0002, 0xFF)
       |> write_cgram_color(1, 0x001F)
 
     # W12SEL's BG1 low pair is EI: bit 1 enables window 1 and bit 0
@@ -345,6 +563,61 @@ defmodule Beamicom.SNES.PPUTest do
     assert binary_part(PPU.render_frame(rotated).data, 0, 3) == <<0, 255, 0>>
   end
 
+  test "OAM writes advance the priority-rotation first sprite" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2102, 0xFF)
+      |> PPU.write(0x2103, 0x80)
+
+    assert ppu.oam_internal_address == 0x1FE
+    assert ppu.obj_first == 0x7F
+
+    ppu = PPU.write(ppu, 0x2104, 0x12)
+    assert ppu.oam_internal_address == 0x1FF
+    assert ppu.obj_first == 0x7F
+
+    ppu = PPU.write(ppu, 0x2104, 0x34)
+    assert ppu.oam_internal_address == 0x200
+    assert ppu.obj_first == 0
+  end
+
+  test "OAM reads advance the priority-rotation first sprite" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2102, 1)
+      |> PPU.write(0x2103, 0x80)
+
+    assert ppu.oam_internal_address == 2
+    assert ppu.obj_first == 0
+
+    assert {_value, ppu} = PPU.read(ppu, 0x2138, 0)
+    assert ppu.oam_internal_address == 3
+    assert ppu.obj_first == 0
+
+    assert {_value, ppu} = PPU.read(ppu, 0x2138, 0)
+    assert ppu.oam_internal_address == 4
+    assert ppu.obj_first == 1
+  end
+
+  test "vblank restores the priority-rotation first sprite with the OAM address" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 0x80)
+      |> PPU.write(0x2104, 0)
+      |> PPU.write(0x2104, 0)
+      |> PPU.write(0x2104, 0)
+      |> PPU.write(0x2104, 0)
+
+    assert ppu.oam_internal_address == 4
+    assert ppu.obj_first == 1
+
+    ppu = PPU.enter_scanline(ppu, 225)
+    assert ppu.oam_internal_address == 0
+    assert ppu.obj_first == 0
+  end
+
   test "large OBJ horizontal tiles wrap within the character row" do
     ppu =
       PPU.new()
@@ -370,6 +643,82 @@ defmodule Beamicom.SNES.PPUTest do
       |> PPU.write(0x2104, 0x02)
 
     assert binary_part(PPU.render_frame(ppu).data, 8 * 3, 3) == <<255, 0, 0>>
+  end
+
+  test "OBJSEL size mode 6 renders 16x32 and 32x64 objects" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2101, 0xC0)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x212C, 0x10)
+      # Small OBJ bottom-right: tile column 1, tile row 3, pixel 7 on row 7.
+      |> write_vram_byte(0x31 * 32 + 7 * 2, 0x01)
+      # Large OBJ bottom-right: tile column 3, tile row 7, pixel 7 on row 7.
+      |> write_vram_byte(0x73 * 32 + 7 * 2, 0x01)
+      |> write_cgram_color(129, 0x001F)
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 0)
+
+    ppu =
+      Enum.reduce([0, 0, 0, 0, 32, 0, 0, 0], ppu, fn byte, ppu ->
+        PPU.write(ppu, 0x2104, byte)
+      end)
+
+    # Sprite 1 is large; sprite 0 remains small.
+    ppu =
+      ppu
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 1)
+      |> PPU.write(0x2104, 0x08)
+
+    previous = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
+    on_exit(fn -> Application.put_env(:beamicom_snes, :ppu_renderer, previous) end)
+    Application.put_env(:beamicom_snes, :ppu_renderer, :native)
+
+    native = PPU.render_frame(ppu).data
+    assert pixel_at(native, 15, 31) == <<255, 0, 0>>
+    assert pixel_at(native, 16, 31) == <<0, 0, 0>>
+    assert pixel_at(native, 15, 32) == <<0, 0, 0>>
+    assert pixel_at(native, 63, 63) == <<255, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      Application.put_env(:beamicom_snes, :ppu_renderer, :nx)
+      assert PPU.render_frame(ppu).data == native
+    end
+  end
+
+  test "OBJSEL size mode 7 flips a 16x32 object across both dimensions" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2101, 0xE0)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x212C, 0x10)
+      # Source bottom-right becomes output top-left under horizontal and vertical flip.
+      |> write_vram_byte(0x31 * 32 + 7 * 2, 0x01)
+      |> write_cgram_color(129, 0x001F)
+      |> PPU.write(0x2102, 0)
+      |> PPU.write(0x2103, 0)
+
+    ppu =
+      Enum.reduce([24, 8, 0, 0xC0], ppu, fn byte, ppu ->
+        PPU.write(ppu, 0x2104, byte)
+      end)
+
+    previous = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
+    on_exit(fn -> Application.put_env(:beamicom_snes, :ppu_renderer, previous) end)
+    Application.put_env(:beamicom_snes, :ppu_renderer, :native)
+
+    native = PPU.render_frame(ppu).data
+    assert pixel_at(native, 24, 8) == <<255, 0, 0>>
+    assert pixel_at(native, 25, 8) == <<0, 0, 0>>
+    assert pixel_at(native, 24, 40) == <<0, 0, 0>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      Application.put_env(:beamicom_snes, :ppu_renderer, :nx)
+      assert PPU.render_frame(ppu).data == native
+    end
   end
 
   if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
@@ -482,7 +831,7 @@ defmodule Beamicom.SNES.PPUTest do
       # BG1 tilemap selects tile zero. Plane 6 gives the first pixel index 64.
       |> write_vram_byte(0x0800, 0x00)
       |> write_vram_byte(0x0801, 0x00)
-      |> write_vram_byte(0x0030, 0x80)
+      |> write_vram_byte(0x0032, 0x80)
       |> write_cgram_color(64, 0x03E0)
 
     frame = PPU.render_frame(ppu)
@@ -500,10 +849,96 @@ defmodule Beamicom.SNES.PPUTest do
       # Tile palette 1 supplies the low red component bit in direct-color mode.
       |> write_vram_byte(0x0800, 0x00)
       |> write_vram_byte(0x0801, 0x04)
-      |> write_vram_byte(0x0000, 0x80)
+      |> write_vram_byte(0x0002, 0x80)
 
     frame = PPU.render_frame(ppu)
     assert binary_part(frame.data, 0, 3) == <<49, 0, 0>>
+  end
+
+  test "Mode 5 fetches 512 horizontal pixels through 16x8 map entries" do
+    ppu =
+      hires_bg_test_ppu(5)
+      |> write_vram_word(0x0800, 0)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(1, 2)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(frame.data, 3, 0) == <<255, 0, 0>>
+    assert pixel_at(frame.data, 4, 0) == <<0, 0, 255>>
+
+    scrolled = ppu |> PPU.write(0x210D, 4) |> PPU.write(0x210D, 0)
+    assert pixel_at(PPU.render_frame(scrolled).data, 0, 0) == <<0, 0, 255>>
+  end
+
+  test "Mode 5 selects 16x8 or 16x16 vertical character layout from BGMODE" do
+    small =
+      hires_bg_test_ppu(5)
+      |> write_vram_word(0x0800, 0)
+      |> write_vram_word(0x0800 + 32 * 2, 2)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(2, 3)
+
+    assert pixel_at(PPU.render_frame(small).data, 0, 8) == <<0, 255, 0>>
+
+    large =
+      hires_bg_test_ppu(0x15)
+      |> write_vram_word(0x0800, 0)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(16, 2)
+
+    assert pixel_at(PPU.render_frame(large).data, 0, 8) == <<0, 0, 255>>
+  end
+
+  test "Mode 2 applies separate BG3 horizontal and vertical offsets after the first column" do
+    horizontal =
+      offset_bg_test_ppu(2)
+      |> write_vram_word(0x0800 + 3 * 2, 1)
+      |> write_vram_word(0x1000, 0x2010)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(1, 2)
+
+    assert pixel_at(PPU.render_frame(horizontal).data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(PPU.render_frame(horizontal).data, 8, 0) == <<0, 0, 255>>
+
+    vertical =
+      offset_bg_test_ppu(2)
+      |> write_vram_word(0x0800 + (32 + 1) * 2, 1)
+      |> write_vram_word(0x1000 + 32 * 2, 0x2008)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(1, 2)
+
+    assert pixel_at(PPU.render_frame(vertical).data, 8, 0) == <<0, 0, 255>>
+  end
+
+  test "Mode 4 uses BG3 bit 15 to select a vertical offset" do
+    ppu =
+      offset_bg_test_ppu(4)
+      |> write_vram_word(0x0800 + (32 + 1) * 2, 1)
+      |> write_vram_word(0x1000, 0xA008)
+      |> write_8bpp_tile_row(0, 1)
+      |> write_8bpp_tile_row(1, 2)
+
+    assert pixel_at(PPU.render_frame(ppu).data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(PPU.render_frame(ppu).data, 8, 0) == <<0, 0, 255>>
+  end
+
+  test "Mode 6 combines 512-pixel fetches with BG3 offset-per-tile" do
+    ppu =
+      hires_bg_test_ppu(6)
+      |> PPU.write(0x2109, 0x08)
+      |> write_vram_word(0x0800 + 2 * 2, 2)
+      |> write_vram_word(0x1000, 0x2010)
+      |> write_4bpp_tile_row(0, 1)
+      |> write_4bpp_tile_row(1, 1)
+      |> write_4bpp_tile_row(2, 2)
+      |> write_4bpp_tile_row(3, 2)
+
+    frame = PPU.render_frame(ppu)
+
+    assert pixel_at(frame.data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(frame.data, 8, 0) == <<0, 0, 255>>
   end
 
   test "all legal background modes render without a missing layer definition" do
@@ -517,6 +952,90 @@ defmodule Beamicom.SNES.PPUTest do
       assert %{data: data} = PPU.render_frame(ppu)
       assert byte_size(data) == 256 * 224 * 3
     end
+  end
+
+  test "SETINI stores every software-visible display mode bit" do
+    ppu = PPU.new() |> PPU.write(0x2133, 0x4F)
+
+    assert ppu.interlace?
+    assert ppu.obj_interlace?
+    assert ppu.overscan?
+    assert ppu.pseudo_hires?
+    assert ppu.extbg?
+  end
+
+  test "pseudo-hires downsamples each sub/main pair into the 256-pixel frame" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x01)
+      |> PPU.write(0x2107, 0x04)
+      |> PPU.write(0x2108, 0x08)
+      |> PPU.write(0x210B, 0x10)
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x212D, 0x02)
+      |> write_vram_byte(0x0800, 0)
+      |> write_vram_byte(0x0801, 0)
+      |> write_vram_byte(0x1000, 0)
+      |> write_vram_byte(0x1001, 0)
+      |> write_vram_byte(0x0002, 0x80)
+      |> write_vram_byte(0x2003, 0x80)
+      |> write_cgram_color(1, 0x001F)
+      |> write_cgram_color(2, 0x7C00)
+
+    assert pixel_at(PPU.render_frame(ppu).data, 0, 0) == <<255, 0, 0>>
+
+    pseudo_hires = PPU.write(ppu, 0x2133, 0x08)
+    native = PPU.render_frame(pseudo_hires).data
+    assert pixel_at(native, 0, 0) == <<127, 0, 127>>
+
+    if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+      objects = :binary.copy(<<0, 0>>, 256 * 224)
+      assert Beamicom.SNES.Nx.PPURenderer.render(pseudo_hires, objects) == native
+    end
+  end
+
+  test "OBJ interlace selects alternating character rows for each field" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x212C, 0x10)
+      |> PPU.write(0x2133, 0x02)
+      |> write_vram_byte(0x0000, 0x80)
+      |> write_vram_byte(0x0003, 0x80)
+      |> write_cgram_color(129, 0x001F)
+      |> write_cgram_color(130, 0x7C00)
+
+    even = ppu |> PPU.begin_frame(false, 0) |> PPU.render_frame()
+    odd = ppu |> PPU.begin_frame(false, 1) |> PPU.render_frame()
+
+    assert pixel_at(even.data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(odd.data, 0, 0) == <<0, 0, 255>>
+    assert {even.width, even.height} == {256, 224}
+    assert {odd.width, odd.height} == {256, 224}
+  end
+
+  test "Mode 5 interlace selects the background row for the current field" do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2105, 0x05)
+      |> PPU.write(0x2107, 0x04)
+      |> PPU.write(0x212C, 0x01)
+      |> PPU.write(0x212D, 0x01)
+      |> PPU.write(0x2133, 0x01)
+      |> write_vram_byte(0x0800, 0)
+      |> write_vram_byte(0x0801, 0)
+      |> write_vram_byte(0x0004, 0xC0)
+      |> write_vram_byte(0x0007, 0xC0)
+      |> write_cgram_color(1, 0x001F)
+      |> write_cgram_color(2, 0x7C00)
+
+    even = ppu |> PPU.begin_frame(false, 0) |> PPU.render_frame()
+    odd = ppu |> PPU.begin_frame(false, 1) |> PPU.render_frame()
+
+    assert pixel_at(even.data, 0, 0) == <<255, 0, 0>>
+    assert pixel_at(odd.data, 0, 0) == <<0, 0, 255>>
   end
 
   test "Nx Mode 7 rendering is pixel-exact with the native renderer" do
@@ -671,6 +1190,88 @@ defmodule Beamicom.SNES.PPUTest do
     assert ppu.reused_frames == 1
   end
 
+  test "render pipeline reuses its worker when consecutive frames are dirty" do
+    ppu = PPU.new(render_pipeline: true) |> PPU.write(0x2100, 0x0F)
+
+    ppu = PPU.enter_scanline(ppu, 225)
+    assert {:running, first_task, _key} = ppu.render_task
+    assert %Beamicom.SNES.DSPTask{reusable?: true} = first_task
+
+    ppu = ppu |> PPU.write(0x2100, 0x0E) |> PPU.enter_scanline(225)
+    assert {:running, second_task, _key} = ppu.render_task
+    assert second_task.pid == first_task.pid
+  end
+
+  test "overlapping render pipelines fall back without blocking the reusable worker" do
+    first = PPU.new(render_pipeline: true) |> PPU.write(0x2100, 0x0F)
+    second = PPU.new(render_pipeline: true) |> PPU.write(0x2100, 0x0E)
+
+    first = PPU.enter_scanline(first, 225)
+    assert {:running, first_task, _key} = first.render_task
+    assert first_task.reusable?
+
+    second = PPU.enter_scanline(second, 225)
+    assert {:running, second_task, _key} = second.render_task
+    refute second_task.reusable?
+
+    first = PPU.enter_scanline(first, 225)
+    second = PPU.enter_scanline(second, 225)
+    assert {%{data: first_data}, _first} = PPU.take_frame(first)
+    assert {%{data: second_data}, _second} = PPU.take_frame(second)
+    assert byte_size(first_data) == 256 * 224 * 3
+    assert byte_size(second_data) == 256 * 224 * 3
+  end
+
+  test "$213E reports and latches PPU1 version and OBJ overflow state" do
+    ppu = %{
+      PPU.new()
+      | ppu1_mdr: 0xFF,
+        obj_range_over?: true,
+        obj_time_over?: true
+    }
+
+    assert {0xD1, ppu} = PPU.read(ppu, 0x213E, 0x00)
+    assert ppu.ppu1_mdr == 0xD1
+  end
+
+  test "OBJ range-over and time-over accumulate until the next frame" do
+    range_over =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.enter_scanline(1)
+
+    assert range_over.obj_range_over?
+    refute range_over.obj_time_over?
+
+    oam =
+      Enum.reduce(18..127, PPU.new().oam, fn index, oam ->
+        :array.set(index * 4 + 1, 100, oam)
+      end)
+
+    time_over =
+      %{PPU.new() | force_blank?: false, obsel: 3 <<< 5, oam: oam}
+      |> PPU.enter_scanline(1)
+
+    refute time_over.obj_range_over?
+    assert time_over.obj_time_over?
+
+    reset = PPU.begin_frame(time_over, false)
+    refute reset.obj_range_over?
+    refute reset.obj_time_over?
+  end
+
+  test "PPU1 and PPU2 reads retain distinct data-bus values" do
+    ppu = %{PPU.new() | m7_product: 0x5A, latched_hcounter: 0x1AB}
+
+    assert {0x5A, ppu} = PPU.read(ppu, 0x2134, 0x00)
+    assert {0xAB, ppu} = PPU.read(ppu, 0x213C, 0x00)
+
+    assert {0x5A, ppu} = PPU.read(ppu, 0x2104, 0xEE)
+    assert {0xAB, ppu} = PPU.read(ppu, 0x213C, 0x00)
+    assert ppu.ppu1_mdr == 0x5A
+    assert ppu.ppu2_mdr == 0xAB
+  end
+
   defp write_vram_byte(ppu, byte_address, value) do
     word_address = div(byte_address, 2)
     high? = rem(byte_address, 2) == 1
@@ -688,4 +1289,86 @@ defmodule Beamicom.SNES.PPUTest do
     |> PPU.write(0x2122, color &&& 0xFF)
     |> PPU.write(0x2122, color >>> 8)
   end
+
+  defp write_vram_word(ppu, byte_address, value) do
+    ppu
+    |> write_vram_byte(byte_address, value &&& 0xFF)
+    |> write_vram_byte(byte_address + 1, value >>> 8)
+  end
+
+  defp write_4bpp_tile_row(ppu, tile, color) do
+    base = tile * 32
+
+    ppu
+    |> write_vram_byte(base + 2, if((color &&& 1) != 0, do: 0xFF, else: 0))
+    |> write_vram_byte(base + 3, if((color &&& 2) != 0, do: 0xFF, else: 0))
+    |> write_vram_byte(base + 18, if((color &&& 4) != 0, do: 0xFF, else: 0))
+    |> write_vram_byte(base + 19, if((color &&& 8) != 0, do: 0xFF, else: 0))
+  end
+
+  defp write_8bpp_tile_row(ppu, tile, color) do
+    base = tile * 64
+
+    Enum.reduce(0..7, ppu, fn plane, ppu ->
+      offset = div(plane, 2) * 16 + rem(plane, 2) + 2
+      write_vram_byte(ppu, base + offset, if((color &&& 1 <<< plane) != 0, do: 0xFF, else: 0))
+    end)
+  end
+
+  defp hires_bg_test_ppu(mode) do
+    PPU.new()
+    |> PPU.write(0x2100, 0x0F)
+    |> PPU.write(0x2105, mode)
+    |> PPU.write(0x2107, 0x04)
+    |> PPU.write(0x212C, 0x01)
+    |> PPU.write(0x212D, 0x01)
+    |> write_cgram_color(1, 0x001F)
+    |> write_cgram_color(2, 0x7C00)
+    |> write_cgram_color(3, 0x03E0)
+  end
+
+  defp offset_bg_test_ppu(mode) do
+    PPU.new()
+    |> PPU.write(0x2100, 0x0F)
+    |> PPU.write(0x2105, mode)
+    |> PPU.write(0x2107, 0x04)
+    |> PPU.write(0x2109, 0x08)
+    |> PPU.write(0x212C, 0x01)
+    |> write_cgram_color(1, 0x001F)
+    |> write_cgram_color(2, 0x7C00)
+  end
+
+  defp mosaic_test_ppu do
+    PPU.new()
+    |> PPU.write(0x2100, 0x0F)
+    |> PPU.write(0x2105, 0x01)
+    |> PPU.write(0x2107, 0x04)
+    |> PPU.write(0x2108, 0x08)
+    |> PPU.write(0x210B, 0x10)
+    |> write_vram_byte(0x0800, 0x00)
+    |> write_vram_byte(0x0801, 0x00)
+    |> write_vram_byte(0x1000, 0x00)
+    |> write_vram_byte(0x1001, 0x00)
+    |> write_vram_byte(0x0000, 0x80)
+    |> write_vram_byte(0x0001, 0x40)
+    |> write_vram_byte(0x0002, 0x80)
+    |> write_vram_byte(0x0003, 0x80)
+    |> write_vram_byte(0x0005, 0x80)
+    |> write_vram_byte(0x2000, 0x80)
+    |> write_vram_byte(0x2001, 0x40)
+    |> write_vram_byte(0x2002, 0x80)
+    |> write_vram_byte(0x2003, 0x80)
+    |> write_vram_byte(0x2005, 0x80)
+    |> write_cgram_color(1, 0x001F)
+    |> write_cgram_color(2, 0x7C00)
+    |> write_cgram_color(3, 0x03E0)
+  end
+
+  defp capture_frame_scanlines(ppu), do: capture_scanlines(ppu, 1..224)
+
+  defp capture_scanlines(ppu, lines),
+    do: Enum.reduce(lines, ppu, fn line, ppu -> PPU.capture_scanline(ppu, line) end)
+
+  defp pixel_at(frame_data, x, y),
+    do: binary_part(frame_data, (y * 256 + x) * 3, 3)
 end

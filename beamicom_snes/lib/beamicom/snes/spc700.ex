@@ -3,6 +3,7 @@ defmodule Beamicom.SNES.SPC700 do
 
   import Bitwise
   alias Beamicom.SNES.DSP
+  alias Beamicom.SNES.APU.RAM
 
   @compile {:inline,
             direct: 2,
@@ -23,6 +24,8 @@ defmodule Beamicom.SNES.SPC700 do
   @z 0x02
   @c 0x01
   @bus_counter_key {__MODULE__, :bus_counter}
+  @access_sync_key {__MODULE__, :access_sync}
+  @access_capture_after_key {__MODULE__, :access_capture_after}
   @ipl <<0xCD, 0xEF, 0xBD, 0xE8, 0x00, 0xC6, 0x1D, 0xD0, 0xFC, 0x8F, 0xAA, 0xF4, 0x8F, 0xBB, 0xF5,
          0x78, 0xCC, 0xF4, 0xD0, 0xFB, 0x2F, 0x19, 0xEB, 0xF4, 0xD0, 0xFC, 0x7E, 0xF4, 0xD0, 0x0B,
          0xE4, 0xF5, 0xCB, 0xF4, 0xD7, 0x00, 0xFC, 0xD0, 0xF3, 0xAB, 0x01, 0x10, 0xEF, 0x7E, 0xF4,
@@ -38,10 +41,13 @@ defmodule Beamicom.SNES.SPC700 do
             psw: 0,
             input_ports: {0, 0, 0, 0},
             output_ports: {0, 0, 0, 0},
+            test: 0x0A,
             control: 0x80,
             dsp_addr: 0,
             dsp: nil,
             dsp_events: [],
+            access_events: [],
+            capture_access_events?: false,
             aux: {0, 0},
             timer_targets: {0, 0, 0},
             timer_stages: {0, 0, 0},
@@ -52,6 +58,7 @@ defmodule Beamicom.SNES.SPC700 do
             bus_cycle: 0,
             bus_counter: nil,
             cycle_credit: 0,
+            sleeping?: false,
             stopped?: false,
             error: nil
 
@@ -64,7 +71,175 @@ defmodule Beamicom.SNES.SPC700 do
   def put_input_port(%__MODULE__{} = spc, port, value),
     do: %{spc | input_ports: put_elem(spc.input_ports, port, value &&& 0xFF)}
 
+  @doc "Wakes a sleeping SPC700; STOP remains latched until reset."
+  def wake(%__MODULE__{stopped?: true} = spc), do: spc
+  def wake(%__MODULE__{} = spc), do: %{spc | sleeping?: false}
+
+  @doc """
+  Reads SPC memory at an absolute SPC access clock without advancing the CPU.
+
+  This is the timeline boundary for integrations that must interleave external
+  accesses with the SPC bus. Calls for timer-backed registers must use
+  monotonically increasing clocks.
+  """
+  def read_at_clock(%__MODULE__{} = spc, address, access_clock)
+      when is_integer(address) and is_integer(access_clock) and access_clock >= 0 do
+    address = address &&& 0xFFFF
+
+    case address do
+      x when x in [0xF0, 0xF1, 0xFA, 0xFB, 0xFC] ->
+        {0, spc}
+
+      x when x in 0xF4..0xF7 ->
+        {elem(spc.input_ports, x - 0xF4), spc}
+
+      0xF2 ->
+        {spc.dsp_addr, spc}
+
+      0xF3 ->
+        {DSP.read(spc.dsp, spc.dsp_addr), spc}
+
+      0xF8 ->
+        {elem(spc.aux, 0), spc}
+
+      0xF9 ->
+        {elem(spc.aux, 1), spc}
+
+      x when x in 0xFD..0xFF ->
+        index = x - 0xFD
+        spc = sync_timer(spc, index, access_clock)
+        value = elem(spc.timer_outputs, index)
+        {value, %{spc | timer_outputs: put_elem(spc.timer_outputs, index, 0)}}
+
+      _ ->
+        {memory_get(spc, address), spc}
+    end
+  end
+
+  @doc """
+  Writes SPC memory at an absolute SPC access clock without advancing the CPU.
+
+  DSP events keep the existing `{clock, address, value}` shape. This function
+  lets a shared timeline supply the clock without coupling SPC state to an APU
+  orchestrator. Calls for timer-backed registers must use monotonically
+  increasing clocks.
+  """
+  def write_at_clock(%__MODULE__{} = spc, address, value, access_clock)
+      when is_integer(address) and is_integer(value) and is_integer(access_clock) and
+             access_clock >= 0 do
+    address = address &&& 0xFFFF
+    value = value &&& 0xFF
+    spc = write_backing_ram(spc, address, value, access_clock)
+
+    case address do
+      0xF0 ->
+        write_test(spc, value, access_clock)
+
+      0xF1 ->
+        write_control(spc, value, access_clock)
+
+      0xF2 ->
+        %{spc | dsp_addr: value}
+
+      0xF3 ->
+        if spc.dsp_addr < 0x80 do
+          address = spc.dsp_addr
+
+          spc = %{
+            spc
+            | dsp: DSP.write(spc.dsp, address, value),
+              dsp_events: [{access_clock, address, value} | spc.dsp_events]
+          }
+
+          record_access_event(spc, {access_clock, :dsp_write, address, value})
+        else
+          spc
+        end
+
+      x when x in 0xF4..0xF7 ->
+        %{spc | output_ports: put_elem(spc.output_ports, x - 0xF4, value)}
+
+      0xF8 ->
+        %{spc | aux: put_elem(spc.aux, 0, value)}
+
+      0xF9 ->
+        %{spc | aux: put_elem(spc.aux, 1, value)}
+
+      x when x in 0xFA..0xFC ->
+        index = x - 0xFA
+        spc = sync_timer(spc, index, access_clock)
+        %{spc | timer_targets: put_elem(spc.timer_targets, index, value)}
+
+      _ ->
+        spc
+    end
+  end
+
   def run(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
+    run_internal(%{spc | access_events: [], capture_access_events?: false}, cycles)
+  end
+
+  @doc false
+  def run_with_dsp_events(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
+    spc =
+      %{spc | dsp_events: [], access_events: [], capture_access_events?: false}
+      |> run_internal(cycles)
+
+    {Enum.reverse(spc.dsp_events), %{spc | dsp_events: [], access_events: []}}
+  end
+
+  @doc false
+  def run_with_access_events(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
+    spc =
+      %{spc | dsp_events: [], access_events: [], capture_access_events?: true}
+      |> run_internal(cycles)
+
+    events = Enum.reverse(spc.access_events)
+
+    {events, %{spc | dsp_events: [], access_events: [], capture_access_events?: false}}
+  end
+
+  @doc false
+  def run_with_access_events(%__MODULE__{} = spc, cycles, sync_state, sync_fun)
+      when is_integer(cycles) and is_function(sync_fun, 6) do
+    run_with_access_events(spc, cycles, sync_state, sync_fun, [])
+  end
+
+  @doc false
+  def run_with_access_events(%__MODULE__{} = spc, cycles, sync_state, sync_fun, opts)
+      when is_integer(cycles) and is_function(sync_fun, 6) and is_list(opts) do
+    previous_sync = Process.get(@access_sync_key)
+    previous_capture_after = Process.get(@access_capture_after_key)
+
+    Process.put(
+      @access_sync_key,
+      {sync_fun, sync_state, Keyword.get(opts, :sync_filter, :all)}
+    )
+
+    Process.put(@access_capture_after_key, Keyword.get(opts, :capture_after))
+
+    try do
+      spc =
+        %{spc | dsp_events: [], access_events: [], capture_access_events?: true}
+        |> run_internal(cycles)
+
+      events = Enum.reverse(spc.access_events)
+      {_sync_fun, sync_state, _sync_filter} = Process.get(@access_sync_key)
+
+      {events, %{spc | dsp_events: [], access_events: [], capture_access_events?: false},
+       sync_state}
+    after
+      if is_nil(previous_sync),
+        do: Process.delete(@access_sync_key),
+        else: Process.put(@access_sync_key, previous_sync)
+
+      if is_nil(previous_capture_after),
+        do: Process.delete(@access_capture_after_key),
+        else: Process.put(@access_capture_after_key, previous_capture_after)
+    end
+  end
+
+  defp run_internal(spc, cycles) do
     counter =
       case Process.get(@bus_counter_key) do
         nil ->
@@ -76,37 +251,54 @@ defmodule Beamicom.SNES.SPC700 do
           counter
       end
 
+    :counters.put(counter, 1, spc.cycles)
+
     spc = Map.put(spc, :bus_counter, counter)
-    {spc, cycle_credit} = run_cycles(spc, spc.cycle_credit + cycles)
-    %{spc | cycle_credit: cycle_credit, bus_cycle: 0, bus_counter: nil}
+
+    {spc, cycle_credit, completed_cycles} =
+      run_cycles(spc, spc.cycle_credit + cycles, spc.cycles)
+
+    %{
+      spc
+      | cycles: completed_cycles,
+        cycle_credit: cycle_credit,
+        bus_cycle: 0,
+        bus_counter: nil
+    }
   end
 
-  @doc false
-  def run_with_dsp_events(%__MODULE__{} = spc, cycles) when is_integer(cycles) do
-    spc = run(%{spc | dsp_events: []}, cycles)
-    {Enum.reverse(spc.dsp_events), %{spc | dsp_events: []}}
-  end
+  defp run_cycles(spc, cycles, completed_cycles) when cycles <= 0,
+    do: {spc, cycles, completed_cycles}
 
-  defp run_cycles(spc, cycles) when cycles <= 0, do: {spc, cycles}
+  defp run_cycles(%__MODULE__{error: error} = spc, _cycles, completed_cycles)
+       when not is_nil(error),
+       do: {spc, 0, completed_cycles}
 
-  defp run_cycles(%__MODULE__{error: error} = spc, _cycles) when not is_nil(error),
-    do: {spc, 0}
+  defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles, completed_cycles),
+    do: {spc, 0, completed_cycles}
 
-  defp run_cycles(%__MODULE__{stopped?: true} = spc, _cycles), do: {spc, 0}
+  defp run_cycles(%__MODULE__{sleeping?: true} = spc, _cycles, completed_cycles),
+    do: {spc, 0, completed_cycles}
 
-  defp run_cycles(spc, cycles) do
-    start_cycles = spc.cycles
-    :counters.put(spc.bus_counter, 1, 0)
+  defp run_cycles(spc, cycles, completed_cycles) do
     {opcode, spc} = fetch(spc)
 
     case execute(opcode, spc) do
       {:ok, next_spc, used} ->
-        spc = %{next_spc | cycles: start_cycles + used}
+        completed_cycles = completed_cycles + used
+        observed_cycles = :counters.get(spc.bus_counter, 1)
+        adjustment = completed_cycles - observed_cycles
 
-        run_cycles(spc, cycles - used)
+        if adjustment != 0 do
+          :counters.add(spc.bus_counter, 1, adjustment)
+        end
+
+        run_cycles(next_spc, cycles - used, completed_cycles)
 
       {:error, reason, spc} ->
-        {%{spc | error: {reason, spc.pc - 1 &&& 0xFFFF}}, 0}
+        observed_cycles = :counters.get(spc.bus_counter, 1)
+        :counters.add(spc.bus_counter, 1, completed_cycles - observed_cycles)
+        {%{spc | error: {reason, spc.pc - 1 &&& 0xFFFF}}, 0, completed_cycles}
     end
   end
 
@@ -702,7 +894,8 @@ defmodule Beamicom.SNES.SPC700 do
     {:ok, %{spc | a: value, psw: psw} |> set_nz(value), 3}
   end
 
-  defp execute(op, spc) when op in [0xEF, 0xFF], do: {:ok, %{spc | stopped?: true}, 7}
+  defp execute(0xEF, spc), do: {:ok, %{spc | sleeping?: true, stopped?: false}, 7}
+  defp execute(0xFF, spc), do: {:ok, %{spc | sleeping?: false, stopped?: true}, 7}
 
   defp execute(op, spc), do: {:error, {:unsupported_opcode, op}, spc}
 
@@ -961,8 +1154,7 @@ defmodule Beamicom.SNES.SPC700 do
   defp direct(spc, byte), do: if((spc.psw &&& @p) != 0, do: 0x100, else: 0) ||| (byte &&& 0xFF)
 
   defp fetch(spc) do
-    spc = advance_bus_cycle(spc)
-    value = memory_get(spc, spc.pc)
+    {value, spc} = read(spc, spc.pc)
     {value, %{spc | pc: spc.pc + 1 &&& 0xFFFF}}
   end
 
@@ -986,36 +1178,9 @@ defmodule Beamicom.SNES.SPC700 do
 
   defp read(spc, address) do
     spc = advance_bus_cycle(spc)
-    address = address &&& 0xFFFF
-
-    case address do
-      x when x in [0xF0, 0xF1, 0xFA, 0xFB, 0xFC] ->
-        {0, spc}
-
-      x when x in 0xF4..0xF7 ->
-        {elem(spc.input_ports, x - 0xF4), spc}
-
-      0xF2 ->
-        {spc.dsp_addr, spc}
-
-      0xF3 ->
-        {DSP.read(spc.dsp, spc.dsp_addr), spc}
-
-      0xF8 ->
-        {elem(spc.aux, 0), spc}
-
-      0xF9 ->
-        {elem(spc.aux, 1), spc}
-
-      x when x in 0xFD..0xFF ->
-        index = x - 0xFD
-        spc = sync_timer(spc, index)
-        value = elem(spc.timer_outputs, index)
-        {value, %{spc | timer_outputs: put_elem(spc.timer_outputs, index, 0)}}
-
-      _ ->
-        {memory_get(spc, address), spc}
-    end
+    access_clock = current_cycle(spc)
+    spc = sync_read_access(spc, access_clock, address)
+    read_at_clock(spc, address, access_clock)
   end
 
   # Dummy instruction-bus reads discard their value. Only timer output reads
@@ -1029,65 +1194,31 @@ defmodule Beamicom.SNES.SPC700 do
 
   defp write(spc, address, value) do
     spc = advance_bus_cycle(spc)
-    address = address &&& 0xFFFF
-    value = value &&& 0xFF
-
-    ram = :array.set(address, value, spc.ram)
-    spc = %{spc | ram: ram}
-
-    case address do
-      0xF1 ->
-        write_control(spc, value)
-
-      0xF2 ->
-        %{spc | dsp_addr: value}
-
-      0xF3 ->
-        if spc.dsp_addr < 0x80 do
-          address = spc.dsp_addr
-
-          %{
-            spc
-            | dsp: DSP.write(spc.dsp, address, value),
-              dsp_events: [{current_cycle(spc), address, value} | spc.dsp_events]
-          }
-        else
-          spc
-        end
-
-      x when x in 0xF4..0xF7 ->
-        %{spc | output_ports: put_elem(spc.output_ports, x - 0xF4, value)}
-
-      0xF8 ->
-        %{spc | aux: put_elem(spc.aux, 0, value)}
-
-      0xF9 ->
-        %{spc | aux: put_elem(spc.aux, 1, value)}
-
-      x when x in 0xFA..0xFC ->
-        index = x - 0xFA
-        spc = sync_timer(spc, index)
-        %{spc | timer_targets: put_elem(spc.timer_targets, index, value)}
-
-      _ ->
-        spc
-    end
+    access_clock = current_cycle(spc)
+    spc = sync_write_access(spc, access_clock, address, value)
+    write_at_clock(spc, address, value, access_clock)
   end
 
-  defp write_control(spc, value) do
-    spc = spc |> sync_timer(0) |> sync_timer(1) |> sync_timer(2)
+  defp write_test(spc, _value, _access_clock) when (spc.psw &&& @p) != 0, do: spc
+
+  defp write_test(spc, value, access_clock) do
+    spc = sync_timers(spc, access_clock)
+    %{spc | test: value}
+  end
+
+  defp write_control(spc, value, access_clock) do
+    spc = sync_timers(spc, access_clock)
     newly_enabled = value &&& bnot(spc.control) &&& 0x07
 
-    {stages, outputs, last_cycles} =
+    {stages, outputs} =
       Enum.reduce(
         0..2,
-        {spc.timer_stages, spc.timer_outputs, spc.timer_last_cycles},
-        fn index, {stages, outputs, last_cycles} ->
+        {spc.timer_stages, spc.timer_outputs},
+        fn index, {stages, outputs} ->
           if (newly_enabled &&& 1 <<< index) != 0 do
-            {put_elem(stages, index, 0), put_elem(outputs, index, 0),
-             put_elem(last_cycles, index, current_cycle(spc))}
+            {put_elem(stages, index, 0), put_elem(outputs, index, 0)}
           else
-            {stages, outputs, put_elem(last_cycles, index, current_cycle(spc))}
+            {stages, outputs}
           end
         end
       )
@@ -1106,16 +1237,21 @@ defmodule Beamicom.SNES.SPC700 do
       | control: value,
         input_ports: inputs,
         timer_stages: stages,
-        timer_outputs: outputs,
-        timer_last_cycles: last_cycles
+        timer_outputs: outputs
     }
   end
 
-  defp sync_timer(spc, index) do
+  defp sync_timers(spc, access_clock) do
+    spc
+    |> sync_timer(0, access_clock)
+    |> sync_timer(1, access_clock)
+    |> sync_timer(2, access_clock)
+  end
+
+  defp sync_timer(spc, index, access_clock) do
     last = elem(spc.timer_last_cycles, index)
-    now = current_cycle(spc)
-    elapsed = now - last
-    last_cycles = put_elem(spc.timer_last_cycles, index, now)
+    elapsed = access_clock - last
+    last_cycles = put_elem(spc.timer_last_cycles, index, access_clock)
 
     if elapsed > 0 do
       divider = if index == 2, do: 16, else: 128
@@ -1124,7 +1260,7 @@ defmodule Beamicom.SNES.SPC700 do
       phase = rem(phase_total, divider)
 
       {stage, output} =
-        if (spc.control &&& 1 <<< index) != 0 do
+        if timer_running?(spc, index) do
           advance_timer_stage(
             elem(spc.timer_stages, index),
             elem(spc.timer_outputs, index),
@@ -1143,8 +1279,13 @@ defmodule Beamicom.SNES.SPC700 do
           timer_last_cycles: last_cycles
       }
     else
-      %{spc | timer_last_cycles: last_cycles}
+      spc
     end
+  end
+
+  defp timer_running?(spc, index) do
+    (spc.control &&& 1 <<< index) != 0 and (spc.test &&& 0x08) != 0 and
+      (spc.test &&& 0x01) == 0
   end
 
   defp advance_timer_stage(stage, output, _target, 0), do: {stage, output}
@@ -1163,26 +1304,57 @@ defmodule Beamicom.SNES.SPC700 do
     end
   end
 
-  defp ram_get(ram, address), do: :array.get(address &&& 0xFFFF, ram)
+  defp ram_get(ram, address), do: RAM.get(ram, address)
+
+  defp write_backing_ram(spc, address, value, access_clock) do
+    if (spc.test &&& 0x02) != 0 and (spc.test &&& 0x04) == 0 do
+      spc = %{spc | ram: RAM.put(spc.ram, address, value)}
+      record_access_event(spc, {access_clock, :ram_write, address, value})
+    else
+      spc
+    end
+  end
+
+  defp record_access_event(%__MODULE__{capture_access_events?: true} = spc, event) do
+    case Process.get(@access_capture_after_key) do
+      nil -> %{spc | access_events: [event | spc.access_events]}
+      clock when elem(event, 0) > clock -> %{spc | access_events: [event | spc.access_events]}
+      _clock -> spc
+    end
+  end
+
+  defp record_access_event(spc, _event), do: spc
 
   defp memory_get(spc, address) do
     address = address &&& 0xFFFF
 
-    if address >= 0xFFC0 and (spc.control &&& 0x80) != 0,
-      do: :binary.at(@ipl, address - 0xFFC0),
-      else: ram_get(spc.ram, address)
+    cond do
+      address >= 0xFFC0 and (spc.control &&& 0x80) != 0 ->
+        :binary.at(@ipl, address - 0xFFC0)
+
+      (spc.test &&& 0x04) != 0 ->
+        0x5A
+
+      true ->
+        ram_get(spc.ram, address)
+    end
   end
 
   defp push(spc, value) do
     spc = advance_bus_cycle(spc)
-    ram = :array.set(0x100 ||| spc.sp, value &&& 0xFF, spc.ram)
-    %{spc | ram: ram, sp: spc.sp - 1 &&& 0xFF}
+    address = 0x100 ||| spc.sp
+    access_clock = current_cycle(spc)
+    spc = sync_write_access(spc, access_clock, address, value)
+    spc = write_backing_ram(spc, address, value &&& 0xFF, access_clock)
+    %{spc | sp: spc.sp - 1 &&& 0xFF}
   end
 
   defp pop(spc) do
     spc = advance_bus_cycle(spc)
     sp = spc.sp + 1 &&& 0xFF
-    {:array.get(0x100 ||| sp, spc.ram), %{spc | sp: sp}}
+    address = 0x100 ||| sp
+    spc = sync_read_access(spc, current_cycle(spc), address)
+    {memory_get(spc, address), %{spc | sp: sp}}
   end
 
   defp advance_bus_cycle(spc) do
@@ -1190,7 +1362,149 @@ defmodule Beamicom.SNES.SPC700 do
     spc
   end
 
-  defp current_cycle(spc), do: spc.cycles + :counters.get(spc.bus_counter, 1)
+  defp current_cycle(spc), do: :counters.get(spc.bus_counter, 1)
+
+  defp sync_read_access(spc, access_clock, address) do
+    case :erlang.get(@access_sync_key) do
+      :undefined ->
+        spc
+
+      nil ->
+        spc
+
+      {sync_fun, sync_state, :all} ->
+        apply_sync_access(spc, sync_fun, sync_state, :all, access_clock, :read, address)
+
+      {sync_fun, sync_state, :dsp_timeline} ->
+        if sync_read_required?(sync_state, access_clock, address) do
+          apply_sync_access(
+            spc,
+            sync_fun,
+            sync_state,
+            :dsp_timeline,
+            access_clock,
+            :read,
+            address
+          )
+        else
+          spc
+        end
+    end
+  end
+
+  defp sync_write_access(spc, access_clock, address, value) do
+    case :erlang.get(@access_sync_key) do
+      :undefined ->
+        spc
+
+      nil ->
+        spc
+
+      {sync_fun, sync_state, :all} ->
+        apply_sync_access(spc, sync_fun, sync_state, :all, access_clock, :write, address, value)
+
+      {sync_fun, sync_state, :dsp_timeline} ->
+        if sync_write_required?(sync_state, access_clock, address) do
+          apply_sync_access(
+            spc,
+            sync_fun,
+            sync_state,
+            :dsp_timeline,
+            access_clock,
+            :write,
+            address,
+            value
+          )
+        else
+          spc
+        end
+    end
+  end
+
+  defp apply_sync_access(
+         spc,
+         sync_fun,
+         sync_state,
+         sync_filter,
+         access_clock,
+         operation,
+         address,
+         value \\ nil
+       ) do
+    case sync_fun.(spc, access_clock, operation, address &&& 0xFFFF, value, sync_state) do
+      {:skip, spc} ->
+        spc
+
+      {:sync, spc, sync_state} ->
+        Process.put(@access_sync_key, {sync_fun, sync_state, sync_filter})
+        spc
+    end
+  end
+
+  defp sync_read_required?(state, access_clock, 0xF3),
+    do: access_clock >= state.preview_clock
+
+  defp sync_read_required?(
+         %{boundary: nil, end_clock: end_clock},
+         access_clock,
+         _address
+       )
+       when access_clock > end_clock,
+       do: true
+
+  defp sync_read_required?(%{dependencies: nil}, _clock, _address),
+    do: true
+
+  defp sync_read_required?(
+         %{dependencies: {:regions, _addresses, regions}},
+         _clock,
+         address
+       ),
+       do: address_in_regions?(regions, address)
+
+  defp sync_read_required?(
+         %{dependencies: {:dependencies, _addresses, _write_regions, regions}},
+         _clock,
+         address
+       ),
+       do: address_in_regions?(regions, address)
+
+  defp sync_read_required?(_state, _clock, _address), do: false
+
+  defp sync_write_required?(state, access_clock, 0xF3),
+    do: access_clock >= state.preview_clock
+
+  defp sync_write_required?(%{boundary: nil, end_clock: end_clock}, access_clock, _address)
+       when access_clock > end_clock,
+       do: true
+
+  defp sync_write_required?(%{dependencies: nil}, _clock, _address), do: true
+
+  defp sync_write_required?(%{dependencies: dependencies}, _clock, address),
+    do: dependencies == :all or sync_ram_dependency?(dependencies, address)
+
+  defp address_in_regions?([], _address), do: false
+
+  defp address_in_regions?([{base, length} | regions], address) do
+    (address - base &&& 0xFFFF) < length or address_in_regions?(regions, address)
+  end
+
+  defp sync_ram_dependency?(dependencies, address) when is_struct(dependencies, MapSet),
+    do: MapSet.member?(dependencies, address)
+
+  defp sync_ram_dependency?({:regions, dependencies, regions}, address) do
+    MapSet.member?(dependencies, address) or
+      address_in_regions?(regions, address)
+  end
+
+  defp sync_ram_dependency?(
+         {:dependencies, dependencies, write_regions, read_write_regions},
+         address
+       ) do
+    MapSet.member?(dependencies, address) or
+      address_in_regions?(write_regions, address) or
+      address_in_regions?(read_write_regions, address)
+  end
 
   defp read_at(spc, address, cycle) do
     spc = advance_to_before_cycle(spc, cycle)

@@ -157,10 +157,10 @@ checking the progress of the in-development SNES core. Its current frame and
 32 kHz stereo audio boundaries use the same host runtime, prebuffered audio
 sink, and `GameSurface` as the other cores. Scenic selects the SNES Nx renderer
 by default so the audio producer remains realtime; the standalone SNES package
-retains its native-renderer default. Controller input and save states are
-disabled until the core supports them. If an unimplemented CPU instruction is
-reached, the adapter freezes at that point and continues displaying the current
-PPU state for inspection.
+retains its native-renderer default. Controller input and self-contained PNG
+save states use the same host controls as the other cores. If an unimplemented
+CPU instruction is reached, the adapter freezes at that point and continues
+displaying the current PPU state for inspection.
 
 ### Persistent configuration
 
@@ -171,6 +171,7 @@ The in-window Config menu writes JSON to
 - The initial folder for save-state open/save dialogs.
 - The five most recently loaded ROM paths shown in the Game menu.
 - The default NES filter: None, Composite, S-Video, or RGB.
+- The default SNES filter: None, Composite, S-Video, RGB, or Monochrome.
 - ROM-specific NES sprite lighting for verified light-source profiles.
 - NES enhancements for removing the eight-sprites-per-scanline limit and trimming the horizontal borders.
 - The default Game Boy/Game Boy Color filter: None or Pixel Transparency.
@@ -180,7 +181,7 @@ The in-window Config menu writes JSON to
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "save_state_folder": "/home/player/.local/share/beamicom/states",
   "recent_roms": [
     "/home/player/roms/Metroid.nes",
@@ -190,6 +191,7 @@ The in-window Config menu writes JSON to
   "nes_lighting": false,
   "nes_remove_sprite_limit": false,
   "nes_trim_borders": false,
+  "snes_video_filter": "composite",
   "gbc_video_filter": "pixel_transparency",
   "integer_scaling": true,
   "audio": true,
@@ -217,6 +219,10 @@ at startup.
 The save-state folder defaults to `$XDG_DATA_HOME/beamicom/states`, falling back
 to `~/.local/share/beamicom/states`.
 
+Choose the SNES presentation filter from **Config → SNES → Filter**. The choice
+is persisted and applies immediately to an active SNES session without resetting
+the emulated machine.
+
 Enable the effect from **Config → NES → Sprite lighting**. The player status
 field `lighting` is `true` when the requested setting matched and activated a ROM
 profile, and `false` for unsupported ROMs or an explicitly native renderer.
@@ -231,6 +237,11 @@ can be supplied through `BEAMICOM_NES_VIDEO_FILTER`:
 ```sh
 BEAMICOM_NES_VIDEO_FILTER=composite mise exec -- iex -S mix
 ```
+
+The same Blargg presets are available for SNES, where the filtered frame is
+602×224 and Scenic doubles its scanlines for a 602×448 presentation. Select one
+with the Config menu, `video_filter: :composite`, or
+`BEAMICOM_SNES_VIDEO_FILTER=composite`.
 
 For Game Boy and Game Boy Color, `video_filter: :pixel_transparency` runs the Nx
 LCD and transparency passes after DMG palette conversion or CGB RGB composition.
@@ -269,10 +280,10 @@ Any positive speed is accepted. Values below 1 slow emulation and values above
 match the selected rate.
 
 The existing `Beamicom.NES.Scenic.play/2` entry point remains available and now
-selects either core too. The in-window Game menu can load media, reset or resume
+selects any core too. The in-window Game menu can load media, reset or resume
 the current session, and save or load the self-contained PNG states supported by
-both cores. File selection uses a C NIF with an isolated AppKit helper on macOS
-and an isolated Zenity process on Linux; it does not require Rust.
+all three cores. File selection uses a C NIF with an isolated AppKit helper on
+macOS and an isolated Zenity process on Linux; it does not require Rust.
 
 The multi-system scene, audio sink, and asset library live under
 `Beamicom.Scenic`. Their former `Beamicom.NES` module names remain available as
@@ -312,6 +323,10 @@ share Scenic's Config-menu volume slider.
 | Arrow keys | D-pad |
 | `X` | A |
 | `Z` | B |
+| `S` | X |
+| `A` | Y |
+| `Q` | L |
+| `W` | R |
 | Enter | Start |
 | Right Shift | Select |
 | `F5` | Quick-save state |
@@ -324,7 +339,7 @@ keys and Enter navigate an open menu. During gameplay, `.` requests a
 debug step and `g` toggles the NES raw palette-address grayscale view. `F5`
 quick-saves and `F8` quick-loads while running or paused. The quick slot is
 `<rom-sha256>.png` in the configured save-state folder; NES hashes its parsed
-PRG+CHR data, while Game Boy hashes the cartridge ROM. Save and load state
+PRG+CHR data, while Game Boy and SNES hash the cartridge ROM. Save and load state
 actions appear in the Game menu only while a game is loaded. The Game menu also
 lists the five most recently loaded ROMs by filename. Load State opens a horizontal,
 ROM-specific preview browser; use Left/Right or the scroll wheel, Enter to load,

@@ -16,12 +16,20 @@ defmodule BeamicomPhx.InputTest do
       assert Input.button_for("X") == :a
       assert Input.button_for("z") == :b
       assert Input.button_for("Z") == :b
+      assert Input.button_for("s") == :x
+      assert Input.button_for("S") == :x
+      assert Input.button_for("a") == :y
+      assert Input.button_for("A") == :y
+      assert Input.button_for("q") == :l
+      assert Input.button_for("Q") == :l
+      assert Input.button_for("w") == :r
+      assert Input.button_for("W") == :r
       assert Input.button_for("Enter") == :start
       assert Input.button_for("Shift") == :select
     end
 
     test "returns nil for unmapped keys" do
-      assert Input.button_for("q") == nil
+      assert Input.button_for("v") == nil
       assert Input.button_for("F5") == nil
       assert Input.button_for(" ") == nil
     end
@@ -55,7 +63,7 @@ defmodule BeamicomPhx.InputTest do
     end
 
     test "ignores unmapped keys" do
-      assert Input.apply_key(MapSet.new([:a]), :down, "q") == :ignore
+      assert Input.apply_key(MapSet.new([:a]), :down, "v") == :ignore
     end
   end
 
@@ -64,6 +72,11 @@ defmodule BeamicomPhx.InputTest do
       assert Input.button_from_name("a") == :a
       assert Input.button_from_name("up") == :up
       assert Input.button_from_name("start") == :start
+      assert Input.button_from_name("x") == :x
+      assert Input.button_from_name("y") == :y
+      assert Input.button_from_name("l") == :l
+      assert Input.button_from_name("r") == :r
+      assert Input.button_from_name("select") == :select
       assert Input.button_from_name("bogus") == nil
     end
 
@@ -79,8 +92,24 @@ defmodule BeamicomPhx.InputTest do
     end
 
     test "buttons_from_names validates a complete browser gamepad state" do
-      assert {:ok, buttons} = Input.buttons_from_names(["right", "a", "start", "a"])
-      assert MapSet.equal?(buttons, MapSet.new([:right, :a, :start]))
+      assert {:ok, buttons} =
+               Input.buttons_from_names([
+                 "right",
+                 "a",
+                 "x",
+                 "y",
+                 "l",
+                 "r",
+                 "select",
+                 "start",
+                 "a"
+               ])
+
+      assert MapSet.equal?(
+               buttons,
+               MapSet.new([:right, :a, :x, :y, :l, :r, :select, :start])
+             )
+
       assert Input.buttons_from_names(["a", "turbo"]) == {:error, :invalid_button}
       assert Input.buttons_from_names("a") == {:error, :invalid_button}
     end

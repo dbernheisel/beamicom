@@ -16,6 +16,8 @@ defmodule Beamicom.SNES.Cartridge do
   @enforce_keys [
     :rom,
     :size,
+    :mirror_mask,
+    :bank_offsets,
     :layout,
     :header,
     :copier_header?,
@@ -59,8 +61,7 @@ defmodule Beamicom.SNES.Cartridge do
       when is_integer(address) and address in 0..0xFFFFFF do
     case raw_offset(cart.layout, address) do
       :unmapped -> :unmapped
-      offset when offset < cart.size -> {:ok, offset}
-      offset -> {:ok, mirror_offset(offset, cart.size)}
+      offset -> {:ok, mapped_offset(cart, offset)}
     end
   end
 
@@ -79,8 +80,7 @@ defmodule Beamicom.SNES.Cartridge do
       when is_integer(address) and address in 0..0xFFFFFF do
     case raw_offset(cart.layout, address) do
       :unmapped -> default
-      offset when offset < cart.size -> :binary.at(cart.rom, offset)
-      offset -> :binary.at(cart.rom, mirror_offset(offset, cart.size))
+      offset -> :binary.at(cart.rom, mapped_offset(cart, offset))
     end
   end
 
@@ -145,11 +145,15 @@ defmodule Beamicom.SNES.Cartridge do
 
   defp finish_load({score, _priority, header, headered?, rom}) when score >= 12 do
     checksum = checksum(rom)
+    size = byte_size(rom)
+    {mirror_mask, bank_offsets} = addressing_cache(header.layout, size)
 
     {:ok,
      %__MODULE__{
        rom: rom,
-       size: byte_size(rom),
+       size: size,
+       mirror_mask: mirror_mask,
+       bank_offsets: bank_offsets,
        layout: header.layout,
        header: header,
        copier_header?: headered?,
@@ -159,6 +163,36 @@ defmodule Beamicom.SNES.Cartridge do
   end
 
   defp finish_load(_candidate), do: {:error, :snes_header_not_found}
+
+  defp addressing_cache(_layout, size) when (size &&& size - 1) == 0,
+    do: {size - 1, nil}
+
+  defp addressing_cache(:lorom, size) when rem(size, 0x8000) == 0,
+    do: {nil, bank_offsets(size, 15, 0x7F)}
+
+  defp addressing_cache(:hirom, size) when rem(size, 0x10000) == 0,
+    do: {nil, bank_offsets(size, 16, 0x3F)}
+
+  defp addressing_cache(_layout, _size), do: {nil, nil}
+
+  defp bank_offsets(size, shift, last_bank) do
+    0..last_bank
+    |> Enum.map(&mirror_offset(&1 <<< shift, size))
+    |> List.to_tuple()
+  end
+
+  defp mapped_offset(%__MODULE__{mirror_mask: mask}, offset) when is_integer(mask),
+    do: offset &&& mask
+
+  defp mapped_offset(%__MODULE__{layout: :lorom, bank_offsets: offsets}, offset)
+       when is_tuple(offsets),
+       do: elem(offsets, offset >>> 15) + (offset &&& 0x7FFF)
+
+  defp mapped_offset(%__MODULE__{layout: :hirom, bank_offsets: offsets}, offset)
+       when is_tuple(offsets),
+       do: elem(offsets, offset >>> 16) + (offset &&& 0xFFFF)
+
+  defp mapped_offset(%__MODULE__{size: size}, offset), do: mirror_offset(offset, size)
 
   defp raw_offset(:lorom, address) do
     bank = address >>> 16

@@ -575,6 +575,48 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert %{state: :running, system: :gbc, path: ^save_path} = Beamicom.Scenic.status()
   end
 
+  @tag :tmp_dir
+  test "prepares an SNES session with the selected Blargg filter", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "filtered.sfc")
+    File.write!(path, snes_rom())
+
+    assert {:ok, prepared} =
+             Player.prepare(path,
+               audio: false,
+               video_filter: :composite,
+               video_filter_options: [merge_fields: false]
+             )
+
+    assert prepared.video_filter == :composite
+    assert prepared.scale == 1
+    assert prepared.core.capabilities.video.width == 602
+    assert prepared.core.capabilities.video.pixel_scale == {1, 2}
+    assert prepared.machine.machine.bus.ppu.video_filter == Beamicom.SNES.Nx.BlarggNTSC
+
+    assert prepared.machine.machine.bus.ppu.video_filter_options == [
+             preset: :composite,
+             merge_fields: false
+           ]
+  end
+
+  @tag :tmp_dir
+  test "prepares an SNES save PNG with the SNES host adapter", %{tmp_dir: tmp_dir} do
+    rom = snes_rom()
+    {:ok, machine} = Beamicom.SNES.Machine.load(rom)
+    frame = :binary.copy(<<24, 72, 160>>, 256 * 224)
+    png = Beamicom.SNES.ShareImage.to_png(machine, frame)
+    path = Path.join(tmp_dir, "snes-state.png")
+    File.write!(path, png)
+
+    assert {:ok,
+            %{
+              core: %{id: :snes},
+              machine: %Beamicom.Scenic.SNESSystem.State{machine: restored}
+            }} = Player.prepare(path, audio: false)
+
+    assert restored.cartridge.rom == rom
+  end
+
   test "F5 and F8 quick-save and quick-load the ROM hash slot", %{path: path} do
     state_dir =
       Path.join(
@@ -783,6 +825,28 @@ defmodule Beamicom.Scenic.PlayerTest do
   defp minimal_nes_rom do
     prg = <<0x4C, 0x00, 0x80, 0::size((0x3FFC - 3) * 8), 0x00, 0x80, 0::16>>
     <<"NES", 0x1A, 1, 1, 0::size(10 * 8)>> <> prg <> <<0::size(8192 * 8)>>
+  end
+
+  defp snes_rom do
+    size = 0x10000
+    header = 0x7FC0
+
+    rom =
+      :binary.copy(<<0>>, size)
+      |> put_bytes(header, "BEAMICOM SCENIC SNES" <> <<0x20>>)
+      |> put_byte(header + 0x15, 0x20)
+      |> put_byte(header + 0x17, 6)
+      |> put_byte(header + 0x19, 1)
+      |> put_byte(header + 0x1A, 0x33)
+      |> put_bytes(header + 0x3C, <<0x00, 0x80>>)
+      |> put_bytes(0, <<0x80, 0xFE>>)
+
+    checksum = Beamicom.SNES.Cartridge.checksum(rom) + 510 &&& 0xFFFF
+    complement = bxor(checksum, 0xFFFF)
+
+    rom
+    |> put_bytes(header + 0x1C, <<complement &&& 0xFF, complement >>> 8>>)
+    |> put_bytes(header + 0x1E, <<checksum &&& 0xFF, checksum >>> 8>>)
   end
 
   defp with_checksum(rom) do

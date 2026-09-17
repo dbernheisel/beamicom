@@ -4,9 +4,9 @@ defmodule Beamicom.Scenic.AudioSink do
   compatibility output or a core-owned `Beamicom.Host.Output`, validates typed
   PCM chunks, and writes raw signed-16-bit little-endian audio to an external
   player. This supports NES mono plus Game Boy and SNES stereo without changing
-  any emulator core. Audio uses a bounded latest-value subscription and
-  non-blocking player writes so a slow device cannot turn an underrun into
-  permanently delayed playback.
+  any emulator core. Audio chunks remain lossless and the external player
+  applies backpressure at its bounded device queue, preserving waveform
+  continuity without accumulating unbounded device latency.
 
   At normal speed, macOS and Linux use a small SDL helper whose device queue is
   bounded by the device's consumed-byte clock. ffplay remains the fallback and
@@ -25,6 +25,7 @@ defmodule Beamicom.Scenic.AudioSink do
   alias Beamicom.NES.Output, as: NESOutput
 
   @default_audio %{sample_rate: 44_100, channels: 1, sample_format: :s16le}
+  @default_prebuffer_ms 40
   @demux_sample_rate 8_000
   @max_device_queue_ms 40
 
@@ -45,7 +46,7 @@ defmodule Beamicom.Scenic.AudioSink do
     audio = Keyword.get(opts, :audio, @default_audio)
     volume = Keyword.get(opts, :volume, 100)
     command = Keyword.get(opts, :command, default_command(Keyword.get(opts, :speed, 1.0), audio))
-    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, 0)
+    prebuffer_ms = Keyword.get(opts, :prebuffer_ms, @default_prebuffer_ms)
     prebuffer_frames = max(0, div(audio.sample_rate * prebuffer_ms + 999, 1_000))
 
     case {command, volume} do
@@ -76,7 +77,6 @@ defmodule Beamicom.Scenic.AudioSink do
            port: port,
            executable: path,
            args: args,
-           output: output,
            audio: audio,
            volume: volume,
            ready?: prebuffer_frames == 0,
@@ -168,13 +168,6 @@ defmodule Beamicom.Scenic.AudioSink do
     do: {:reply, {:error, {:invalid_volume, volume}}, state}
 
   @impl true
-  def handle_info({:audio_available, _system}, state) do
-    case Output.latest_audio(state.output) do
-      nil -> {:noreply, state}
-      chunk -> handle_audio_chunk(chunk, state)
-    end
-  end
-
   def handle_info({:audio_chunk, %AudioChunk{}}, %{port: nil} = state),
     do: {:noreply, state}
 
@@ -198,8 +191,6 @@ defmodule Beamicom.Scenic.AudioSink do
   # Ignore video notifications and the player's own stdout.
   def handle_info(_msg, state), do: {:noreply, state}
 
-  defp handle_audio_chunk(%AudioChunk{}, %{port: nil} = state), do: {:noreply, state}
-
   defp handle_audio_chunk(%AudioChunk{} = chunk, %{ready?: false} = state) do
     buffer_audio(
       state,
@@ -220,7 +211,8 @@ defmodule Beamicom.Scenic.AudioSink do
     :ok
   end
 
-  defp subscribe(output), do: Output.subscribe_latest_audio(output)
+  defp subscribe(NESOutput), do: NESOutput.subscribe_audio_chunks()
+  defp subscribe(output), do: Output.subscribe_audio(output)
 
   defp open_player(executable, args),
     do:
@@ -283,7 +275,7 @@ defmodule Beamicom.Scenic.AudioSink do
   defp command_audio(state, pcm) do
     pcm = adjust_volume(pcm, state.volume)
 
-    if Port.command(state.port, pcm, [:nosuspend]) do
+    if Port.command(state.port, pcm) do
       {:ok, state}
     else
       restart_player(state, pcm)
@@ -297,7 +289,7 @@ defmodule Beamicom.Scenic.AudioSink do
     port = open_player(state.executable, state.args)
     state = %{reset_playback(state, port) | ready?: true}
 
-    if Port.command(port, pcm, [:nosuspend]), do: {:ok, state}, else: {:error, state}
+    if Port.command(port, pcm), do: {:ok, state}, else: {:error, state}
   end
 
   defp adjust_volume(pcm, 100), do: pcm

@@ -1,6 +1,7 @@
 defmodule Beamicom.SNES.CartridgeTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
   alias Beamicom.SNES.Cartridge
   alias Beamicom.SNESTestROM
 
@@ -33,6 +34,13 @@ defmodule Beamicom.SNES.CartridgeTest do
     assert {:ok, cartridge} = Cartridge.load(media)
     assert cartridge.copier_header?
     assert cartridge.header.title == "BEAMICOM SNES TEST"
+    assert cartridge.mirror_mask == nil
+    assert cartridge.bank_offsets == nil
+
+    raw_offset = 0x7D <<< 15 ||| 0x7FFF
+
+    assert Cartridge.address_to_offset(cartridge, 0x7DFFFF) ==
+             {:ok, Cartridge.mirror_offset(raw_offset, cartridge.size)}
   end
 
   test "maps each supported cartridge layout into the CPU address space" do
@@ -68,6 +76,28 @@ defmodule Beamicom.SNES.CartridgeTest do
     assert Cartridge.mirror_offset(0x3FFFFF, size) == 0x2FFFFF
     assert Cartridge.checksum(<<1, 2, 3>>) == 9
     assert Cartridge.checksum(<<1, 2, 3, 4, 5>>) == 30
+  end
+
+  test "cached power-of-two and banked mappings preserve recursive mirroring" do
+    for {layout, size, bank_range, address_bank, bank_shift, in_bank_mask} <- [
+          {:lorom, 512 * 1024, Enum.reject(0..0x7F, &(&1 in [0x7E, 0x7F])), &Function.identity/1,
+           15, 0x7FFF},
+          {:lorom, 3 * 1024 * 1024, Enum.reject(0..0x7F, &(&1 in [0x7E, 0x7F])),
+           &Function.identity/1, 15, 0x7FFF},
+          {:hirom, 1024 * 1024, 0..0x3F, &(0xC0 + &1), 16, 0xFFFF},
+          {:hirom, 3 * 1024 * 1024, 0..0x3F, &(0xC0 + &1), 16, 0xFFFF}
+        ] do
+      cartridge = load!(layout, size: size)
+
+      for bank <- bank_range, in_bank <- [0, in_bank_mask] do
+        address_offset = if layout == :lorom, do: 0x8000 + in_bank, else: in_bank
+        address = address_bank.(bank) <<< 16 ||| address_offset
+        raw_offset = bank <<< bank_shift ||| in_bank
+
+        assert Cartridge.address_to_offset(cartridge, address) ==
+                 {:ok, Cartridge.mirror_offset(raw_offset, size)}
+      end
+    end
   end
 
   test "maps LoROM and HiROM battery-backed RAM mirrors" do

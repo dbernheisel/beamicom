@@ -92,19 +92,19 @@ composite = Beamicom.NES.Nx.video_options(:composite, lighting: lighting)
 ```
 
 The observed CHR-RAM identities are tiles 92-95, subpalette 2, color slots 1-3
-for the flame's red/yellow/white body; tiles 130-133, every animated subpalette,
-color slot 3 for the sword blade and traveling beam; and tiles 48-49, every
-animated subpalette, color slot 3 for the four beam-burst particles. The flame
-uses deterministic organic flicker. Additional verified emitters are rupee tiles
-50-51 in flashing subpalettes 1-2 at 60% intensity; enemy-fireball tiles 68-69
-across all four animated subpalettes; enemy-death burst tiles 98 and 100 across
-all four animated subpalettes and all three visible color slots; candle tile 38,
-blue/red subpalettes 1-2, slots 1-2, rows 0-4; and heart-pickup tiles 498-499 in
-flashing subpalettes 1-2. The candle rules intentionally exclude the body and
-apply organic flicker only to the tip. The darker blue palette uses 150%
-intensity, while red uses the standard 100%. Key tile 46 and Link are not
-emitters. The other pixels in those sprites remain non-emitting, although they
-can still receive the nearby halo.
+for the flame's red/yellow/white body; tiles 32-33 and 130-133, every animated
+subpalette, color slot 3 for the sword blade and vertical/horizontal traveling
+beam; and tiles 48-49, every animated subpalette, color slot 3 for the four
+beam-burst particles. The flame uses deterministic organic flicker. Additional
+verified emitters are rupee tiles 50-51 in flashing subpalettes 1-2 at 60%
+intensity; enemy-fireball tiles 68-69 across all four animated subpalettes;
+enemy-death burst tiles 98 and 100 across all four animated subpalettes and all
+three visible color slots; candle tile 38, blue/red subpalettes 1-2, slots 1-2,
+rows 0-4; and heart-pickup tiles 498-499 in flashing subpalettes 1-2. The candle
+rules intentionally exclude the body and apply organic flicker only to the tip.
+The darker blue palette uses 150% intensity, while red uses the standard 100%.
+Key tile 46 and Link are not emitters. The other pixels in those sprites remain
+non-emitting, although they can still receive the nearby halo.
 
 The Blargg renderer keeps the identity-derived emissive plane at native
 resolution, applies the selected NTSC filter, and adds the resampled halo to the
@@ -114,7 +114,7 @@ compact winning-sprite provenance plane from native composition, so covered or
 lower-priority sprite pixels still cannot emit. Horizontal trimming masks both
 the filtered picture and the halo.
 
-Run the optional real-ROM checkpoint test with:
+Run the optional real-ROM checkpoint tests with:
 
 ```console
 BEAMICOM_NX=1 BEAMICOM_ZELDA_STATE=/path/to/zelda-state.png \
@@ -125,6 +125,9 @@ BEAMICOM_NX=1 BEAMICOM_ZELDA_DEATH_STATE=/path/to/zelda-death-state.png \
 
 BEAMICOM_NX=1 BEAMICOM_ZELDA_CANDLE_STATE=/path/to/zelda-candle-state.png \
   mix test nx_test/nes/zelda_candle_lighting_e2e_test.exs
+
+BEAMICOM_NX=1 BEAMICOM_ZELDA_VERTICAL_BEAM_STATE=/path/to/zelda-vertical-beam-state.png \
+  mix test nx_test/nes/zelda_vertical_beam_lighting_e2e_test.exs
 ```
 
 The test validates the ROM-content and checkpoint hashes, exercises all twenty

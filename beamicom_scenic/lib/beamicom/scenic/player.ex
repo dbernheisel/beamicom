@@ -8,6 +8,8 @@ defmodule Beamicom.Scenic.Player do
   alias Beamicom.NES.{PPU, ShareImage}
   alias Beamicom.NES.Output, as: NESOutput
   alias Beamicom.Scenic.{AudioSink, Core, Runtime, SaveState, Settings}
+  alias Beamicom.SNES.PPU, as: SNESPPU
+  alias Beamicom.SNES.ShareImage, as: SNESShareImage
 
   def start(options), do: GenServer.start(__MODULE__, options, name: __MODULE__)
   def start_link(options), do: GenServer.start_link(__MODULE__, options, name: __MODULE__)
@@ -252,6 +254,20 @@ defmodule Beamicom.Scenic.Player do
     end
   end
 
+  def handle_call(:snapshot, _from, %{core: %Core{id: :snes}} = state) do
+    case Output.latest_video(state.output) do
+      %VideoFrame{} ->
+        snes = Runtime.snapshot(state.runtime)
+        ppu = SNESPPU.set_video_filter(snes.machine.bus.ppu, :native)
+        native = SNESPPU.render_frame(ppu)
+        frame = binary_part(native.data, 0, 256 * 224 * 3)
+        {:reply, {:ok, {:snes, snes.machine, frame}}, state}
+
+      nil ->
+        {:reply, {:error, :no_frame}, state}
+    end
+  end
+
   def handle_call(:snapshot, _from, state),
     do: {:reply, {:error, :unsupported_system}, state}
 
@@ -364,6 +380,10 @@ defmodule Beamicom.Scenic.Player do
        when filter in [:composite, :svideo, :rgb, :monochrome],
        do: 1
 
+  defp default_scale(%Core{id: :snes}, filter)
+       when filter in [:composite, :svideo, :rgb, :monochrome],
+       do: 1
+
   defp default_scale(%Core{}, _filter), do: 3
 
   defp load(%Core{id: :nes} = core, path, media, load_options) do
@@ -386,6 +406,22 @@ defmodule Beamicom.Scenic.Player do
     end
   end
 
+  defp load(
+         %Core{id: :snes},
+         path,
+         <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png,
+         options
+       ) do
+    with {:ok, machine} <- SNESShareImage.load_image(png, [Path.dirname(path)]),
+         filter = Keyword.get(options, :video_filter, :native),
+         machine = put_in(machine.bus.ppu, SNESPPU.set_video_filter(machine.bus.ppu, filter)),
+         {:ok, state} <- Beamicom.Scenic.SNESSystem.restore(machine) do
+      {:ok, state}
+    else
+      {:error, reason} -> {:error, {:save_load_failed, reason}}
+    end
+  end
+
   defp load(%Core{} = core, _path, media, load_options), do: Core.load(core, media, load_options)
 
   defp resolve_core(path, <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png) do
@@ -402,11 +438,29 @@ defmodule Beamicom.Scenic.Player do
          }}
 
       _not_gb ->
-        Core.resolve(path, png)
+        resolve_non_gb_png(path, png)
     end
   end
 
   defp resolve_core(path, media), do: Core.resolve(path, media)
+
+  defp resolve_non_gb_png(path, png) do
+    case SNESShareImage.classify(png) do
+      :snes ->
+        system = Beamicom.Scenic.SNESSystem
+
+        {:ok,
+         %Core{
+           id: system.id(),
+           system: system,
+           runtime: :host,
+           capabilities: system.capabilities()
+         }}
+
+      _not_snes ->
+        Core.resolve(path, png)
+    end
+  end
 
   defp load_options(%Core{id: :nes}, options) do
     base = Keyword.get(options, :load_options, [])
@@ -442,10 +496,23 @@ defmodule Beamicom.Scenic.Player do
   end
 
   defp load_options(%Core{id: :snes}, options) do
-    load_options = Keyword.get(options, :load_options, [])
+    base = Keyword.get(options, :load_options, [])
+    filter_options = Keyword.get(options, :video_filter_options, [])
 
-    with :ok <- validate_keyword(load_options, :load_options) do
-      {:ok, load_options, nil}
+    with :ok <- validate_keyword(base, :load_options),
+         :ok <- validate_keyword(filter_options, :video_filter_options),
+         {:ok, filter} <- snes_video_filter(options) do
+      case filter do
+        nil ->
+          {:ok, base, nil}
+
+        :native ->
+          {:ok, Keyword.put(base, :video_filter, :native), :native}
+
+        preset ->
+          {:ok, Keyword.merge(base, Beamicom.SNES.Nx.video_options(preset, filter_options)),
+           preset}
+      end
     end
   end
 
@@ -477,6 +544,18 @@ defmodule Beamicom.Scenic.Player do
       else: {:error, {:invalid_option, :video_filter}}
   end
 
+  defp snes_video_filter(options) do
+    filter =
+      case Keyword.fetch(options, :video_filter) do
+        {:ok, filter} -> filter
+        :error -> snes_filter_from_env(System.get_env("BEAMICOM_SNES_VIDEO_FILTER"))
+      end
+
+    if filter in [nil, :native, :composite, :svideo, :rgb, :monochrome],
+      do: {:ok, filter},
+      else: {:error, {:invalid_option, :video_filter}}
+  end
+
   defp nes_filter_from_env(nil), do: nil
   defp nes_filter_from_env(""), do: nil
   defp nes_filter_from_env("native"), do: :native
@@ -492,10 +571,22 @@ defmodule Beamicom.Scenic.Player do
   defp gbc_filter_from_env("pixel_transparency"), do: :pixel_transparency
   defp gbc_filter_from_env(value), do: value
 
+  defp snes_filter_from_env(nil), do: nil
+  defp snes_filter_from_env(""), do: nil
+  defp snes_filter_from_env("native"), do: :native
+  defp snes_filter_from_env("composite"), do: :composite
+  defp snes_filter_from_env("svideo"), do: :svideo
+  defp snes_filter_from_env("rgb"), do: :rgb
+  defp snes_filter_from_env("monochrome"), do: :monochrome
+  defp snes_filter_from_env(value), do: value
+
   defp filter_name({name, _options}), do: name
   defp filter_name(name), do: name
 
   defp configure_core(%Core{id: :nes, system: system} = core, load_options),
+    do: %{core | capabilities: system.capabilities(load_options)}
+
+  defp configure_core(%Core{id: :snes, system: system} = core, load_options),
     do: %{core | capabilities: system.capabilities(load_options)}
 
   defp configure_core(%Core{} = core, _load_options), do: core
@@ -541,6 +632,12 @@ defmodule Beamicom.Scenic.Player do
 
   defp snapshot_machine(%{core: %Core{id: :gbc}, runtime: runtime}, _load_options),
     do: {:ok, Runtime.snapshot(runtime)}
+
+  defp snapshot_machine(%{core: %Core{id: :snes}, runtime: runtime}, load_options) do
+    state = Runtime.snapshot(runtime)
+    filter = Keyword.get(load_options, :video_filter, :native)
+    {:ok, put_in(state.machine.bus.ppu, SNESPPU.set_video_filter(state.machine.bus.ppu, filter))}
+  end
 
   defp reconfigure_console(console, load_options) do
     renderer = Keyword.get(load_options, :ppu_renderer, PPU.configured_renderer())
@@ -591,7 +688,7 @@ defmodule Beamicom.Scenic.Player do
         audio: core.capabilities.audio,
         speed: speed,
         volume: Keyword.get(options, :volume, 100),
-        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 0)
+        prebuffer_ms: Keyword.get(options, :audio_prebuffer_ms, 40)
       ]
 
       audio_options =

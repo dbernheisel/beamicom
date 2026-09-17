@@ -20,9 +20,15 @@ defmodule BeamicomPhxWeb.ControllerChannelTest do
     assert_receive {:player_notification, "Player 2 has joined"}
     assert Client.ready?(BeamicomPhx.EIClient)
 
-    ref = push(socket, "buttons", %{"buttons" => ["right", "a"]})
+    ref =
+      push(socket, "buttons", %{
+        "buttons" => ["right", "a", "x", "y", "l", "r", "select"]
+      })
+
     assert_reply ref, :ok
-    assert :sys.get_state(BeamicomPhx.EIClient).held[2] == MapSet.new([:right, :a])
+
+    assert :sys.get_state(BeamicomPhx.EIClient).held[2] ==
+             MapSet.new([:right, :a, :x, :y, :l, :r, :select])
 
     ref = push(socket, "buttons", %{"buttons" => []})
     assert_reply ref, :ok

@@ -44,6 +44,7 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
         nes_lighting: true,
         nes_remove_sprite_limit: true,
         nes_trim_borders: false,
+        snes_video_filter: :monochrome,
         gbc_video_filter: :pixel_transparency,
         integer_scaling: false,
         audio: false,
@@ -58,6 +59,7 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
     assert Enum.map(items, & &1.id) == [
              :save_state_folder,
              :nes,
+             :snes,
              :gbc,
              :integer_scaling,
              :audio,
@@ -66,9 +68,11 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
 
     assert item(config, :save_state_folder).label == "State folder..."
     assert item(config, :nes).label == "NES"
+    assert item(config, :snes).label == "SNES"
     assert item(config, :gbc).label == "GBC"
 
     nes_submenu = item(config, :nes).submenu
+    snes_submenu = item(config, :snes).submenu
     gbc_submenu = item(config, :gbc).submenu
 
     assert Enum.map(filter_choices(nes_submenu, :nes_video_filter), & &1.action) == [
@@ -83,6 +87,19 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
 
     assert item_in(nes_submenu, {:nes_video_filter, :composite}).label == "Composite"
 
+    assert Enum.map(filter_choices(snes_submenu, :snes_video_filter), & &1.action) == [
+             {:snes_video_filter, :none},
+             {:snes_video_filter, :composite},
+             {:snes_video_filter, :svideo},
+             {:snes_video_filter, :rgb},
+             {:snes_video_filter, :monochrome}
+           ]
+
+    assert Enum.find(filter_choices(snes_submenu, :snes_video_filter), & &1.checked).action ==
+             {:snes_video_filter, :monochrome}
+
+    assert item_in(snes_submenu, {:snes_video_filter, :monochrome}).label == "Monochrome"
+
     assert Enum.map(filter_choices(gbc_submenu, :gbc_video_filter), & &1.action) == [
              {:gbc_video_filter, :none},
              {:gbc_video_filter, :pixel_transparency}
@@ -93,6 +110,7 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
 
     assert item_in(nes_submenu, :nes_filter_section).label == "FILTER"
     assert item_in(nes_submenu, :nes_enhancements_section).label == "ENHANCEMENTS"
+    assert item_in(snes_submenu, :snes_filter_section).label == "FILTER"
     assert item_in(gbc_submenu, :gbc_filter_section).label == "FILTER"
     assert item_in(nes_submenu, :nes_lighting).checked
     assert item_in(nes_submenu, :nes_lighting).label == "Sprite lighting"
@@ -118,13 +136,14 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
            ) == 100
 
     assert PopupMenu.width(nes_submenu) >= 286
+    assert PopupMenu.width(snes_submenu) >= 286
     assert PopupMenu.width(gbc_submenu) >= 286
     assert PopupMenu.width(config.items) >= 520
 
     {:ok, {Scenic.Assets.Static.Font, metrics}} =
       Scenic.Assets.Static.meta(:beamicom_ui)
 
-    for popup_items <- [config.items, nes_submenu, gbc_submenu],
+    for popup_items <- [config.items, nes_submenu, snes_submenu, gbc_submenu],
         popup_item <- popup_items,
         popup_item != :separator do
       text_width = FontMetrics.width(MenuItem.display_label(popup_item), 23, metrics)

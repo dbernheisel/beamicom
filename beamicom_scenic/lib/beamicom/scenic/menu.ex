@@ -20,6 +20,7 @@ defmodule Beamicom.Scenic.Menu do
           item(:save_state_folder, "State folder..."),
           :separator,
           item(:nes, "NES", true, submenu: nes_menu(settings)),
+          item(:snes, "SNES", true, submenu: snes_menu(settings)),
           item(:gbc, "GBC", true, submenu: gbc_menu(settings)),
           :separator,
           item(:integer_scaling, "Integer scaling", true,
@@ -86,6 +87,18 @@ defmodule Beamicom.Scenic.Menu do
       end)
   end
 
+  defp snes_menu(settings) do
+    [section(:snes_filter_section, "Filter")] ++
+      Enum.map(Settings.snes_video_filters(), fn filter ->
+        choice(
+          :snes_video_filter,
+          filter,
+          snes_filter_label(filter),
+          settings.snes_video_filter
+        )
+      end)
+  end
+
   defp item(id, label, enabled \\ true, options \\ []) do
     %{id: id, label: label, action: id, enabled: enabled}
     |> Map.merge(Map.new(options))
@@ -107,6 +120,12 @@ defmodule Beamicom.Scenic.Menu do
   defp nes_filter_label(:composite), do: "Composite"
   defp nes_filter_label(:svideo), do: "S-Video"
   defp nes_filter_label(:rgb), do: "RGB"
+
+  defp snes_filter_label(:none), do: "None"
+  defp snes_filter_label(:composite), do: "Composite"
+  defp snes_filter_label(:svideo), do: "S-Video"
+  defp snes_filter_label(:rgb), do: "RGB"
+  defp snes_filter_label(:monochrome), do: "Monochrome"
 
   defp gbc_filter_label(:none), do: "None"
   defp gbc_filter_label(:pixel_transparency), do: "Pixel transparency"

@@ -1,9 +1,10 @@
 defmodule Beamicom.Scenic.Settings do
   @moduledoc "Persistent user settings for the Scenic application shell."
 
-  @version 3
+  @version 4
   @recent_rom_limit 5
   @nes_video_filters [:none, :composite, :svideo, :rgb]
+  @snes_video_filters [:none, :composite, :svideo, :rgb, :monochrome]
   @gbc_video_filters [:none, :pixel_transparency]
 
   @type t :: %{
@@ -13,6 +14,7 @@ defmodule Beamicom.Scenic.Settings do
           nes_lighting: boolean(),
           nes_remove_sprite_limit: boolean(),
           nes_trim_borders: boolean(),
+          snes_video_filter: :none | :composite | :svideo | :rgb | :monochrome,
           gbc_video_filter: :none | :pixel_transparency,
           integer_scaling: boolean(),
           audio: boolean(),
@@ -20,6 +22,7 @@ defmodule Beamicom.Scenic.Settings do
         }
 
   def nes_video_filters, do: @nes_video_filters
+  def snes_video_filters, do: @snes_video_filters
   def gbc_video_filters, do: @gbc_video_filters
 
   @spec defaults() :: t()
@@ -31,6 +34,7 @@ defmodule Beamicom.Scenic.Settings do
       nes_lighting: false,
       nes_remove_sprite_limit: false,
       nes_trim_borders: false,
+      snes_video_filter: :none,
       gbc_video_filter: :none,
       integer_scaling: true,
       audio: true,
@@ -74,6 +78,9 @@ defmodule Beamicom.Scenic.Settings do
 
   @spec next_gbc_video_filter(atom()) :: atom()
   def next_gbc_video_filter(current), do: next(@gbc_video_filters, current)
+
+  @spec next_snes_video_filter(atom()) :: atom()
+  def next_snes_video_filter(current), do: next(@snes_video_filters, current)
 
   @doc "Moves a ROM path to the front of the five-item recent history."
   def remember_rom(settings, path) when is_map(settings) and is_binary(path) do
@@ -120,6 +127,7 @@ defmodule Beamicom.Scenic.Settings do
   def player_options(:snes, options, settings) when is_list(options) and is_map(settings),
     do:
       options
+      |> Keyword.put_new(:video_filter, filter_option(settings.snes_video_filter))
       |> Keyword.put_new(:audio, settings.audio)
       |> Keyword.put_new(:volume, settings.volume)
 
@@ -133,6 +141,7 @@ defmodule Beamicom.Scenic.Settings do
            nes_lighting: Map.get(decoded, "nes_lighting"),
            nes_remove_sprite_limit: Map.get(decoded, "nes_remove_sprite_limit"),
            nes_trim_borders: Map.get(decoded, "nes_trim_borders"),
+           snes_video_filter: Map.get(decoded, "snes_video_filter"),
            gbc_video_filter: Map.get(decoded, "gbc_video_filter"),
            integer_scaling: Map.get(decoded, "integer_scaling"),
            audio: Map.get(decoded, "audio"),
@@ -160,6 +169,7 @@ defmodule Beamicom.Scenic.Settings do
       "nes_lighting" => settings.nes_lighting,
       "nes_remove_sprite_limit" => settings.nes_remove_sprite_limit,
       "nes_trim_borders" => settings.nes_trim_borders,
+      "snes_video_filter" => Atom.to_string(settings.snes_video_filter),
       "gbc_video_filter" => Atom.to_string(settings.gbc_video_filter),
       "integer_scaling" => settings.integer_scaling,
       "audio" => settings.audio,
@@ -184,6 +194,8 @@ defmodule Beamicom.Scenic.Settings do
            setting(settings, :nes_remove_sprite_limit, fallbacks, &normalize_boolean/1),
          {:ok, nes_trim_borders} <-
            setting(settings, :nes_trim_borders, fallbacks, &normalize_boolean/1),
+         {:ok, snes_video_filter} <-
+           setting(settings, :snes_video_filter, fallbacks, &normalize_snes_filter/1),
          {:ok, gbc_video_filter} <-
            setting(settings, :gbc_video_filter, fallbacks, &normalize_gbc_filter/1),
          {:ok, integer_scaling} <-
@@ -198,6 +210,7 @@ defmodule Beamicom.Scenic.Settings do
          nes_lighting: nes_lighting,
          nes_remove_sprite_limit: nes_remove_sprite_limit,
          nes_trim_borders: nes_trim_borders,
+         snes_video_filter: snes_video_filter,
          gbc_video_filter: gbc_video_filter,
          integer_scaling: integer_scaling,
          audio: audio,
@@ -241,6 +254,14 @@ defmodule Beamicom.Scenic.Settings do
   end
 
   defp normalize_nes_filter(_filter), do: {:error, {:invalid_setting, :nes_video_filter}}
+
+  defp normalize_snes_filter(filter) when filter in @snes_video_filters, do: {:ok, filter}
+
+  defp normalize_snes_filter(filter) when is_binary(filter) do
+    normalize_enum(filter, @snes_video_filters, :snes_video_filter)
+  end
+
+  defp normalize_snes_filter(_filter), do: {:error, {:invalid_setting, :snes_video_filter}}
 
   defp normalize_gbc_filter(filter) when filter in @gbc_video_filters, do: {:ok, filter}
 

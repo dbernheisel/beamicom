@@ -6,7 +6,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     @width 256
     @height 224
-    @control_columns 41
+    @control_columns 42
 
     @doc "Compiles every supported control-shape variant before realtime playback starts."
     def warmup do
@@ -90,7 +90,8 @@ if Code.ensure_loaded?(Nx.Defn) do
             elem(state, 29),
             elem(state, 30),
             if(elem(state, 31), do: 1, else: 0),
-            if(elem(state, 0), do: 1, else: 0)
+            if(elem(state, 0), do: 1, else: 0),
+            if(elem(state, 37), do: 1, else: 0)
           ]
         end)
 
@@ -245,6 +246,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         ],
         axis: 2
       )
+      |> display_rgb(sub_color, brightness, controls)
       |> Nx.as_type(:u8)
     end
 
@@ -327,6 +329,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         ],
         axis: 2
       )
+      |> display_rgb(sub_color, brightness, controls)
       |> Nx.as_type(:u8)
     end
 
@@ -382,6 +385,7 @@ if Code.ensure_loaded?(Nx.Defn) do
         ],
         axis: 2
       )
+      |> display_rgb(sub_color, brightness, controls)
       |> Nx.as_type(:u8)
     end
 
@@ -541,7 +545,7 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defnp background(vram, controls, bg, bpp) do
       x = Nx.iota({1, @width}, type: :s32) + column(controls, 8 + bg)
-      y = Nx.iota({@height, 1}, type: :s32) + column(controls, 11 + bg)
+      y = Nx.iota({@height, 1}, type: :s32) + column(controls, 11 + bg) + 1
       x = band(x, 0x3FF)
       y = band(y, 0x3FF)
       tile_x = Nx.quotient(x, 8)
@@ -780,8 +784,36 @@ if Code.ensure_loaded?(Nx.Defn) do
     defnp blend_component(first, second, subtract, half, shift) do
       a = band(shr(first, shift), 0x1F)
       b = band(shr(second, shift), 0x1F)
-      value = Nx.select(subtract, Nx.max(a - b, 0), Nx.min(a + b, 31))
-      Nx.select(half, shr(value, 1), value)
+      difference = Nx.max(a - b, 0)
+      sum = a + b
+
+      Nx.select(
+        subtract,
+        Nx.select(half, shr(difference, 1), difference),
+        Nx.select(half, shr(sum, 1), Nx.min(sum, 31))
+      )
+    end
+
+    defnp display_rgb(main, sub_color, brightness, controls) do
+      sub =
+        Nx.stack(
+          [
+            expand(band(sub_color, 0x1F), brightness),
+            expand(band(shr(sub_color, 5), 0x1F), brightness),
+            expand(band(shr(sub_color, 10), 0x1F), brightness)
+          ],
+          axis: 2
+        )
+
+      downsampled = Nx.quotient(main + sub, 2)
+
+      pseudo_hires =
+        controls
+        |> full_column(41)
+        |> Nx.new_axis(2)
+        |> Nx.broadcast({@height, @width, 3})
+
+      Nx.select(pseudo_hires != 0, downsampled, main)
     end
 
     defnp gather_bit(vram, address, bit) do
@@ -821,8 +853,10 @@ if Code.ensure_loaded?(Nx.Defn) do
 
     defp controls_tensor(rows), do: Nx.tensor(rows, type: :s32)
 
-    defp object_tensor({:descriptors, rows}),
-      do: {Nx.tensor(rows, type: :s32), :descriptors}
+    defp object_tensor({:descriptors, descriptors}) when is_binary(descriptors) do
+      tensor = descriptors |> Nx.from_binary(:s32) |> Nx.reshape({@height, 32, 9})
+      {tensor, :descriptors}
+    end
 
     defp object_tensor(layer) when is_binary(layer),
       do: {layer |> Nx.from_binary(:u8) |> Nx.reshape({@height, @width, 2}), :pixels}

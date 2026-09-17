@@ -16,11 +16,13 @@ defmodule Beamicom.NES.NxTest do
   test "Zelda lights the full flame palette without treating Link as an emitter" do
     emitters = Beamicom.NES.Nx.Lighting.zelda() |> Keyword.fetch!(:emitters)
     flame = Enum.find(emitters, &(Keyword.fetch!(&1, :id) == :flame))
+    sword_and_beam = Enum.find(emitters, &(Keyword.fetch!(&1, :id) == :sword_and_beam))
     enemy_death = Enum.find(emitters, &(Keyword.fetch!(&1, :id) == :enemy_death))
     blue_candle = Enum.find(emitters, &(Keyword.fetch!(&1, :id) == :blue_candle_tip))
     red_candle = Enum.find(emitters, &(Keyword.fetch!(&1, :id) == :red_candle_tip))
 
     assert Keyword.fetch!(flame, :color_slots) == [1, 2, 3]
+    assert Keyword.fetch!(sword_and_beam, :tiles) == [32, 33, 130, 131, 132, 133]
     assert Keyword.fetch!(enemy_death, :tiles) == [98, 100]
     assert Keyword.fetch!(enemy_death, :subpalettes) == [0, 1, 2, 3]
     assert Keyword.fetch!(enemy_death, :color_slots) == [1, 2, 3]

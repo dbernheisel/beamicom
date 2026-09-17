@@ -3,7 +3,8 @@ defmodule Beamicom.Host.RuntimeTest do
 
   alias Beamicom.Host.{AudioChunk, Input, InputCapabilities, Output, Runtime, VideoFrame}
 
-  @heap_words 65_536
+  @heap_words 200_000
+  @binary_heap_words 65_536
 
   defmodule TestSystem do
     def id, do: :runtime_test
@@ -89,7 +90,7 @@ defmodule Beamicom.Host.RuntimeTest do
     assert {:min_heap_size, heap} = Process.info(runtime, :min_heap_size)
     assert {:min_bin_vheap_size, binary_heap} = Process.info(runtime, :min_bin_vheap_size)
     assert heap >= @heap_words
-    assert binary_heap >= @heap_words
+    assert binary_heap >= @binary_heap_words
   end
 
   test "pause, step, and resume retain one generation-tagged timer chain" do

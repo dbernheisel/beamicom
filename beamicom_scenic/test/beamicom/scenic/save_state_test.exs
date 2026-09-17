@@ -8,11 +8,13 @@ defmodule Beamicom.Scenic.SaveStateTest do
     chr = <<4, 5>>
     nes = %{bus: %{prg: prg, ppu: %{chr: chr}}}
     gbc = %{bus: %{cartridge: %{rom: prg <> chr}}}
+    snes = %{machine: %{cartridge: %{rom: prg <> chr}}}
 
     expected = :crypto.hash(:sha256, prg <> chr) |> Base.encode16(case: :lower)
 
     assert SaveState.rom_hash(:nes, nes) == expected
     assert SaveState.rom_hash(:gbc, gbc) == expected
+    assert SaveState.rom_hash(:snes, snes) == expected
     assert SaveState.quick_path("/tmp/states", expected) == "/tmp/states/#{expected}.png"
   end
 

@@ -35,7 +35,7 @@ Start a server and connect a client:
 Both sides default to controller ports `[1, 2]`. Pass `ports: [1]` to both the
 server and client for a single-controller system such as Game Boy or Game Boy
 Color. Supported buttons are `:up`, `:down`, `:left`, `:right`, `:a`, `:b`,
-`:select`, and `:start`.
+`:x`, `:y`, `:l`, `:r`, `:select`, and `:start`.
 
 The server socket is created with mode `0600`. Button changes are published on
 `ei_device.frame`, and disconnecting a client releases that client's held

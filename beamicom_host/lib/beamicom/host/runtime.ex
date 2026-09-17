@@ -14,7 +14,10 @@ defmodule Beamicom.Host.Runtime do
 
   alias Beamicom.Host.{AudioChunk, Input, Output, Registry, VideoFrame}
 
-  @heap_words 65_536
+  # Allocation-heavy emulator cores need enough young heap to complete a frame
+  # without repeatedly collecting short-lived CPU, PPU, and audio state.
+  @heap_words 200_000
+  @binary_heap_words 65_536
   # Preserve short-term fixed-epoch correction, but treat compilation and long
   # scheduler stalls as discontinuities instead of publishing stale audio in a
   # wall-clock catch-up burst.
@@ -22,7 +25,7 @@ defmodule Beamicom.Host.Runtime do
   @spawn_options [
     spawn_opt: [
       {:min_heap_size, @heap_words},
-      {:min_bin_vheap_size, @heap_words}
+      {:min_bin_vheap_size, @binary_heap_words}
     ]
   ]
 

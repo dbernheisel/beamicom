@@ -6,7 +6,8 @@ import {Socket} from "phoenix"
 const gameKeys = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "])
 const keyButtons = {
   arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right",
-  x: "a", z: "b", enter: "start", shift: "select",
+  x: "a", z: "b", s: "x", a: "y", q: "l", w: "r",
+  enter: "start", shift: "select",
 }
 
 export default {

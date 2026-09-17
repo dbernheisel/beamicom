@@ -32,7 +32,7 @@ if Code.ensure_loaded?(Nx.Defn) do
           id: :sword_and_beam,
           layer: :sprite,
           tile_space: :ppu,
-          tiles: [130, 131, 132, 133],
+          tiles: [32, 33, 130, 131, 132, 133],
           subpalettes: [0, 1, 2, 3],
           color_slots: [3],
           intensity: 1.0

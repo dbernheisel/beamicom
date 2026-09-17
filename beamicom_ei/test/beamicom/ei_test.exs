@@ -1,6 +1,16 @@
 defmodule Beamicom.EITest do
   use ExUnit.Case, async: true
-  alias Beamicom.EI.{Client, Codec, Server}
+  alias Beamicom.EI.{Client, Codec, Codes, Server}
+
+  test "uses Linux evdev codes for SNES buttons" do
+    assert Codes.code(:x) == {:ok, 0x133}
+    assert Codes.code(:y) == {:ok, 0x134}
+    assert Codes.code(:l) == {:ok, 0x136}
+    assert Codes.code(:r) == {:ok, 0x137}
+    assert Codes.code(:select) == {:ok, 0x13A}
+
+    assert Enum.map([0x133, 0x134, 0x136, 0x137], &Codes.button/1) == [:x, :y, :l, :r]
+  end
 
   test "codec preserves partial and coalesced EI messages" do
     first = Codec.message(7, 2, Codec.u32(42))
@@ -22,8 +32,11 @@ defmodule Beamicom.EITest do
     client = start_supervised!({Client, path: path, name: "test"})
     assert :ok = Client.await_ready(client)
     assert Server.path(server) == path
-    assert :ok = Client.set_buttons(client, 1, [:right, :a])
-    assert_receive {1, [:a, :right]}
+    assert :ok = Client.set_buttons(client, 1, [:right, :a, :x, :y, :l, :r, :select])
+
+    assert_receive {1, buttons}
+    assert MapSet.new(buttons) == MapSet.new([:right, :a, :x, :y, :l, :r, :select])
+
     assert :ok = Client.set_buttons(client, 1, [])
     assert_receive {1, []}
   end

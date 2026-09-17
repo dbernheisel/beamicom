@@ -27,6 +27,41 @@ static int fail_sdl(const char *operation) {
   return 1;
 }
 
+static int queue_audio_bounded(SDL_AudioDeviceID device,
+                               const unsigned char *pcm,
+                               size_t length,
+                               Uint32 max_queue_bytes,
+                               size_t frame_bytes,
+                               int *started) {
+  while (length != 0) {
+    Uint32 queued = SDL_GetQueuedAudioSize(device);
+    Uint32 room = queued < max_queue_bytes ? max_queue_bytes - queued : 0;
+    room -= room % frame_bytes;
+
+    if (room == 0) {
+      SDL_Delay(1);
+      continue;
+    }
+
+    Uint32 chunk = length < room ? (Uint32)length : room;
+    chunk -= chunk % frame_bytes;
+
+    if (SDL_QueueAudio(device, pcm, chunk) != 0) {
+      return fail_sdl("SDL_QueueAudio");
+    }
+
+    if (!*started) {
+      SDL_PauseAudioDevice(device, 0);
+      *started = 1;
+    }
+
+    pcm += chunk;
+    length -= chunk;
+  }
+
+  return 0;
+}
+
 int main(int argc, char **argv) {
   int sample_rate;
   int channels;
@@ -99,28 +134,10 @@ int main(int argc, char **argv) {
       continue;
     }
 
-    unsigned char *pcm = buffer;
-
-    if (aligned > max_queue_bytes) {
-      size_t kept = max_queue_bytes - max_queue_bytes % frame_bytes;
-      pcm += aligned - kept;
-      aligned = kept;
-    }
-
-    Uint32 queued = SDL_GetQueuedAudioSize(device);
-
-    if (queued + aligned > max_queue_bytes) {
-      SDL_ClearQueuedAudio(device);
-    }
-
-    if (SDL_QueueAudio(device, pcm, (Uint32)aligned) != 0) {
-      result = fail_sdl("SDL_QueueAudio");
+    if (queue_audio_bounded(device, buffer, aligned, max_queue_bytes,
+                            frame_bytes, &started) != 0) {
+      result = 1;
       break;
-    }
-
-    if (!started) {
-      SDL_PauseAudioDevice(device, 0);
-      started = 1;
     }
 
     if (carried != 0) {

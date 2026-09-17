@@ -3,7 +3,7 @@ defmodule Beamicom.SNES.BusTest do
 
   import Bitwise
 
-  alias Beamicom.SNES.{Bus, Cartridge}
+  alias Beamicom.SNES.{APU, Bus, Cartridge, DSPTask, PPU}
   alias Beamicom.SNESTestROM
 
   setup do
@@ -18,6 +18,197 @@ defmodule Beamicom.SNES.BusTest do
 
     {bus, 8} = Bus.write(bus, 0x7F0020, 0x99)
     assert Bus.peek(bus, 0x7F0020) == 0x99
+  end
+
+  test "audio drain publishes an in-flight DSP batch without new clocks", %{bus: bus} do
+    apu = APU.new(native_ipl: true, async_dsp: true) |> APU.advance(357_368, :ntsc)
+    assert %DSPTask{} = apu.dsp_task
+
+    {frames, pcm, bus} = Bus.take_audio_pcm(%{bus | apu: apu, apu_pending_clocks: 0})
+
+    assert frames > 0
+    assert byte_size(pcm) == frames * 4
+    assert bus.apu.dsp_task == nil
+  end
+
+  test "CPU raster writes preserve the preceding scanline state", %{bus: bus} do
+    bus = Bus.advance_master(bus, 10 * 1364)
+    {bus, 6} = Bus.write(bus, 0x00212C, 0x00)
+    assert bus.ppu.scanline_states == nil
+
+    {bus, 6} = Bus.write(bus, 0x00212C, 0x01)
+
+    assert length(bus.ppu.scanline_states) == 10
+    assert Enum.all?(bus.ppu.scanline_states, &(elem(&1, 13) == 0))
+
+    bus = Bus.advance_master(bus, 1364 - 12)
+
+    assert length(bus.ppu.scanline_states) == 11
+    assert elem(hd(bus.ppu.scanline_states), 13) == 0x01
+  end
+
+  test "HBlank writes do not create zero-width raster segments", %{bus: bus} do
+    line = 10
+    hblank_start = 88 + 256 * 4
+    bus = Bus.advance_master(bus, line * 1364 + hblank_start)
+
+    {bus, 6} = Bus.write(bus, 0x00212C, 0x01)
+
+    assert bus.ppu.raster_segments == %{}
+    assert length(bus.ppu.scanline_states) == line
+  end
+
+  test "HDMA starts after line 0 and holds each table entry for its full line count", %{bus: bus} do
+    dma = %{elem(bus.dma_channels, 0) | bbad: 0x2C, a_bank: 0x7E}
+
+    wram =
+      [{0, 3}, {1, 0x01}, {2, 1}, {3, 0x02}, {4, 0}]
+      |> Enum.reduce(bus.wram, fn {address, value}, wram ->
+        :array.set(address, value, wram)
+      end)
+
+    timing = %{bus.timing | vline: 261, hclock: 1360}
+
+    bus = %{
+      bus
+      | dma_channels: put_elem(bus.dma_channels, 0, dma),
+        hdma_enable: 1,
+        timing: timing,
+        wram: wram
+    }
+
+    bus = Bus.advance_master(bus, 4)
+    assert bus.timing.vline == 0
+    assert bus.ppu.scanline_states == []
+    assert elem(bus.dma_channels, 0).line_counter == 0
+
+    bus = Bus.advance_master(bus, 1364)
+    assert elem(hd(bus.ppu.scanline_states), 13) == 0x01
+
+    bus = Bus.advance_master(bus, 2 * 1364)
+    assert bus.timing.vline == 3
+    assert Enum.map(bus.ppu.scanline_states, &elem(&1, 13)) == [0x01, 0x01, 0x01]
+
+    bus = Bus.advance_master(bus, 1364)
+    assert bus.timing.vline == 4
+    assert Enum.map(bus.ppu.scanline_states, &elem(&1, 13)) == [0x02, 0x01, 0x01, 0x01]
+  end
+
+  test "left-edge raster writes affect the current visible row", %{bus: bus} do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2121, 0)
+      |> PPU.write(0x2122, 0x1F)
+      |> PPU.write(0x2122, 0)
+
+    line = 10
+    screen_line = line - 1
+    bus = Bus.advance_master(%{bus | ppu: ppu}, line * 1364)
+    {bus, 6} = Bus.write(bus, 0x002100, 0x80)
+
+    assert [{0, state}] = Map.fetch!(bus.ppu.raster_segments, screen_line)
+    assert elem(state, 0)
+
+    bus = Bus.advance_master(bus, 225 * 1364 - bus.timing.master_clocks)
+    {frame, _bus} = Bus.take_frame(bus)
+
+    assert pixel_at(frame.data, 255, screen_line - 1) == <<255, 0, 0>>
+    assert pixel_at(frame.data, 0, screen_line) == <<0, 0, 0>>
+  end
+
+  test "mid-scanline INIDISP writes affect only subsequent pixels", %{bus: bus} do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2121, 0)
+      |> PPU.write(0x2122, 0x1F)
+      |> PPU.write(0x2122, 0)
+
+    line = 10
+    screen_line = line - 1
+    x = 96
+    target_clock = line * 1364 + 88 + x * 4
+    bus = Bus.advance_master(%{bus | ppu: ppu}, target_clock)
+    {bus, 6} = Bus.write(bus, 0x002100, 0x80)
+
+    assert [{0, before}, {^x, after_write}] =
+             Map.fetch!(bus.ppu.raster_segments, screen_line)
+
+    refute elem(before, 0)
+    assert elem(after_write, 0)
+
+    bus = Bus.advance_master(bus, 225 * 1364 - bus.timing.master_clocks)
+    {frame, _bus} = Bus.take_frame(bus)
+
+    assert pixel_at(frame.data, x - 1, screen_line) == <<255, 0, 0>>
+    assert pixel_at(frame.data, x, screen_line) == <<0, 0, 0>>
+    assert pixel_at(frame.data, 255, screen_line - 1) == <<255, 0, 0>>
+    assert pixel_at(frame.data, 0, screen_line + 1) == <<0, 0, 0>>
+  end
+
+  test "multiple mid-scanline color-math writes form ordered spans", %{bus: bus} do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2121, 0)
+      |> PPU.write(0x2122, 0x1F)
+      |> PPU.write(0x2122, 0)
+      |> PPU.write(0x2132, 0x9F)
+      |> PPU.write(0x2131, 0x20)
+
+    line = 12
+    screen_line = line - 1
+    first_x = 64
+    second_x = 160
+    first_clock = line * 1364 + 88 + first_x * 4
+    second_clock = line * 1364 + 88 + second_x * 4
+
+    bus = Bus.advance_master(%{bus | ppu: ppu}, first_clock)
+    {bus, 6} = Bus.write(bus, 0x002131, 0)
+    bus = Bus.advance_master(bus, second_clock - bus.timing.master_clocks)
+    {bus, 6} = Bus.write(bus, 0x002131, 0x20)
+
+    assert [{0, _before}, {^first_x, _middle}, {^second_x, _after}] =
+             Map.fetch!(bus.ppu.raster_segments, screen_line)
+
+    bus = Bus.advance_master(bus, 225 * 1364 - bus.timing.master_clocks)
+    {frame, _bus} = Bus.take_frame(bus)
+
+    assert pixel_at(frame.data, first_x - 1, screen_line) == <<255, 0, 255>>
+    assert pixel_at(frame.data, first_x, screen_line) == <<255, 0, 0>>
+    assert pixel_at(frame.data, second_x - 1, screen_line) == <<255, 0, 0>>
+    assert pixel_at(frame.data, second_x, screen_line) == <<255, 0, 255>>
+  end
+
+  test "mid-scanline window writes preserve pixels already drawn", %{bus: bus} do
+    ppu =
+      PPU.new()
+      |> PPU.write(0x2100, 0x0F)
+      |> PPU.write(0x2121, 0)
+      |> PPU.write(0x2122, 0x1F)
+      |> PPU.write(0x2122, 0)
+      |> PPU.write(0x2125, 0x20)
+      |> PPU.write(0x2126, 0)
+      |> PPU.write(0x2127, 63)
+      |> PPU.write(0x2130, 0x80)
+      |> PPU.write(0x2131, 0x20)
+
+    line = 14
+    screen_line = line - 1
+    x = 128
+    target_clock = line * 1364 + 88 + x * 4
+    bus = Bus.advance_master(%{bus | ppu: ppu}, target_clock)
+    {bus, 6} = Bus.write(bus, 0x002127, 191)
+    bus = Bus.advance_master(bus, 225 * 1364 - bus.timing.master_clocks)
+    {frame, _bus} = Bus.take_frame(bus)
+
+    assert pixel_at(frame.data, 63, screen_line) == <<0, 0, 0>>
+    assert pixel_at(frame.data, 64, screen_line) == <<255, 0, 0>>
+    assert pixel_at(frame.data, x - 1, screen_line) == <<255, 0, 0>>
+    assert pixel_at(frame.data, x, screen_line) == <<0, 0, 0>>
+    assert pixel_at(frame.data, 191, screen_line) == <<0, 0, 0>>
+    assert pixel_at(frame.data, 192, screen_line) == <<255, 0, 0>>
   end
 
   test "persists cartridge SRAM through LoROM mirrors" do
@@ -42,7 +233,7 @@ defmodule Beamicom.SNES.BusTest do
     assert {0x5A, bus, 8} = Bus.cpu_read(bus, 0xC01234)
     assert Bus.peek(bus, 0x401234) == 0x5A
 
-    bus = %{bus | open_bus: 0xA5}
+    bus = Bus.put_open_bus(bus, 0xA5)
     assert {0xA5, bus, 8} = Bus.cpu_read(bus, 0x106000)
 
     {bus, 8} = Bus.cpu_write(bus, 0x206001, 0x42)
@@ -287,6 +478,99 @@ defmodule Beamicom.SNES.BusTest do
     assert bus.timing.hclock == 26
   end
 
+  test "$2137 latches the current beam position when WRIO bit 7 is high", %{bus: bus} do
+    bus = %{bus | timing: %{bus.timing | hclock: 1_200, vline: 258}}
+    {open_bus, bus, 6} = Bus.read(Bus.put_open_bus(bus, 0xA5), 0x002137)
+
+    assert open_bus == 0xA5
+    assert bus.ppu.latched_hcounter == 300
+    assert bus.ppu.latched_vcounter == 258
+
+    assert {0x2C, bus, 6} = Bus.read(bus, 0x00213C)
+    assert {0x2D, bus, 6} = Bus.read(bus, 0x00213C)
+    assert {0x02, bus, 6} = Bus.read(bus, 0x00213D)
+    assert {0x03, _bus, 6} = Bus.read(bus, 0x00213D)
+  end
+
+  test "$4201 falling edge latches counters and gates software latching", %{bus: bus} do
+    bus = %{bus | timing: %{bus.timing | hclock: 400, vline: 12}}
+    {bus, 6} = Bus.write(bus, 0x004201, 0x00)
+
+    assert bus.ppu.latched_hcounter == 100
+    assert bus.ppu.latched_vcounter == 12
+    assert {0x00, bus, 6} = Bus.read(bus, 0x004213)
+
+    bus = %{bus | timing: %{bus.timing | hclock: 800, vline: 24}}
+    {_open_bus, bus, 6} = Bus.read(bus, 0x002137)
+    assert bus.ppu.latched_hcounter == 100
+    assert bus.ppu.latched_vcounter == 12
+
+    {bus, 6} = Bus.write(bus, 0x004201, 0x80)
+    {_open_bus, bus, 6} = Bus.read(bus, 0x002137)
+    assert bus.ppu.latched_hcounter == 203
+    assert bus.ppu.latched_vcounter == 24
+  end
+
+  test "$213F resets both counter read phases", %{bus: bus} do
+    bus = %{bus | timing: %{bus.timing | hclock: 1_200, vline: 258}}
+    {_open_bus, bus, 6} = Bus.read(bus, 0x002137)
+    assert {0x2C, bus, 6} = Bus.read(bus, 0x00213C)
+    assert {0x02, bus, 6} = Bus.read(bus, 0x00213D)
+    {_status, bus, 6} = Bus.read(bus, 0x00213F)
+    assert {0x2C, bus, 6} = Bus.read(bus, 0x00213C)
+    assert {0x02, _bus, 6} = Bus.read(bus, 0x00213D)
+  end
+
+  test "$213F reports region and field while preserving PPU2 MDR bit 5" do
+    {:ok, cartridge} = :lorom |> SNESTestROM.build() |> Cartridge.load()
+    bus = Bus.new(cartridge, region: :pal)
+    bus = %{bus | timing: %{bus.timing | field: 1}, ppu: %{bus.ppu | ppu2_mdr: 0x20}}
+
+    assert {0xB3, bus, 6} = Bus.read(bus, 0x00213F)
+    assert bus.ppu.ppu2_mdr == 0xB3
+  end
+
+  test "PPU write-only reads use the corresponding PPU MDR rather than CPU open bus", %{bus: bus} do
+    ppu = %{bus.ppu | m7_product: 0x5A, latched_hcounter: 0x0AB}
+    bus = %{bus | ppu: ppu}
+
+    assert {0x5A, bus, 6} = Bus.read(bus, 0x002134)
+    assert {0xAB, bus, 6} = Bus.read(bus, 0x00213C)
+    assert Bus.open_bus(bus) == 0xAB
+
+    assert {0x5A, bus, 6} = Bus.read(bus, 0x002104)
+    assert bus.ppu.ppu1_mdr == 0x5A
+    assert bus.ppu.ppu2_mdr == 0xAB
+  end
+
+  test "$213F reports and clears a counter latch only while WRIO enables it", %{bus: bus} do
+    bus = %{bus | timing: %{bus.timing | hclock: 400, vline: 12}}
+    {bus, 6} = Bus.write(bus, 0x004201, 0x00)
+
+    assert bus.ppu.counter_latched?
+    assert {status, bus, 6} = Bus.read(bus, 0x00213F)
+    assert (status &&& 0x40) != 0
+    assert bus.ppu.counter_latched?
+
+    {bus, 6} = Bus.write(bus, 0x004201, 0x80)
+    assert {status, bus, 6} = Bus.read(bus, 0x00213F)
+    assert (status &&& 0x40) != 0
+    refute bus.ppu.counter_latched?
+
+    assert {status, _bus, 6} = Bus.read(bus, 0x00213F)
+    refute (status &&& 0x40) != 0
+  end
+
+  test "CPU PPU reads latch after pending CPU clocks are synchronized", %{bus: bus} do
+    {bus, 60} = Bus.cpu_idle(bus, 10)
+    {_open_bus, bus, 6} = Bus.cpu_read(bus, 0x002137)
+
+    assert bus.timing.hclock == 60
+    assert Bus.cpu_pending_clocks(bus) == 6
+    assert bus.ppu.latched_hcounter == 15
+    assert bus.ppu.latched_vcounter == 0
+  end
+
   test "WRAM data port auto-increments its 17-bit address", %{bus: bus} do
     {bus, 6} = Bus.write(bus, 0x002181, 0xFE)
     {bus, 6} = Bus.write(bus, 0x002182, 0xFF)
@@ -326,6 +610,29 @@ defmodule Beamicom.SNES.BusTest do
     ppu = bus.ppu |> Beamicom.SNES.PPU.write(0x2116, 0) |> Beamicom.SNES.PPU.write(0x2117, 0)
     assert {0xAA, ppu} = Beamicom.SNES.PPU.read(ppu, 0x2139, 0)
     assert {0xBB, _ppu} = Beamicom.SNES.PPU.read(ppu, 0x213A, 0)
+  end
+
+  test "reverse DMA preserves PPU read side effects between bytes", %{bus: bus} do
+    bus =
+      Enum.reduce([0x12, 0x34, 0x56, 0x78], bus, fn value, bus ->
+        {bus, 6} = Bus.write(bus, 0x002104, value)
+        bus
+      end)
+
+    {bus, 6} = Bus.write(bus, 0x002102, 0)
+    {bus, 6} = Bus.write(bus, 0x002103, 0)
+    {bus, 6} = Bus.write(bus, 0x004300, 0x80)
+    {bus, 6} = Bus.write(bus, 0x004301, 0x38)
+    {bus, 6} = Bus.write(bus, 0x004302, 0)
+    {bus, 6} = Bus.write(bus, 0x004303, 0)
+    {bus, 6} = Bus.write(bus, 0x004304, 0x7E)
+    {bus, 6} = Bus.write(bus, 0x004305, 2)
+    {bus, 6} = Bus.write(bus, 0x004306, 0)
+    {bus, 6} = Bus.write(bus, 0x00420B, 1)
+
+    assert Bus.peek(bus, 0x7E0000) == 0x12
+    assert Bus.peek(bus, 0x7E0001) == 0x34
+    assert bus.ppu.oam_internal_address == 2
   end
 
   test "exposes the CPU multiplication and division result registers", %{bus: bus} do
@@ -385,6 +692,8 @@ defmodule Beamicom.SNES.BusTest do
       bus
     end)
   end
+
+  defp pixel_at(frame_data, x, y), do: binary_part(frame_data, (y * 256 + x) * 3, 3)
 
   defp read_cx4(bus, address, bytes) do
     Enum.reduce(0..(bytes - 1), 0, fn index, value ->

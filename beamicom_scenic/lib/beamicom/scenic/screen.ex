@@ -29,6 +29,10 @@ defmodule Beamicom.Scenic.Component.GameSurface do
     key_right: :right,
     key_x: :a,
     key_z: :b,
+    key_s: :x,
+    key_a: :y,
+    key_q: :l,
+    key_w: :r,
     key_enter: :start,
     key_rightshift: :select
   }

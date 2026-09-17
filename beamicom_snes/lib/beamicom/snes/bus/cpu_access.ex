@@ -23,7 +23,9 @@ defmodule Beamicom.SNES.Bus.CPUAccess do
     quote do
       cpu_bus = unquote(bus)
       clocks = 6
-      {%{cpu_bus | cpu_pending_clocks: cpu_bus.cpu_pending_clocks + clocks}, clocks}
+      {clock_counters, _open_bus} = cpu_bus.runtime
+      :ok = :counters.add(clock_counters, 1, clocks)
+      {cpu_bus, clocks}
     end
   end
 
@@ -31,7 +33,9 @@ defmodule Beamicom.SNES.Bus.CPUAccess do
     quote do
       cpu_bus = unquote(bus)
       clocks = unquote(cycles) * 6
-      {%{cpu_bus | cpu_pending_clocks: cpu_bus.cpu_pending_clocks + clocks}, clocks}
+      {clock_counters, _open_bus} = cpu_bus.runtime
+      :ok = :counters.add(clock_counters, 1, clocks)
+      {cpu_bus, clocks}
     end
   end
 

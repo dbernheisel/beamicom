@@ -1,4 +1,4 @@
-// On-screen NES controller plus browser Gamepad API support. Pointer events unify
+// On-screen controller plus browser Gamepad API support. Pointer events unify
 // mouse + touch; physical USB/Bluetooth gamepads are polled once per animation
 // frame because the browser API does not emit individual button events.
 const SVG_BUTTONS = {
@@ -26,6 +26,10 @@ function physicalButtons(gamepad) {
   if (pressed(gamepad, 15) || horizontal > DEAD_ZONE) buttons.add("right")
   if (pressed(gamepad, 0)) buttons.add("a")
   if (pressed(gamepad, 1)) buttons.add("b")
+  if (pressed(gamepad, 2)) buttons.add("x")
+  if (pressed(gamepad, 3)) buttons.add("y")
+  if (pressed(gamepad, 4)) buttons.add("l")
+  if (pressed(gamepad, 5)) buttons.add("r")
   if (pressed(gamepad, 8)) buttons.add("select")
   if (pressed(gamepad, 9)) buttons.add("start")
 

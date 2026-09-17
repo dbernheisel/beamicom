@@ -15,7 +15,6 @@ defmodule Beamicom.Scenic.SNESSystem do
   @buttons ~w(up down left right a b x y l r start select)a
   @frame_rate 60.0988
   @period_ns round(1_000_000_000 / @frame_rate)
-  @width 256
   @height 224
   @audio_rate 32_000
   @compile {:no_warn_undefined, Beamicom.SNES.Nx.DSPRenderer}
@@ -44,11 +43,13 @@ defmodule Beamicom.Scenic.SNESSystem do
   def id, do: :snes
 
   @impl true
-  def capabilities do
+  def capabilities(options \\ []) do
+    video = PPU.video_capabilities(options)
+
     %{
       media_extensions: [".sfc", ".smc"],
       input: InputCapabilities.new(%{1 => @buttons}),
-      video: %{width: @width, height: @height, pixel_formats: [:rgb24], frame_rate: @frame_rate},
+      video: video,
       audio: %{sample_rate: @audio_rate, channels: 2, sample_format: :s16le}
     }
   end
@@ -64,6 +65,11 @@ defmodule Beamicom.Scenic.SNESSystem do
     with {:ok, machine} <- Machine.load(media, options) do
       {:ok, %State{machine: machine}}
     end
+  end
+
+  @doc "Wraps a restored SNES machine for the shared host runtime."
+  def restore(%Machine{} = machine) do
+    {:ok, %State{machine: machine, frame_number: machine.bus.ppu.frame_number}}
   end
 
   @impl true
@@ -99,8 +105,8 @@ defmodule Beamicom.Scenic.SNESSystem do
     %VideoFrame{
       system: :snes,
       number: frame.number,
-      width: @width,
-      height: @height,
+      width: frame.width,
+      height: min(frame.height, @height),
       pixel_format: :rgb24,
       data: normalize_frame(frame),
       duration_ns: @period_ns,
@@ -125,6 +131,6 @@ defmodule Beamicom.Scenic.SNESSystem do
       else: :native
   end
 
-  defp normalize_frame(%{width: @width, height: height, data: data}) when height >= @height,
-    do: binary_part(data, 0, @width * @height * 3)
+  defp normalize_frame(%{width: width, height: height, data: data}) when height >= @height,
+    do: binary_part(data, 0, width * @height * 3)
 end

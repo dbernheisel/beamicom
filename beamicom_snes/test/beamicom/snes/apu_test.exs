@@ -96,7 +96,7 @@ defmodule Beamicom.SNES.APUTest do
 
     assert apu.spc.pc in [0x0203, 0x0205]
     assert apu.spc.error == nil
-    assert :array.get(0x0200, apu.spc.ram) == 0x8F
+    assert APU.RAM.get(apu.spc.ram, 0x0200) == 0x8F
   end
 
   test "accumulates the independent NTSC audio timeline without per-clock stepping" do
@@ -104,6 +104,7 @@ defmodule Beamicom.SNES.APUTest do
     apu = APU.advance(APU.new(), 945_000, :ntsc)
     assert apu.pending_frames == 1_408
     assert apu.pending_spc_cycles == 45_056
+    assert Enum.all?(apu.pending_pcm, &Enum.all?(&1, fn sample -> is_integer(sample) end))
 
     assert {45_056, apu} = APU.take_spc_cycles(apu)
     assert apu.pending_spc_cycles == 0
@@ -150,6 +151,35 @@ defmodule Beamicom.SNES.APUTest do
     assert tail_frames > 0
     assert byte_size(tail_pcm) == tail_frames * 4
     assert async.dsp_task == nil
+  end
+
+  test "async DSP synthesis retains echo RAM writes enabled during the batch" do
+    program = [0x8F, 0x7D, 0xF2, 0x8F, 0x01, 0xF3, 0xFF]
+
+    ram =
+      program
+      |> Enum.with_index()
+      |> Enum.map(fn {value, address} -> {address, value} end)
+      |> spc_ram()
+
+    spc = SPC700.new(ram, 0)
+    sync = %{APU.new() | ram: ram, spc: spc, ipl_state: :running}
+    async = %{sync | async_dsp?: true}
+    clocks = 100_000
+
+    sync = APU.advance(sync, clocks, :ntsc)
+    async = APU.advance(async, clocks, :ntsc)
+    assert %DSPTask{} = async.dsp_task
+
+    {sync_frames, sync_pcm, sync} = APU.drain_pcm(sync)
+    {async_frames, async_pcm, async} = APU.drain_pcm(async)
+
+    assert async_frames == sync_frames
+    assert async_pcm == sync_pcm
+    assert async.spc.dsp == sync.spc.dsp
+    assert async.ram == sync.ram
+    assert async.spc.ram == sync.spc.ram
+    assert :array.get(0, async.ram) == 0
   end
 
   if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer) do
@@ -360,9 +390,10 @@ defmodule Beamicom.SNES.APUTest do
   end
 
   test "SPC SLEEP and STOP consume their hardware bus sequence" do
-    for opcode <- [0xEF, 0xFF] do
+    for {opcode, sleeping?, stopped?} <- [{0xEF, true, false}, {0xFF, false, true}] do
       spc = SPC700.new(spc_ram([{0, opcode}]), 0) |> SPC700.run(1)
-      assert spc.stopped?
+      assert spc.sleeping? == sleeping?
+      assert spc.stopped? == stopped?
       assert spc.pc == 1
       assert spc.cycles == 7
     end
@@ -405,6 +436,7 @@ defmodule Beamicom.SNES.APUTest do
         |> DSP.write(0x02, 0x00)
         |> DSP.write(0x03, 0x10)
         |> DSP.write(0x04, 0x00)
+        |> DSP.write(0x07, 0x7F)
         |> DSP.write(0x0C, 0x7F)
         |> DSP.write(0x1C, 0x7F)
         |> DSP.write(0x5D, 0x01)
@@ -413,23 +445,25 @@ defmodule Beamicom.SNES.APUTest do
       {dsp, ram}
     end
 
-    {ended, ram} = configure.(0x11)
-    {ended, pcm} = DSP.render(ended, ram, 20)
+    {ended, ram} = configure.(0x10)
+    ram = :array.set(0x209, 0x11, ram)
+    ram = Enum.reduce(0x20A..0x211, ram, fn address, ram -> :array.set(address, 0x77, ram) end)
+    {ended, pcm} = DSP.render(ended, ram, 40)
     refute pcm == :binary.copy(<<0>>, byte_size(pcm))
-    refute elem(ended.voices, 0).active?
+    refute DSP.voice(ended, 0).active?
     assert DSP.read(ended, 0x7C) == 1
 
     {looping, ram} = configure.(0x13)
-    {looping, _pcm} = DSP.render(looping, ram, 20)
-    assert elem(looping.voices, 0).active?
+    {looping, _pcm} = DSP.render(looping, ram, 21)
+    assert DSP.voice(looping, 0).active?
     assert DSP.read(looping, 0x7C) == 1
 
-    {restarted, _pcm} = looping |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 1)
+    {restarted, _pcm} = looping |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 3)
     assert DSP.read(restarted, 0x7C) == 0
   end
 
   if Code.ensure_loaded?(Beamicom.SNES.Nx.DSPRenderer) do
-    test "Nx DSP block mixing is bit-identical to the native mixer" do
+    test "Nx-selected DSP rendering is bit-identical to native" do
       ram =
         Enum.reduce(
           [{0x100, 0x00}, {0x101, 0x02}, {0x102, 0x00}, {0x103, 0x02}, {0x200, 0x13}],
@@ -452,6 +486,7 @@ defmodule Beamicom.SNES.APUTest do
           |> DSP.write(base + 2, index * 0x21)
           |> DSP.write(base + 3, 0x10)
           |> DSP.write(base + 4, 0)
+          |> DSP.write(base + 7, 0x7F)
         end)
         |> DSP.write(0x0C, 0x71)
         |> DSP.write(0x1C, 0x9B)
@@ -490,28 +525,29 @@ defmodule Beamicom.SNES.APUTest do
       |> DSP.write(0x02, 0x00)
       |> DSP.write(0x03, 0x10)
       |> DSP.write(0x04, 0x00)
+      |> DSP.write(0x07, 0x7F)
       |> DSP.write(0x5D, 0x01)
       |> DSP.write(0x4C, 0x01)
       |> DSP.write(0x4C, 0x00)
 
     {not_started, _pcm} = DSP.render(dsp, ram, 1)
-    refute elem(not_started.voices, 0).active?
+    refute DSP.voice(not_started, 0).active?
 
-    {started, _pcm} = dsp |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 1)
-    assert elem(started.voices, 0).active?
+    {started, _pcm} = dsp |> DSP.write(0x4C, 0x01) |> DSP.render(ram, 2)
+    assert DSP.voice(started, 0).active?
 
     # If KON and KOFF are sampled together, KON wins for that boundary. KOFF
-    # remains set, though, and stops the voice at the following boundary.
+    # remains set, though, and releases the voice after the KON startup delay.
     {keyed_again, _pcm} =
       started
       |> DSP.write(0x5C, 0x01)
       |> DSP.write(0x4C, 0x01)
       |> DSP.render(ram, 1)
 
-    assert elem(keyed_again.voices, 0).active?
+    assert DSP.voice(keyed_again, 0).active?
 
-    {stopped, _pcm} = DSP.render(keyed_again, ram, 1)
-    refute elem(stopped.voices, 0).active?
+    {stopped, _pcm} = DSP.render(keyed_again, ram, 4)
+    refute DSP.voice(stopped, 0).active?
     assert DSP.read(stopped, 0x5C) == 0x01
   end
 
@@ -535,6 +571,7 @@ defmodule Beamicom.SNES.APUTest do
       |> DSP.write(0x02, 0x00)
       |> DSP.write(0x03, 0x10)
       |> DSP.write(0x04, 0x00)
+      |> DSP.write(0x07, 0x7F)
       |> DSP.write(0x0C, 0x7F)
       |> DSP.write(0x1C, 0x7F)
       |> DSP.write(0x5D, 0x01)
@@ -543,14 +580,29 @@ defmodule Beamicom.SNES.APUTest do
     spc = %{SPC700.new(ram, 0) | dsp: dsp}
     apu = %{APU.new() | ram: ram, spc: spc, ipl_state: :running}
 
-    # PAL needs 666 master clocks to cross one 32 kHz sample boundary.
-    apu = APU.advance(apu, 666, :pal)
+    # PAL needs 666 master clocks to cross one 32 kHz sample boundary. KON is
+    # first sampled by the alternating key poll, then spends five samples in
+    # startup, and the staggered voice bus publishes on the following sample.
+    apu = APU.advance(apu, 5_994, :pal)
     apu = put_in(apu.spc.dsp, DSP.write(apu.spc.dsp, 0x6C, 0x40))
     apu = APU.advance(apu, 666, :pal)
 
-    assert {2, <<first::binary-size(4), second::binary-size(4)>>, _apu} = APU.take_pcm(apu)
-    refute first == <<0, 0, 0, 0>>
+    assert {10, <<first::binary-size(36), second::binary-size(4)>>, _apu} = APU.take_pcm(apu)
+    refute first == :binary.copy(<<0>>, 36)
     assert second == <<0, 0, 0, 0>>
+  end
+
+  test "snapshot observes async DSP work without consuming the runtime task" do
+    apu = APU.new(native_ipl: true, async_dsp: true) |> APU.advance(30_000, :ntsc)
+    task = apu.dsp_task
+    assert %DSPTask{} = task
+
+    snapshot = APU.snapshot(apu)
+    assert snapshot.dsp_task == nil
+    assert snapshot.pending_frames == 0
+    assert snapshot.pending_pcm == []
+
+    assert {_dsp, _ram, _phase, _frames, _pcm} = DSPTask.await(task)
   end
 
   defp spc_ram(bytes) do

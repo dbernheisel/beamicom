@@ -22,10 +22,10 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert Process.alive?(pid)
   end
 
-  test "does not add a default startup delay" do
+  test "keeps a small default startup reserve" do
     pid = start_supervised!({AudioSink, command: @discard_command, name: :buffered_audio_sink})
 
-    assert %{ready?: true, prebuffer_frames: 0} = :sys.get_state(pid)
+    assert %{ready?: false, prebuffer_frames: 1_764} = :sys.get_state(pid)
   end
 
   test "scales signed 16-bit PCM independently of channel layout" do
@@ -109,6 +109,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
          command: @discard_command,
          name: :test_gbc_audio_sink,
          output: output,
+         prebuffer_ms: 0,
          audio: %{sample_rate: 44_100, channels: 2, sample_format: :s16le}}
       )
 
@@ -125,6 +126,8 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     :sys.get_state(output)
     :sys.get_state(pid)
     assert Process.alive?(pid)
+    assert Map.has_key?(:sys.get_state(output).audio, pid)
+    refute MapSet.member?(:sys.get_state(output).latest_audio_subscribers, pid)
   end
 
   test "prebuffers typed 32 kHz stereo chunks from the SNES host output" do

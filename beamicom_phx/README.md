@@ -113,8 +113,8 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
   unmuted on first key/pointer press (browsers block autoplay audio).
 - **Controller** — keyboard bindings, an on-screen touch gamepad, and physical
   USB/Bluetooth controllers through the browser Gamepad API. The first connected
-  physical controller uses its standard D-pad/left stick, A/B, Select, and Start
-  mapping. In client mode, input is relayed to the server selected by
+  physical controller uses its standard D-pad/left stick, A/B/X/Y, L/R, Select,
+  and Start mapping. In client mode, input is relayed to the server selected by
   `BEAMICOM_SERVER_URL`. Player 1 remains local to the server; the first connected
   client becomes Player 2 for NES. Game Boy has one controller, so browser
   inputs are aggregated into Player 1 and a disconnected browser releases only
@@ -125,6 +125,10 @@ Phoenix UI, browser controls, WebRTC signaling/sink, and client relay.
 | Arrow keys | D-pad |
 | X | A |
 | Z | B |
+| S | X |
+| A | Y |
+| Q | L |
+| W | R |
 | Enter | Start |
 | Shift | Select |
 

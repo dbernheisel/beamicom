@@ -35,6 +35,33 @@ can be run with:
 mix test --include conformance test/beamicom/snes/conformance_rom_test.exs
 ```
 
+## Local installation
+
+Download the four unmodified `.sfc` files named in `SHA256SUMS` from the source
+mirror at the pinned commit above. Copy them into this directory without
+renaming them, then verify their bytes before running the emulator:
+
+```console
+cd test/fixtures/snes_conformance/blargg-spc-6
+shasum -a 256 -c SHA256SUMS
+```
+
+No download command is embedded here because the upstream repository does not
+state a license for these binaries. Installing them is an explicit local
+choice; `.gitignore` prevents accidental commits of the ROMs.
+
+Run the fixture-status tests with trace output to get one unambiguous result per
+ROM:
+
+```console
+mix test --trace test/beamicom/snes/blargg_spc_fixture_status_test.exs
+```
+
+- `pass` means the fixture exists and its SHA-256 matches.
+- `fail` means the installed bytes do not match the recorded upstream hash.
+- `skipped: fixture missing` means that ROM was not installed; it is not a
+  conformance pass.
+
 The tagged checks boot all four ROMs, exercise both processors, and verify that
 none reaches Blargg's red failure screen through the bounded 120-frame
 checkpoint. They also assert the explicit blue success screen for the finite

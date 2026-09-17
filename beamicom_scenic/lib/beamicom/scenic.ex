@@ -7,6 +7,7 @@ defmodule Beamicom.Scenic do
 
       Beamicom.Scenic.play("roms/game.nes")
       Beamicom.Scenic.play("roms/game.nes", video_filter: :composite, scale: 1)
+      Beamicom.Scenic.play("roms/game.sfc", video_filter: :composite, scale: 1)
       Beamicom.Scenic.play("roms/game.gbc", video_filter: :pixel_transparency, scale: 4)
   """
 
@@ -28,7 +29,7 @@ defmodule Beamicom.Scenic do
   NTSC filter), positive `:speed` (default 1.0), `:audio` (default true),
   integer `:volume` from 0 through 100 (default 100), `:audio_command` for
   overriding the external player, `:audio_prebuffer_ms` for an optional initial
-  PCM reserve (default 0), and core-specific
+  PCM reserve (default 40 ms), and core-specific
   `:load_options`. Scale is normally an integer; the Game Boy Pixel Transparency
   filter also accepts fractional values greater than one. When persisted integer
   scaling is enabled, the viewport chooses the largest complete native-size stage
@@ -37,6 +38,9 @@ defmodule Beamicom.Scenic do
   NES accepts a runtime `:video_filter` of `:native`, `:composite`, `:svideo`,
   `:rgb`, or `:monochrome`. Pass Blargg filter setup overrides with
   `:video_filter_options`.
+
+  SNES accepts the same Blargg presets and setup overrides. Its filtered
+  presentation is 602 pixels wide with doubled scanlines for square pixels.
 
   Game Boy and Game Boy Color accept `:pixel_transparency`; `:native` selects
   the default nearest-neighbor presentation scaler. Shader overrides use

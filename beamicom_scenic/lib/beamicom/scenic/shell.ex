@@ -163,6 +163,11 @@ defmodule Beamicom.Scenic.Shell do
     {:noreply, set_video_filter(scene, :gbc, :gbc_video_filter, value, "GBC filter")}
   end
 
+  def handle_event({:menu_action, {:snes_video_filter, value}}, _from, scene)
+      when value in [:none, :composite, :svideo, :rgb, :monochrome] do
+    {:noreply, set_video_filter(scene, :snes, :snes_video_filter, value, "SNES filter")}
+  end
+
   def handle_event({:menu_action, :nes_remove_sprite_limit}, _from, scene) do
     {:noreply,
      set_nes_enhancement(
@@ -971,7 +976,7 @@ defmodule Beamicom.Scenic.Shell do
 
   defp menu_data(width, session, settings) do
     session? = session == true or is_map(session)
-    state_actions? = session == true or get_in(session, [:status, :system]) in [:nes, :gbc]
+    state_actions? = session == true or get_in(session, [:status, :system]) in [:nes, :gbc, :snes]
 
     %{
       width: width - 88,
@@ -1090,6 +1095,7 @@ defmodule Beamicom.Scenic.Shell do
   defp setting_value(:composite), do: "Composite"
   defp setting_value(:svideo), do: "S-Video"
   defp setting_value(:rgb), do: "RGB"
+  defp setting_value(:monochrome), do: "Monochrome"
   defp setting_value(:pixel_transparency), do: "pixel transparency"
   defp setting_value(true), do: "on"
   defp setting_value(false), do: "off"

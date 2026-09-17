@@ -3,6 +3,7 @@ defmodule Beamicom.Scenic.SaveState do
 
   alias Beamicom.GB.ShareImage, as: GBShareImage
   alias Beamicom.NES.ShareImage, as: NESShareImage
+  alias Beamicom.SNES.ShareImage, as: SNESShareImage
 
   @spec rom_hash(:nes | :gbc | :snes, struct()) :: String.t()
   def rom_hash(:nes, %{bus: %{prg: prg, ppu: %{chr: chr}}})
@@ -56,6 +57,9 @@ defmodule Beamicom.Scenic.SaveState do
 
   def write({:gbc, machine, frame}, path) when is_binary(path),
     do: write_file(path, fn -> GBShareImage.to_png(machine, frame) end)
+
+  def write({:snes, machine, frame}, path) when is_binary(path),
+    do: write_file(path, fn -> SNESShareImage.to_png(machine, frame) end)
 
   defp write_file(path, encode) do
     case File.write(path, encode.()) do

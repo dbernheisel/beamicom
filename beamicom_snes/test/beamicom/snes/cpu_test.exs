@@ -3,7 +3,7 @@ defmodule Beamicom.SNES.CPUTest do
 
   import Bitwise
 
-  alias Beamicom.SNES.{CPU, Machine}
+  alias Beamicom.SNES.{Bus, CPU, Machine}
   alias Beamicom.SNESTestROM
 
   test "resets in emulation mode through the mapped reset vector" do
@@ -122,6 +122,28 @@ defmodule Beamicom.SNES.CPUTest do
     assert cpu.instructions > 4
   end
 
+  test "deferred execution batches an absolute WRAM nonzero polling loop" do
+    program = <<0xAD, 0x10, 0x00, 0xD0, 0xFB>>
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: program))
+    bus = %{machine.bus | wram: :array.set(0x10, 1, machine.bus.wram)}
+
+    assert {:ok, cpu, bus} = CPU.step_deferred(machine.cpu, bus)
+    assert {:ok, cpu, bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8000
+    assert cpu.instructions == 2
+
+    assert {:ok, cpu, bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8000
+    assert cpu.instructions > 2
+    assert Bus.cpu_master_clocks(bus) <= 1364
+
+    bus = %{bus | wram: :array.set(0x10, 0, bus.wram)}
+    assert {:ok, cpu, _bus} = CPU.step_deferred(cpu, bus)
+    assert cpu.pc == 0x8003
+    assert (cpu.a &&& 0xFF) == 0
+    assert (cpu.p &&& 0x02) != 0
+  end
+
   test "runs a tight loop to a PPU frame and drains synchronized audio" do
     {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x80, 0xFE>>))
 
@@ -135,6 +157,15 @@ defmodule Beamicom.SNES.CPUTest do
     assert {457, pcm, machine} = Machine.take_audio_pcm(machine)
     assert byte_size(pcm) == 457 * 4
     assert machine.bus.apu.pending_frames == 0
+  end
+
+  test "frame execution preserves the instruction limit and synchronizes the CPU clock" do
+    {:ok, machine} = Machine.load(SNESTestROM.build(:lorom, program: <<0x80, 0xFE>>))
+
+    assert {:error, :frame_timeout, machine} = Machine.run_until_frame(machine, 1)
+    assert machine.cpu.instructions == 1
+    assert machine.cpu.pc == 0x8000
+    assert machine.cpu.master_clocks == Bus.cpu_master_clocks(machine.bus)
   end
 
   test "MVN copies A plus one bytes and updates the data bank" do

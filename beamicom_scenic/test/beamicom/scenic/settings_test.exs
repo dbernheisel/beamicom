@@ -20,6 +20,7 @@ defmodule Beamicom.Scenic.SettingsTest do
         nes_lighting: true,
         nes_remove_sprite_limit: true,
         nes_trim_borders: true,
+        snes_video_filter: :monochrome,
         gbc_video_filter: :pixel_transparency,
         integer_scaling: false,
         audio: false,
@@ -30,12 +31,13 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert {:ok, ^settings} = Settings.load(path)
 
     decoded = path |> File.read!() |> :json.decode()
-    assert decoded["version"] == 3
+    assert decoded["version"] == 4
     assert decoded["recent_roms"] == ["/roms/Metroid.nes", "/roms/Tetris.gb"]
     assert decoded["nes_video_filter"] == "svideo"
     assert decoded["nes_lighting"] == true
     assert decoded["nes_remove_sprite_limit"] == true
     assert decoded["nes_trim_borders"] == true
+    assert decoded["snes_video_filter"] == "monochrome"
     assert decoded["gbc_video_filter"] == "pixel_transparency"
     assert decoded["integer_scaling"] == false
     assert decoded["audio"] == false
@@ -53,11 +55,15 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert settings.nes_lighting == false
     assert settings.nes_remove_sprite_limit == false
     assert settings.nes_trim_borders == false
+    assert settings.snes_video_filter == :none
     assert settings.gbc_video_filter == :none
     assert settings.volume == 100
 
     File.write!(path, ~s({"nes_video_filter":"crt-magic"}))
     assert {:error, {:invalid_setting, :nes_video_filter}} = Settings.load(path)
+
+    File.write!(path, ~s({"snes_video_filter":"crt-magic"}))
+    assert {:error, {:invalid_setting, :snes_video_filter}} = Settings.load(path)
 
     File.write!(path, "not json")
     assert {:error, :invalid_json} = Settings.load(path)
@@ -67,6 +73,7 @@ defmodule Beamicom.Scenic.SettingsTest do
     settings = %{
       Settings.defaults()
       | nes_video_filter: :composite,
+        snes_video_filter: :svideo,
         nes_lighting: true,
         nes_remove_sprite_limit: true,
         audio: false,
@@ -75,6 +82,8 @@ defmodule Beamicom.Scenic.SettingsTest do
 
     assert Settings.next_nes_video_filter(:none) == :composite
     assert Settings.next_nes_video_filter(:rgb) == :none
+    assert Settings.next_snes_video_filter(:none) == :composite
+    assert Settings.next_snes_video_filter(:monochrome) == :none
     assert Settings.next_gbc_video_filter(:none) == :pixel_transparency
     assert Settings.next_gbc_video_filter(:pixel_transparency) == :none
 
@@ -105,8 +114,11 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert explicit[:enhancements] == [unlimited_sprites: false]
 
     snes_options = Settings.player_options(:snes, [], settings)
+    assert snes_options[:video_filter] == :svideo
     assert snes_options[:audio] == false
     assert snes_options[:volume] == 40
+
+    assert Settings.player_options(:snes, [video_filter: :rgb], settings)[:video_filter] == :rgb
   end
 
   test "volume must be an integer percentage" do

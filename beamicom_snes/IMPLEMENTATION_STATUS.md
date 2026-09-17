@@ -26,12 +26,12 @@ The audit describes the current source, not a cycle-accuracy claim.
 | W65C816S CPU | **256/256 opcode bytes**, 92/92 mnemonics | Addressing carry/wrap and cycle rules; broader conformance validation |
 | Interrupts | NMI/IRQ/BRK/COP entry, WAI wakeup, and RTI implemented | ABORT/reset sequencing and instruction-boundary IRQ quirks |
 | PPU MMIO | Most write paths from `$2100-$2133`; selected reads | OAM/VRAM read semantics, counters/status, hires/interlace, raster timing |
-| PPU modes | Native paths for modes 0-7; modes 2-6 are partial | OPT, true/pseudo-hires, interlace pixels, OBJ edge cases |
+| PPU modes | Native paths for modes 0-7, including OPT and Mode 5/6 hires fetch | Native 512-wide output, field weaving, OBJ edge cases |
 | SPC700 | **256/256 opcode bytes**, lightly validated | Exact instruction/MMIO timing and conformance tests; fragmented-cycle debt is handled |
-| S-SMP | Ports, native IPL execution, timers, DSP address/data mostly present | TEST semantics, timer phase, DSPDATA write behavior, port collision timing |
-| S-DSP | Basic eight-voice BRR playback, stereo mixing, and register-event-ordered output | ADSR/GAIN, interpolation, PMON/noise, echo/FIR |
+| S-SMP | Ports, native IPL execution, timers, MMIO opcode fetch, timed DSP/RAM visibility, distinct SLEEP/STOP | TEST speed-control wait states, CPU/APU port collision tie ordering, broader instruction bus-sequence validation |
+| S-DSP | Single clocked eight-voice BRR pipeline with ADSR/GAIN, Gaussian interpolation, PMON/noise, echo/FIR, and live ENVX/OUTX/ENDX state | Further reference-emulator validation of exact per-phase collision behavior |
 | Cartridge coprocessors | **Partial Cx4, SuperFX, DSP-1, and SA-1** | Remaining chip commands, cycle-level arbitration, DSP-1 busy timing/ROM dump, and the SA-1 CPU/DMA scheduler |
-| Nx/EXLA | Optimized subsets of Mode 1 and Mode 7; batched eight-voice S-DSP stereo mixing | Broader fused PPU kernels; BRR decoding remains native because of its sample-history recurrence |
+| Nx/EXLA | Optimized subsets of Mode 1 and Mode 7; the APU renderer option currently preserves the authoritative native phase pipeline | Broader fused PPU kernels; port DSP spans only after full state/RAM parity is proven |
 
 ## W65C816S CPU instruction inventory
 
@@ -108,33 +108,33 @@ and IRQ polling-delay quirks around CLI/SEI/PLP/RTI.
 ## PPU register inventory
 
 Unhandled PPU writes fall through unchanged at
-[`ppu.ex:385`](lib/beamicom/snes/ppu.ex#L385); unhandled reads return open-bus
-data at [`ppu.ex:397`](lib/beamicom/snes/ppu.ex#L397).
+[`ppu.ex:493`](lib/beamicom/snes/ppu.ex#L493); unhandled reads return open-bus
+data at [`ppu.ex:579`](lib/beamicom/snes/ppu.ex#L579).
 
 | Register | Status | Implemented behavior and gaps |
 |---|---|---|
-| `$2100` INIDISP | Partial | Forced blank and brightness work. Mid-scanline changes are preserved only when scanline-state capture is enabled. |
-| `$2101` OBSEL | Partial | Base/name selection, palette, priority, flips, and six square size pairs work. Rectangular size modes 6/7 and OBJ interlace do not. |
-| `$2102-$2104` OAMADD/OAMDATA | Partial | Word addressing, low-table write latch/pair commit, high-table mirroring, vblank reset, and priority rotation work. Active-display behavior and exact internal-address rotation updates remain. |
+| `$2100` INIDISP | Implemented | Forced blank and brightness work, including mid-scanline output-state transitions. Register-specific pixel-pipeline propagation delays remain approximate. |
+| `$2101` OBSEL | Implemented | Base/name selection, palette, priority, flips, all square size pairs, and rectangular size modes 6/7 work. |
+| `$2102-$2104` OAMADD/OAMDATA | Partial | Word addressing, low-table write latch/pair commit, high-table mirroring, vblank reset, and internal-address priority rotation work. Active-display writes are suppressed instead of redirected to the exact live fetch address. |
 | `$2105` BGMODE | Partial | Mode and priority tables exist for modes 0-7; mode-specific gaps are listed below. |
-| `$2106` MOSAIC | Implemented | Native 1x1 through 16x16 screen-aligned sampling, independent BG enables, scanline-state persistence, and Mode 7 EXTBG split-axis behavior. Exact mid-block size changes remain approximate. Active mosaic currently selects native fallback. |
+| `$2106` MOSAIC | Implemented | Native 1x1 through 16x16 sampling, vertical phase reload, independent BG enables, scanline-state persistence, and Mode 7 EXTBG split-axis behavior. Mid-scanline reload begins at the next represented scanline. Active mosaic selects native fallback. |
 | `$2107-$210A` BGnSC | Implemented | Basic tilemap bases and sizes. |
 | `$210B-$210C` BGnNBA | Implemented | Basic character-data bases. |
-| `$210D-$2114` BGnHOFS/BGnVOFS | Partial | Scroll and shared Mode 7 latch work. OPT and pixel/dot-granular raster effects do not. |
-| `$2115-$2119` VMAIN/VMADD/VMDATA | Partial | Increment and remap work. VRAM prefetch/read buffer, access restrictions, and exact open-bus behavior do not. |
-| `$211A-$2120` M7SEL/matrix/center | Implemented | Matrix writes, multiply result, affine flips/repeat/fill, and tile-zero fill. Rendering remains scanline/frame-granular. |
-| `$2121-$2122` CGADD/CGDATA | Partial | 15-bit palette reads/writes work. Active-display restrictions and open-bus high-bit details do not. |
+| `$210D-$2114` BGnHOFS/BGnVOFS | Implemented | Shared scroll-latch behavior, Mode 7 latch, Modes 2/4/6 offset-per-tile, and mid-scanline output-state transitions work. Fetch lookahead and register-specific propagation delays remain approximate. |
+| `$2115-$2119` VMAIN/VMADD/VMDATA | Implemented | Increment/remap, VRAM read buffering/prefetch, and display-period access restrictions work. |
+| `$211A-$2120` M7SEL/matrix/center | Implemented | Matrix writes, multiply result, affine flips/repeat/fill, tile-zero fill, and mid-scanline output-state transitions work. |
+| `$2121-$2122` CGADD/CGDATA | Partial | 15-bit palette access, shared byte phase, retained write latch, and access windows work. Active-display writes are suppressed instead of redirected to the exact live fetch address. |
 | `$2123-$212B` windows | Implemented | Layer selection, positions, and OR/AND/XOR/XNOR combination. |
 | `$212C-$212F` screen designation | Implemented | Main/sub screen and their window masks. |
-| `$2130-$2132` color math | Partial | Add/subtract, fixed color, subscreen, direct color, and window paths exist. Native OBJ palette gating and add-half saturation order are inaccurate. |
-| `$2133` SETINI | Partial | Interlace timing, overscan, and EXTBG are stored. Pseudo-hires, OBJ interlace, external sync, and interlaced pixels are absent. |
+| `$2130-$2132` color math | Implemented | Add/subtract, correct add-half ordering, fixed color, subscreen fallback, direct color, OBJ palette gating, windows, and mid-scanline transitions work. |
+| `$2133` SETINI | Partial | Screen/OBJ interlace, overscan, pseudo-hires, and EXTBG are stored. OBJ and Mode 5/6 addressing select field-aware rows. Pseudo-hires is downsampled by averaging each sub/main pair into the compatible 256-wide frame; true 512-wide and field-woven output and external sync remain absent. |
 | `$2134-$2136` MPY | Implemented | Mode 7 multiplication result. |
-| `$2137` SLHV | Missing | No H/V counter latch. |
-| `$2138` OAMDATAREAD | Partial | Reads and increments through low OAM and the mirrored high table. Display-time behavior and open-bus details remain. |
-| `$2139-$213A` VMDATAREAD | Partial | Reads exist without the required prefetch/buffer semantics. |
-| `$213B` CGDATAREAD | Partial | Basic read exists; latch/open-bus details are incomplete. |
-| `$213C-$213D` OPHCT/OPVCT | Missing | No latched H/V counter reads. |
-| `$213E-$213F` STAT77/STAT78 | Partial | Constant placeholders only; range/time-over, field, region, latch state, and distinct PPU open buses are absent. |
+| `$2137` SLHV | Implemented | Software H/V latch honors WRIO bit 7; `$4201` high-to-low transitions also latch the counters. |
+| `$2138` OAMDATAREAD | Partial | Reads, mirroring, increments, MDR behavior, and priority-rotation updates work. Active-display reads return open bus instead of the exact live fetch byte. |
+| `$2139-$213A` VMDATAREAD | Implemented | Required prefetch/read-buffer, increment, access-window, and PPU1 MDR behavior work. |
+| `$213B` CGDATAREAD | Partial | Shared byte phase, address increment, retained write latch, and PPU2 MDR bit 7 work. Active-display reads return open bus instead of the exact live fetch byte. |
+| `$213C-$213D` OPHCT/OPVCT | Implemented | Independent two-phase 9-bit counter reads preserve PPU2 MDR high bits and reset through `$213F`. |
+| `$213E-$213F` STAT77/STAT78 | Partial | PPU versions, distinct PPU1/PPU2 MDR behavior, OBJ range/time-over flags, field, region, and counter-latch state are implemented. Overflow timing is scanline-granular and rendering does not yet truncate after the 34th OBJ sliver. |
 
 ### Rendering modes and related features
 
@@ -142,23 +142,25 @@ data at [`ppu.ex:397`](lib/beamicom/snes/ppu.ex#L397).
 |---|---|
 | Mode 0 | Native four-layer 2bpp rendering, priorities, and palette partition implemented. |
 | Mode 1 | Native implemented, including BG3 priority. Nx supports a restricted 8x8-tile path. |
-| Mode 2 | Partial native 4bpp layers; BG3 offset-per-tile is missing. |
+| Mode 2 | Native 4bpp layers with BG3 horizontal/vertical offset-per-tile. |
 | Mode 3 | Native 8bpp BG1 + 4bpp BG2 and direct color implemented. |
-| Mode 4 | Partial native bit depths/priorities/direct color; offset-per-tile missing. |
-| Mode 5 | Partial 256-wide approximation; true 512-wide hires, 16x8 semantics, and vertical interlace resolution missing. |
-| Mode 6 | Partial native BG1/priorities; hires and offset-per-tile missing. |
-| Mode 7 | Native and Nx affine rendering, direct color, repeat/fill/flips, and EXTBG priorities implemented; no per-dot effects. |
+| Mode 4 | Native bit depths, priorities, direct color, and BG3 direction-selected offset-per-tile. |
+| Mode 5 | Native 512-pixel background fetch and 16x8/16x16 tile semantics; output is downsampled to the public 256-wide frame. Vertical interlace is field-selective rather than field-woven. |
+| Mode 6 | Native 512-pixel BG1 fetch, priorities, and BG3 offset-per-tile; output is downsampled to 256 pixels. |
+| Mode 7 | Native and Nx affine rendering, direct color, repeat/fill/flips, EXTBG priorities, and mid-scanline output-state transitions implemented. |
 | BG tiles | 2/4/8bpp decode, 8x8/16x16 groups, and tilemap sizes implemented. |
-| OBJ | 128 entries, 32 sprites/line, 4bpp palettes, flips, priorities, name selection, and priority rotation including scanline capture. Missing 34-sliver limit/flags, rectangular sizes, and interlace. |
+| OBJ | 128 entries, 32 sprites/line, 4bpp palettes, flips, priorities, name selection, rectangular sizes, priority rotation, field-aware OBJ interlace, and range/time-over flags. Rendering does not yet suppress slivers after the 34th fetched sliver. |
 | Windows/color math | Broadly implemented with the accuracy gaps above. |
 | Mosaic | Native implementation for modes 0-7; active mosaic currently falls back from Nx. |
-| Hires/pseudo-hires/interlaced pixels | Missing. |
+| Hires/pseudo-hires/interlaced pixels | Partial. Mode 5/6 use 512-pixel background addressing and even/odd sub/main samples, then average each pair into the public 256-wide frame. Pseudo-hires uses the same pair representation. OBJ and Mode 5/6 choose field-aware source rows. Native 512-wide and field-woven frame APIs are missing. |
 
 Timing includes NTSC/PAL scanline lengths, NTSC short and PAL long lines,
-vblank selection, NMI, and H/V IRQs. Missing or approximate pieces include the
-40-master-clock DRAM refresh stall, PPU access contention, CPU-written raster
-state capture, DMA byte-level timing, HDMA clocks/stalls, overscan-aware HDMA,
-and B-to-A read side effects.
+vblank selection, NMI, H/V IRQs, dot-positioned CPU-written raster segments,
+display-period PPU access windows, and B-to-A PPU read side effects. Missing or
+approximate pieces include the 40-master-clock DRAM refresh stall, exact live
+OAM/CGRAM fetch-address redirection, tile-fetch lookahead, register-specific
+pixel-pipeline delays, DMA byte-level timing, HDMA clocks/stalls, and
+overscan-aware HDMA.
 
 ## APU inventory
 
@@ -188,8 +190,8 @@ The dispatch starts at
 [`spc700.ex:80`](lib/beamicom/snes/spc700.ex#L80). Common load, store, ALU,
 read-modify-write, stack, and word operations now position their bus effects
 within the instruction so DSP writes and timer/MMIO reads carry a meaningful
-access-cycle timestamp. SLEEP and STOP cycle counts remain inaccurate, opcode
-fetch bypasses the MMIO-aware read path, other instruction bus sequences still
+access-cycle timestamp. Opcode fetch uses the MMIO-aware path, while SLEEP and
+STOP retain distinct halt/wake state. Other instruction bus sequences still
 need auditing, and the test suite is not exhaustive.
 
 ### SPC fragmented-cycle accounting
@@ -204,14 +206,14 @@ executes. Fragmented-versus-batched SPC and APU tests now cover this behavior.
 
 | Register | Status | Notes |
 |---|---|---|
-| `$F0` TEST | Missing | Clock scaling, RAM-write disable, and timer controls ignored. |
+| `$F0` TEST | Partial | RAM-write and timer/test gates are implemented. Address-sensitive CPU wait-state and separate timer speed scaling remain deferred. |
 | `$F1` CONTROL | Partial | Timer enables, input-port clear, and IPL visibility exist; enable resets stage two/output while preserving the free-running divider phase. Exact write-edge behavior remains lightly validated. |
 | `$F2` DSPADDR | Implemented | Address latch. |
-| `$F3` DSPDATA | Partial | Reads mask bit 7 and writes ignore addresses `$80-$FF`; exact access timing remains approximate. |
+| `$F3` DSPDATA | Implemented boundary | Reads mask bit 7, writes ignore `$80-$FF`, and access-time reads see phase-current DSP state. |
 | `$F4-$F7` CPUIO | Partial | Directional latches and clear controls work; same-cycle collision behavior absent. |
 | `$F8-$F9` AUX | Implemented | Auxiliary RAM values. |
-| `$FA-$FC` timer targets | Partial | Zero-as-256 works; write-only read behavior is inaccurate. |
-| `$FD-$FF` timer outputs | Partial | Four-bit wrap and clear-on-read work; edge timing is approximate. |
+| `$FA-$FC` timer targets | Implemented boundary | Zero-as-256 and write-only read behavior are covered; TEST speed scaling remains deferred. |
+| `$FD-$FF` timer outputs | Partial | Four-bit wrap, clear-on-read, divider phase, and enable edges are covered; TEST speed scaling remains deferred. |
 | `$FFC0-$FFFF` IPL overlay | Implemented | Normal boot executes the 64-byte IPL, including CPU-port upload and indirect launch; focused tests cover a complete native transfer. |
 
 ### S-DSP registers and synthesis
@@ -221,34 +223,40 @@ Per-voice register groups `$x0-$x9` apply to voices 0-7.
 | Register/feature | Status |
 |---|---|
 | `VOLL/VOLR $x0/$x1` | Implemented |
-| `PITCHL/PITCHH $x2/$x3` | Partial: nearest-neighbor sampling only |
+| `PITCHL/PITCHH $x2/$x3` | Implemented with Gaussian interpolation and PMON |
 | `SRCN $x4`, `DIR $5D` | Implemented |
-| BRR decode, filters 0-3, end/loop | Partial approximation |
-| `ADSR1/ADSR2 $x5/$x6` | Missing |
-| `GAIN $x7`, all gain modes | Missing |
-| `ENVX $x8`, `OUTX $x9` | Missing; generic storage only |
+| BRR decode, filters 0-3, end/loop | Implemented with phase-tracked fetch/decode state |
+| `ADSR1/ADSR2 $x5/$x6` | Implemented |
+| `GAIN $x7`, all gain modes | Implemented |
+| `ENVX $x8`, `OUTX $x9` | Live phase-updated reads implemented |
 | `MVOLL/MVOLR $0C/$1C` | Implemented |
-| `EVOLL/EVOLR $2C/$3C` | Missing |
-| `KON $4C` | Partial: self-clearing/latest-write latch without DSP pipeline/start delay |
-| `KOFF $5C` | Partial: persistent level and KON priority implemented; kills voices instead of entering release |
-| `FLG $6C` | Partial mute/reset; noise clock missing |
-| `ENDX $7C` | Partial: end/loop flags and KON clearing implemented without exact pipeline timing |
-| `EFB $0D` | Missing |
-| `PMON $2D` | Missing |
-| `NON $3D` | Missing |
-| `EON $4D` | Missing |
-| `ESA $6D`, `EDL $7D` | Missing |
-| FIR coefficients `$0F-$7F` | Missing |
-| Gaussian interpolation | Missing |
-| Echo RAM writes and eight-tap FIR | Missing |
-| Exact 32-cycle DSP pipeline | Missing |
+| `EVOLL/EVOLR $2C/$3C` | Implemented |
+| `KON $4C` | Phase-polled latch and five-sample start delay implemented |
+| `KOFF $5C` | Phase-polled release behavior implemented |
+| `FLG $6C` | Mute, reset, noise rate, and echo-write disable implemented |
+| `ENDX $7C` | Live phase-updated end/loop flags and clear behavior implemented |
+| `EFB $0D` | Implemented |
+| `PMON $2D` | Implemented for voices 1-7 |
+| `NON $3D` | Implemented with persistent clocked LFSR |
+| `EON $4D` | Implemented |
+| `ESA $6D`, `EDL $7D` | Implemented with wrapping echo ring |
+| FIR coefficients `$0F-$7F` | Eight taps implemented |
+| Gaussian interpolation | Implemented |
+| Echo RAM writes and eight-tap FIR | Phase-timed reads/writes implemented against shared SPC RAM |
+| Exact 32-cycle DSP pipeline | Explicit phase clock and live voice/register state implemented; further collision conformance remains |
 
-`APU.advance/3` now timestamps DSP writes at the SPC instruction's memory-access
-cycle and renders blocks between those events. Intermediate KON/KOFF, pitch,
-volume, directory, and mixer changes therefore no longer collapse into the
-final register state at `take_pcm/1`. Remaining instruction bus sequences,
-RAM-write timestamps, the exact 32-cycle pipeline, and the synthesis features
-listed above remain approximate.
+`APU.advance/3` synchronizes SPC bus accesses with a phase-current DSP/RAM
+shadow, then commits authoritative PCM and state once through the phase
+pipeline. DSPDATA reads see live register state and SPC RAM reads
+see earlier echo writes even across an overdrawn instruction. Remaining known
+timing gaps are TEST wait-state scaling, CPU/APU port collision tie ordering,
+and broader external conformance coverage.
+
+The shared 64 KiB APU RAM is atomics-backed at runtime. Overdrawn SPC
+instructions use a short-lived write overlay for future-clock reads and writes,
+then discard it at the exact batch boundary; they do not copy the complete RAM.
+Runtime snapshots clone the atomics buffer, while save-state version 2 stores it
+as a byte-exact binary and restores a fresh atomics allocation.
 
 ## Cartridge coprocessor inventory
 
@@ -313,7 +321,7 @@ parallel.
 |---|---|
 | SuperFX core | GSU state, bus arbitration/cache, instruction matrix, register MMIO, timing, pixel cache |
 | PPU completion | Hires/pseudo-hires/interlace, OBJ limits/rotation/sizes, status/counters/open bus |
-| S-DSP completion | PMON/noise, echo RAM, EFB/EVOL/EON/ESA/EDL, FIR and pipeline timing |
+| S-DSP conformance | Reference-emulator collision traces, installed Blargg fixtures, and real-game audio captures |
 | DSP-1 | Command protocol and fixed-point math, starting with Super Mario Kart traces |
 
 SA-1, S-DD1, SPC7110, OBC-1, S-RTC, DSP-2/3/4, and SETA chips follow based on
@@ -354,8 +362,9 @@ native golden implementation and must preserve integer/fixed-point behavior.
   recursive layer selection, and repeated transient maps in the native PPU.
 - Render DSP samples into larger iodata/binary blocks rather than appending a
   stereo binary per sample; cache/predecode BRR blocks where writes permit.
-- Reduce persistent `:array` accesses in SPC/CPU/bus hot loops with storage and
-  dispatch representations chosen for BEAM update/read patterns.
+- Reduce persistent `:array` accesses in CPU/bus hot loops with storage and
+  dispatch representations chosen for BEAM update/read patterns. SPC/APU RAM
+  now uses machine-owned atomics with explicit snapshot boundaries.
 - SuperFX instruction dispatch, CPU/SPC execution, MMIO, DMA/HDMA scheduling,
   timers, interrupt logic, and decompression bitstreams are branchy/sequential
   state machines. They are poor Nx targets; optimize them natively.
@@ -366,17 +375,35 @@ fallback is therefore common as compatibility expands. Warm compiled kernels,
 cache them by shape/variant, and measure end-to-end frame plus audio throughput;
 do not count compilation in steady-state benchmarks.
 
-On the audit machine, the same FFIII window after 1,700 warm-up frames measured
-69.92 FPS native and 80.40 FPS with Nx over 120 frames. Both paths produced the
-same final RGB CRC32; 46 frames were rendered and 74 reused. This is a useful
-directional result, not a portable performance guarantee: hardware, runtime,
-scene, render/reuse ratio, and compiled-kernel cache state all matter.
+After the register-accuracy pass, profiling showed that OBJ overflow accounting
+was repeatedly decoding all 128 OAM entries on every visible line. The PPU now
+builds and caches per-line sprite/sliver limits for each OAM state, retaining
+mid-frame invalidation. The later phase-accurate S-DSP pipeline made older
+80-87 FPS PPU-focused measurements incomparable with the current full-system
+workload.
 
-The changing SMW title window after 300 warm-up frames is a stricter case with
-no frame reuse. Over 120 frames it measured 59.11 FPS native and 82.14 FPS with
-Nx, with identical final RGB CRC32 and active PCM. Its dominant native CPU
-hotspot was a direct-page NMI polling loop; the interpreter now recognizes that
-stable loop shape and batches iterations only up to the next scanline boundary.
+The event-aware audio path now advances SPC700 and S-DSP state in one pass. It
+synchronizes only at DSP-visible RAM/register barriers, retains the bounded tail
+of an instruction that crosses a scheduling grant, and applies carried writes
+as their individual clocks become due. This removed the former full DSP replay
+while preserving the replay implementation as a test oracle. The PPU render
+pipeline also reuses an owner-local worker so its process-local decoded-tile and
+compiled-render caches survive across frames. The retired block synthesizer is
+no longer a second source of voice state. Event-free aligned samples flatten
+the authoritative voice operations and collapse only live-register publications
+that cannot be observed inside the aligned span. Interrupted samples and
+echo/BRR overlaps retain their exact phase boundaries. BRR dependency fences use
+compact contiguous regions while retaining PMON's maximum traversal and both
+live and latched directory pointers.
+
+On the development host, controlled 180-frame windows measured 52.30 FPS native
+and 54.23 FPS Nx-selected for SMW after 300 warm-up frames, 45.14/46.61 FPS for
+FFIII after 600, and 37.29/37.27 FPS for Super Metroid after 600. All runs had
+active PCM, no SPC error, and rendered every frame. Each native/Nx pair produced
+identical video, audio, and canonical hardware-state SHA-256 hashes. The
+benchmark now also reports p50/p95/max latency and offers `--profile` for opt-in
+BEAM call instrumentation. The 60 FPS target therefore remains open. These
+figures remain directional rather than portable.
 
 ## References
 

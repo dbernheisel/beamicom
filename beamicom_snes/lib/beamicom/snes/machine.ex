@@ -31,7 +31,14 @@ defmodule Beamicom.SNES.Machine do
           {:ok, t(), Beamicom.SNES.PPU.frame()} | {:error, term(), t()}
   def run_until_frame(%__MODULE__{} = machine, limit \\ @max_instructions_per_frame)
       when is_integer(limit) and limit > 0 do
-    next_frame(machine.cpu, machine.bus, machine.bus.ppu.frame_number, limit, machine)
+    case CPU.run_until_frame(machine.cpu, machine.bus, machine.bus.ppu.frame_number, limit) do
+      {:ok, cpu, bus} ->
+        {frame, bus} = Bus.take_frame(bus)
+        {:ok, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}, frame}
+
+      {:error, reason, cpu, bus} ->
+        {:error, reason, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
+    end
   end
 
   @doc "Drains audio accumulated on the shared master-clock timeline."
@@ -43,24 +50,6 @@ defmodule Beamicom.SNES.Machine do
   @doc "Sets one standard SNES joypad report without advancing emulated time."
   def set_joypad(%__MODULE__{bus: bus} = machine, port, report),
     do: %{machine | bus: Bus.set_joypad(bus, port, report)}
-
-  defp next_frame(cpu, bus, _target, 0, machine),
-    do: {:error, :frame_timeout, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
-
-  defp next_frame(cpu, bus, target, remaining, machine) do
-    case CPU.step_deferred(cpu, bus) do
-      {:ok, cpu, %{ppu: %{frame_ready: frame, frame_number: frame_number}} = bus}
-      when not is_nil(frame) and frame_number > target ->
-        {frame, bus} = Bus.take_frame(bus)
-        {:ok, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}, frame}
-
-      {:ok, cpu, bus} ->
-        next_frame(cpu, bus, target, remaining - 1, machine)
-
-      {:error, reason, cpu, bus} ->
-        {:error, reason, %{machine | cpu: sync_cpu_clock(cpu, bus), bus: bus}}
-    end
-  end
 
   defp sync_cpu_clock(cpu, bus), do: %{cpu | master_clocks: Bus.cpu_master_clocks(bus)}
 end

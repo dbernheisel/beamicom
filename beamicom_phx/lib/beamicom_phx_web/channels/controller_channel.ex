@@ -8,6 +8,10 @@ defmodule BeamicomPhxWeb.ControllerChannel do
     "right" => :right,
     "a" => :a,
     "b" => :b,
+    "x" => :x,
+    "y" => :y,
+    "l" => :l,
+    "r" => :r,
     "start" => :start,
     "select" => :select
   }

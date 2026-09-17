@@ -45,6 +45,18 @@ defmodule Beamicom.SNES.InterruptTest do
     assert Bus.irq_pending?(bus)
   end
 
+  test "disabling timer IRQs deasserts an unacknowledged internal IRQ", %{bus: bus} do
+    {bus, 6} = Bus.write(bus, 0x004207, 10)
+    {bus, 6} = Bus.write(bus, 0x004208, 0)
+    {bus, 6} = Bus.write(bus, 0x004200, 0x10)
+    bus = Bus.advance_master(bus, 40 - bus.timing.hclock)
+    assert Bus.irq_pending?(bus)
+
+    {bus, 6} = Bus.write(bus, 0x004200, 0x00)
+
+    refute Bus.irq_pending?(bus)
+  end
+
   test "the CPU enters an emulation-mode NMI and RTI restores execution" do
     rom =
       :lorom

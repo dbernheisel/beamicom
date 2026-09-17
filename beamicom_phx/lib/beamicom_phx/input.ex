@@ -7,7 +7,7 @@ defmodule BeamicomPhx.Input do
   independent held-input source. A client-only node forwards through EI.
   """
 
-  # Browser KeyboardEvent.key -> NES button. Letters matched case-insensitively.
+  # Browser KeyboardEvent.key -> console button. Letters matched case-insensitively.
   @keymap %{
     "arrowup" => :up,
     "arrowdown" => :down,
@@ -15,18 +15,22 @@ defmodule BeamicomPhx.Input do
     "arrowright" => :right,
     "x" => :a,
     "z" => :b,
+    "s" => :x,
+    "a" => :y,
+    "q" => :l,
+    "w" => :r,
     "enter" => :start,
     "shift" => :select
   }
 
-  # The NES buttons, used to validate on-screen control names from the client.
-  @buttons ~w(up down left right a b start select)a
+  # Supported console buttons, used to validate control names from the client.
+  @buttons ~w(up down left right a b x y l r start select)a
   @button_names Map.new(@buttons, fn button -> {Atom.to_string(button), button} end)
 
-  @doc "The NES button for a browser key name, or nil if unmapped."
+  @doc "The console button for a browser key name, or nil if unmapped."
   def button_for(key) when is_binary(key), do: Map.get(@keymap, String.downcase(key))
 
-  @doc "The NES button for an on-screen control name (e.g. \"a\", \"up\"), or nil if unknown."
+  @doc "The console button for a control name (e.g. \"a\", \"up\"), or nil if unknown."
   def button_from_name(name) when is_binary(name), do: Map.get(@button_names, name)
 
   @doc "Validate browser button names and return them as a button set."
@@ -81,7 +85,7 @@ defmodule BeamicomPhx.Input do
     end
   end
 
-  @doc "Set the remote browser seat, mapped atomically to NES P2 or Game Boy P1."
+  @doc "Set the remote browser seat, mapped atomically to the active system's remote port."
   def press_remote(buttons) when is_list(buttons) do
     case Process.whereis(BeamicomPhx.Emulator) do
       nil -> forward(2, buttons)
