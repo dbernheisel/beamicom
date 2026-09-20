@@ -738,7 +738,9 @@ defmodule Beamicom.SNES.PPU do
           :binary.copy(<<0, 0, 0>>, @width * height)
 
         nx_renderer?(ppu) ->
-          Beamicom.SNES.Nx.PPURenderer.render(ppu, nx_object_descriptors(ppu, height))
+          ppu
+          |> Beamicom.SNES.Nx.PPURenderer.render(nx_object_descriptors(ppu, height))
+          |> repair_raster_rows(ppu, height)
 
         true ->
           palette = palette(ppu)
@@ -780,10 +782,58 @@ defmodule Beamicom.SNES.PPU do
   end
 
   defp nx_renderer?(ppu) do
-    map_size(ppu.raster_segments) == 0 and not mosaic_active?(ppu) and
+    not mosaic_active?(ppu) and
       Application.get_env(:beamicom_snes, :ppu_renderer, :native) == :nx and
       Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) and
       Beamicom.SNES.Nx.PPURenderer.supported?(ppu)
+  end
+
+  defp repair_raster_rows(data, %{raster_segments: segments}, _height)
+       when map_size(segments) == 0,
+       do: data
+
+  defp repair_raster_rows(data, ppu, height) do
+    palette = palette(ppu)
+    color_data = color_data(palette, ppu.brightness)
+
+    render_ppu = %{
+      ppu
+      | vram: raster_memory_binary(:vram, ppu.cache_identity, ppu.vram_version, ppu.vram),
+        oam: raster_memory_binary(:oam, ppu.cache_identity, ppu.oam_version, ppu.oam)
+    }
+
+    {rows, _caches} =
+      ppu.raster_segments
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map_reduce({%{}, %{}, %{}}, fn {y, segments}, caches ->
+        {row, caches} =
+          render_raster_row(render_ppu, segments, y, palette, color_data, caches)
+
+        {{y, row}, caches}
+      end)
+
+    repaired_rows = Map.new(rows)
+    row_bytes = @width * 3
+
+    0..(height - 1)
+    |> Enum.map(fn y ->
+      Map.get(repaired_rows, y, binary_part(data, y * row_bytes, row_bytes))
+    end)
+    |> IO.iodata_to_binary()
+  end
+
+  defp raster_memory_binary(kind, identity, version, memory) do
+    key = {__MODULE__, :raster_memory, kind}
+
+    case Process.get(key) do
+      {^identity, ^version, binary} ->
+        binary
+
+      _other ->
+        binary = memory |> :array.to_list() |> :erlang.list_to_binary()
+        Process.put(key, {identity, version, binary})
+        binary
+    end
   end
 
   defp apply_video_filter(%{video_filter: :native}, data), do: {@width, data}

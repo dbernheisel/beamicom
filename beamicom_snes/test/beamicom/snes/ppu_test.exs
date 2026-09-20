@@ -722,6 +722,32 @@ defmodule Beamicom.SNES.PPUTest do
   end
 
   if Code.ensure_loaded?(Beamicom.SNES.Nx.PPURenderer) do
+    test "Nx PPU repairs horizontal raster changes with native rows" do
+      previous = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
+      on_exit(fn -> Application.put_env(:beamicom_snes, :ppu_renderer, previous) end)
+
+      before =
+        PPU.new()
+        |> PPU.write(0x2100, 0x0F)
+        |> PPU.write(0x2105, 0x01)
+        |> write_cgram_color(0, 0x001F)
+
+      after_write = PPU.write(before, 0x2100, 0x80)
+      x = 96
+      y = 9
+
+      ppu = PPU.capture_raster_change(before, after_write, y + 1, 88 + x * 4)
+      ppu = %{ppu | scanline_states: List.duplicate(PPU.visual_state(before), 224)}
+
+      Application.put_env(:beamicom_snes, :ppu_renderer, :native)
+      native = PPU.render_frame(ppu).data
+      Application.put_env(:beamicom_snes, :ppu_renderer, :nx)
+
+      assert PPU.render_frame(ppu).data == native
+      assert pixel_at(native, x - 1, y) == <<255, 0, 0>>
+      assert pixel_at(native, x, y) == <<0, 0, 0>>
+    end
+
     test "Nx PPU rasterizes OBJ descriptors with native pixel parity" do
       previous = Application.get_env(:beamicom_snes, :ppu_renderer, :native)
       on_exit(fn -> Application.put_env(:beamicom_snes, :ppu_renderer, previous) end)
