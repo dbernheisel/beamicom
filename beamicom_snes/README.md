@@ -106,9 +106,13 @@ mix beamicom.snes.benchmark "roms/Final Fantasy III.sfc" \
   --warmup 600 --frames 180
 ```
 
-Add `--profile` for opt-in BEAM call counts and instrumented call times. Every
-run reports p50/p95/max frame latency plus SHA-256 hashes for video, audio,
-canonical hardware state, and the complete config-sensitive snapshot.
+Add `--profile` for opt-in BEAM call counts, instrumented call times, and
+allocated words. Every run reports p50/p95/max frame latency plus SHA-256 hashes
+for video, audio, canonical hardware state, and the complete config-sensitive
+snapshot. Cx4 and SuperFX workloads also report command or instruction
+activity. Use `--heap-words` and `--binary-heap-words` to compare runtime heap
+settings; the benchmark reports garbage collections and reclaimed words for
+the measured interval.
 
 The 60 FPS target is not yet met on the development host. Compact BRR dependency
 regions, allocation-reduced echo/voice mixing, and an aligned-sample schedule

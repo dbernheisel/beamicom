@@ -25,7 +25,7 @@ defmodule Beamicom.SNES.SaveState do
   }
 
   @magic "BEAMICOM_SNES_STATE"
-  @version 4
+  @version 5
   @max_compressed_state_bytes 1024 * 1024
   @max_state_bytes 8 * 1024 * 1024
   @max_rom_bytes 16 * 1024 * 1024
@@ -221,7 +221,8 @@ defmodule Beamicom.SNES.SaveState do
   defp snapshot_coprocessor(%SuperFX{} = super_fx) do
     %{
       super_fx
-      | ram: atomics_to_binary(super_fx.ram),
+      | regs: super_fx_registers_to_binary(super_fx.regs),
+        ram: atomics_to_binary(super_fx.ram),
         bram: nil,
         cache: atomics_to_binary(super_fx.cache)
     }
@@ -237,11 +238,21 @@ defmodule Beamicom.SNES.SaveState do
   defp restore_coprocessor(%SuperFX{} = super_fx, cartridge) do
     expected = SuperFX.cartridge?(cartridge)
 
-    if exact_struct?(super_fx, SuperFX) and expected and is_binary(super_fx.ram) and
+    if exact_struct?(super_fx, SuperFX) and expected and is_binary(super_fx.regs) and
+         byte_size(super_fx.regs) == 32 and
+         is_binary(super_fx.ram) and
          byte_size(super_fx.ram) == super_fx.ram_size and
          is_nil(super_fx.bram) and is_binary(super_fx.cache) and byte_size(super_fx.cache) == 512 do
       ram = atomics_from_binary(super_fx.ram)
-      {:ok, %{super_fx | ram: ram, bram: ram, cache: atomics_from_binary(super_fx.cache)}}
+
+      {:ok,
+       %{
+         super_fx
+         | regs: super_fx_registers_from_binary(super_fx.regs),
+           ram: ram,
+           bram: ram,
+           cache: atomics_from_binary(super_fx.cache)
+       }}
     else
       {:error, :corrupt}
     end
@@ -721,6 +732,22 @@ defmodule Beamicom.SNES.SaveState do
   defp atomics_to_binary(memory) do
     size = :atomics.info(memory).size
     for index <- 1..size, into: <<>>, do: <<:atomics.get(memory, index)>>
+  end
+
+  defp super_fx_registers_to_binary(registers) do
+    for index <- 1..16, into: <<>>, do: <<:atomics.get(registers, index)::little-16>>
+  end
+
+  defp super_fx_registers_from_binary(registers) do
+    memory = :atomics.new(16, signed: false)
+
+    for <<value::little-16 <- registers>>, reduce: 1 do
+      index ->
+        :ok = :atomics.put(memory, index, value)
+        index + 1
+    end
+
+    memory
   end
 
   defp atomics_from_binary(binary) do

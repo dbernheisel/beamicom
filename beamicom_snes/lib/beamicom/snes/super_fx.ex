@@ -110,7 +110,7 @@ defmodule Beamicom.SNES.SuperFX do
     Enum.each(0..(ram_size - 1), &memory_put(ram, &1, 0xFF))
 
     %__MODULE__{
-      regs: List.duplicate(0, 16) |> List.to_tuple(),
+      regs: :atomics.new(16, signed: false),
       ram: ram,
       ram_size: ram_size,
       ram_mask: ram_size - 1,
@@ -329,7 +329,8 @@ defmodule Beamicom.SNES.SuperFX do
     {%{sfx | sfr: sfx.sfr &&& bnot(@flag_g), halted_reason: :instruction_limit}, executed}
   end
 
-  defp run_loop(sfx, cartridge, remaining, executed) do
+  defp run_loop(%{pipeline: 0x4C} = sfx, cartridge, remaining, executed)
+       when remaining >= 8 do
     if flag?(sfx, @flag_g) do
       case fast_plot_loop(sfx, cartridge, remaining) do
         {:ok, sfx, instructions} ->
@@ -345,6 +346,16 @@ defmodule Beamicom.SNES.SuperFX do
     end
   end
 
+  defp run_loop(sfx, cartridge, remaining, executed) do
+    if flag?(sfx, @flag_g) do
+      sfx
+      |> step_instruction(cartridge)
+      |> run_loop(cartridge, remaining - 1, executed + 1)
+    else
+      {sfx, executed}
+    end
+  end
+
   # Yoshi's Island and other GSU software use this pixel pipeline as a tight
   # loop. Recognize the instruction bytes, rather than a cartridge address,
   # and fold one or more iterations while preserving the branch delay slot.
@@ -352,13 +363,12 @@ defmodule Beamicom.SNES.SuperFX do
     pc = reg(sfx, 15)
 
     cond do
-      sfx.pipeline == 0x4C and
-          opcode_sequence?(
-            sfx,
-            cartridge,
-            pc,
-            <<0x70, 0x1E, 0x54, 0x28, 0x65, 0xDF, 0x0A, 0xF8>>
-          ) ->
+      opcode_sequence?(
+        sfx,
+        cartridge,
+        pc,
+        <<0x70, 0x1E, 0x54, 0x28, 0x65, 0xDF, 0x0A, 0xF8>>
+      ) ->
         run_fast_plot_loop(
           sfx,
           cartridge,
@@ -375,7 +385,7 @@ defmodule Beamicom.SNES.SuperFX do
           sfx.pixel_cache
         )
 
-      sfx.pipeline == 0x4C and remaining >= 10 and
+      remaining >= 10 and
           opcode_sequence?(
             sfx,
             cartridge,
@@ -577,18 +587,15 @@ defmodule Beamicom.SNES.SuperFX do
   end
 
   defp finish_fast_plot_loop(sfx, pc, r0, r1, r8, r14, sfr, colr, romdr, pixel_cache) do
-    regs =
-      sfx.regs
-      |> put_elem(0, r0)
-      |> put_elem(1, r1)
-      |> put_elem(8, r8)
-      |> put_elem(14, r14)
-      |> put_elem(15, u16(pc))
+    memory_put(sfx.regs, 0, r0)
+    memory_put(sfx.regs, 1, r1)
+    memory_put(sfx.regs, 8, r8)
+    memory_put(sfx.regs, 14, r14)
+    memory_put(sfx.regs, 15, u16(pc))
 
     %{
       sfx
-      | regs: regs,
-        sfr: sfr,
+      | sfr: sfr,
         colr: colr,
         romdr: romdr,
         pipeline: 0x4C,
@@ -653,12 +660,14 @@ defmodule Beamicom.SNES.SuperFX do
   end
 
   defp opcode_sequence?(sfx, cartridge, address, bytes) do
-    bytes
-    |> :binary.bin_to_list()
-    |> Enum.with_index()
-    |> Enum.all?(fn {expected, offset} ->
-      opcode_at(sfx, u16(address + offset), cartridge) == expected
-    end)
+    opcode_sequence?(sfx, cartridge, address, bytes, 0)
+  end
+
+  defp opcode_sequence?(_sfx, _cartridge, _address, <<>>, _offset), do: true
+
+  defp opcode_sequence?(sfx, cartridge, address, <<expected, rest::binary>>, offset) do
+    opcode_at(sfx, u16(address + offset), cartridge) == expected and
+      opcode_sequence?(sfx, cartridge, address, rest, offset + 1)
   end
 
   defp opcode_at(sfx, address, cartridge) do
@@ -674,15 +683,11 @@ defmodule Beamicom.SNES.SuperFX do
     sfx = execute(sfx, opcode, cartridge)
     sfx = if sfx.r14_modified?, do: update_rom_buffer(sfx, cartridge), else: sfx
 
-    regs =
-      if sfx.r15_modified?,
-        do: sfx.regs,
-        else: put_elem(sfx.regs, 15, u16(reg(sfx, 15) + 1))
+    if not sfx.r15_modified?, do: memory_put(sfx.regs, 15, u16(reg(sfx, 15) + 1))
 
     %{
       sfx
-      | regs: regs,
-        r14_modified?: false,
+      | r14_modified?: false,
         r15_modified?: false
     }
   end
@@ -729,6 +734,8 @@ defmodule Beamicom.SNES.SuperFX do
     take? =
       case opcode do
         0x05 -> true
+        # Actual dispatch is $06 signed >= and $07 signed <; some emulator-source
+        # comments label these two opcodes in reverse.
         0x06 -> flag?(sfx, @flag_s) == flag?(sfx, @flag_ov)
         0x07 -> flag?(sfx, @flag_s) != flag?(sfx, @flag_ov)
         0x08 -> not flag?(sfx, @flag_z)
@@ -960,11 +967,11 @@ defmodule Beamicom.SNES.SuperFX do
         else
           x = reg(sfx, 1)
           sfx = plot_pixel(sfx, x, reg(sfx, 2))
+          memory_put(sfx.regs, 1, u16(x + 1))
 
           %{
             sfx
-            | regs: put_elem(sfx.regs, 1, u16(x + 1)),
-              sfr: sfx.sfr &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
+            | sfr: sfx.sfr &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
               sreg: 0,
               dreg: 0
           }
@@ -1124,7 +1131,7 @@ defmodule Beamicom.SNES.SuperFX do
     cond do
       bank <= 0x3F -> rom_at(cartridge, (bank &&& 0x3F) <<< 15 ||| (offset &&& 0x7FFF))
       bank <= 0x5F -> rom_at(cartridge, address &&& 0x3FFFFF)
-      bank in 0x70..0x71 -> memory_get(sfx.ram, address &&& sfx.ram_mask)
+      bank in 0x60..0x7F -> memory_get(sfx.ram, address &&& sfx.ram_mask)
       true -> 0
     end
   end
@@ -1302,11 +1309,11 @@ defmodule Beamicom.SNES.SuperFX do
 
   defp finish_arithmetic_result(sfx, result, overflow?, carry?) do
     n = sfx.dreg
+    memory_put(sfx.regs, n, u16(result))
 
     %{
       sfx
-      | regs: put_elem(sfx.regs, n, u16(result)),
-        sfr:
+      | sfr:
           arithmetic_sfr(sfx.sfr, result, overflow?, carry?) &&&
             bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
         sreg: 0,
@@ -1329,11 +1336,11 @@ defmodule Beamicom.SNES.SuperFX do
 
   defp finish_logic_result(sfx, value) do
     n = sfx.dreg
+    memory_put(sfx.regs, n, u16(value))
 
     %{
       sfx
-      | regs: put_elem(sfx.regs, n, u16(value)),
-        sfr: logic_sfr(sfx.sfr, value, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
+      | sfr: logic_sfr(sfx.sfr, value, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
         sreg: 0,
         dreg: 0,
         r14_modified?: sfx.r14_modified? or n == 14,
@@ -1342,10 +1349,11 @@ defmodule Beamicom.SNES.SuperFX do
   end
 
   defp finish_register_logic(sfx, n, value) do
+    memory_put(sfx.regs, n, u16(value))
+
     %{
       sfx
-      | regs: put_elem(sfx.regs, n, u16(value)),
-        sfr: logic_sfr(sfx.sfr, value, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
+      | sfr: logic_sfr(sfx.sfr, value, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
         sreg: 0,
         dreg: 0,
         r14_modified?: sfx.r14_modified? or n == 14,
@@ -1360,11 +1368,11 @@ defmodule Beamicom.SNES.SuperFX do
     sfr = if (value &&& 0x8080) != 0, do: sfr ||| @flag_s, else: sfr
     sfr = if (value &&& 0xE0E0) != 0, do: sfr ||| @flag_cy, else: sfr
     sfr = if (value &&& 0xF0F0) != 0, do: sfr ||| @flag_z, else: sfr
+    memory_put(sfx.regs, n, value)
 
     %{
       sfx
-      | regs: put_elem(sfx.regs, n, value),
-        sfr: sfr &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
+      | sfr: sfr &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2),
         sreg: 0,
         dreg: 0,
         r14_modified?: sfx.r14_modified? or n == 14,
@@ -1395,10 +1403,10 @@ defmodule Beamicom.SNES.SuperFX do
 
   defp set_dest(sfx, value), do: set_reg(sfx, sfx.dreg, value)
   defp source(sfx), do: reg(sfx, sfx.sreg)
-  defp reg(sfx, n), do: elem(sfx.regs, n)
+  defp reg(sfx, n), do: memory_get(sfx.regs, n)
 
   defp set_reg(sfx, n, value) do
-    sfx = %{sfx | regs: put_elem(sfx.regs, n, u16(value))}
+    memory_put(sfx.regs, n, u16(value))
 
     case n do
       14 -> %{sfx | r14_modified?: true}
@@ -1407,7 +1415,11 @@ defmodule Beamicom.SNES.SuperFX do
     end
   end
 
-  defp put_reg_raw(sfx, n, value), do: %{sfx | regs: put_elem(sfx.regs, n, u16(value))}
+  defp put_reg_raw(sfx, n, value) do
+    memory_put(sfx.regs, n, u16(value))
+    sfx
+  end
+
   defp flag?(sfx, mask), do: (sfx.sfr &&& mask) != 0
 
   defp set_flag(sfx, mask, true), do: %{sfx | sfr: sfx.sfr ||| mask}

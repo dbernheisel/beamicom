@@ -32,7 +32,7 @@ defmodule Beamicom.SNES.SaveStateTest do
     {state, rom_blob} = SaveState.split(machine)
 
     payload = state |> :zlib.uncompress() |> :erlang.binary_to_term()
-    assert payload.version == 4
+    assert payload.version == 5
     assert byte_size(payload.machine.bus.apu.ram) == 0x10000
     assert payload.machine.bus.apu.spc.ram == payload.machine.bus.apu.ram
 
@@ -77,8 +77,8 @@ defmodule Beamicom.SNES.SaveStateTest do
     assert {:error, :corrupt} = SaveState.merge("not zlib", rom_blob)
 
     payload = state |> :zlib.uncompress() |> :erlang.binary_to_term()
-    future = payload |> Map.put(:version, 5) |> :erlang.term_to_binary() |> :zlib.compress()
-    assert {:error, {:unsupported_version, 5}} = SaveState.merge(future, rom_blob)
+    future = payload |> Map.put(:version, 6) |> :erlang.term_to_binary() |> :zlib.compress()
+    assert {:error, {:unsupported_version, 6}} = SaveState.merge(future, rom_blob)
   end
 
   test "rejects malformed execution structures before resuming the emulator" do
@@ -221,7 +221,7 @@ defmodule Beamicom.SNES.SaveStateTest do
     assert APU.RAM.to_binary(actual_ram) == APU.RAM.to_binary(expected_ram)
   end
 
-  test "round-trips atomics-backed SuperFX and SA-1 coprocessor memory" do
+  test "round-trips atomics-backed SuperFX and SA-1 coprocessor state" do
     super_fx_rom =
       Beamicom.SNESTestROM.build(:lorom,
         cartridge_type: 0x13,
@@ -231,10 +231,14 @@ defmodule Beamicom.SNES.SaveStateTest do
     {:ok, super_fx_machine} = Machine.load(super_fx_rom)
     assert %SuperFX{} = super_fx_machine.bus.coprocessor
     {state, rom_blob} = SaveState.split(super_fx_machine)
+    payload = state |> :zlib.uncompress() |> :erlang.binary_to_term()
+    assert byte_size(payload.machine.bus.coprocessor.regs) == 32
 
     assert {:ok, %{bus: %{coprocessor: %SuperFX{} = restored_super_fx}}} =
              SaveState.merge(state, rom_blob)
 
+    assert :atomics.info(restored_super_fx.regs).size == 16
+    assert :atomics.get(restored_super_fx.regs, 1) == 0
     assert :atomics.info(restored_super_fx.ram).size == restored_super_fx.ram_size
     assert :atomics.get(restored_super_fx.ram, 1) == 0xFF
 

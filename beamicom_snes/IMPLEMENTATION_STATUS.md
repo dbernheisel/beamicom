@@ -262,8 +262,9 @@ as a byte-exact binary and restores a fresh atomics allocation.
 
 [`bus.ex`](lib/beamicom/snes/bus.ex) routes CPU and DMA-visible reads/writes
 through cartridge-specific Cx4, SuperFX, DSP-1, and SA-1 state before ordinary
-ROM/SRAM mapping. SuperFX RAM/cache use per-machine mutable storage so GSU
-pixel workloads do not rebuild persistent trees for every byte. Coprocessors
+ROM/SRAM mapping. SuperFX registers, RAM, and cache use per-machine mutable
+storage so GSU workloads do not rebuild persistent terms for every instruction
+or byte. Coprocessors
 still execute synchronously while their cycle-level schedulers and arbitration
 rules are developed.
 
@@ -272,7 +273,7 @@ rules are developed.
 | Chip | Command/instruction surface | Status |
 |---|---|---|
 | Capcom Cx4 | Command `$00` sprite functions; `$01` wireframe; `$05` propulsion; `$0D` vector length; `$10/$13` polar conversion; `$15` Pythagorean; `$1F` arctangent; `$22` trapezoid; `$25` multiply; `$2D` coordinate transform; `$40` sum; `$54` square; `$5C`, `$5E-$7E` immediate-register variants; `$89` immediate-ROM. Sixteen 24-bit registers live at `$7F80-$7FAF`; command at `$7F4F`; busy at `$7F5E`. | **Partial:** mapping, RAM mirroring, synchronous busy, ROM-to-RAM loads, command tracing, `$00` composite OAM build plus scale/rotate modes `$03/$07`, and `$05/$0D/$10/$13/$15/$1F/$22/$25/$2D/$40/$54/$5C/$89`. X3 passes its Cx4 self-test and renders composite boss sprites in its attract sequence; transform-lines, wireframe, disintegration, and wave commands remain. |
-| SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | **Partial:** complete native opcode-family decode, GSU register/cache/ROM/RAM state, S-CPU mapping, IRQ/STOP jobs, and PLOT/RPIX bitplanes. Yoshi's Island reaches recognizable GSU-rendered intro graphics. Jobs are still atomic rather than cycle-interleaved, and active workload throughput remains below 60 FPS. |
+| SuperFX GSU-1/2 | 256-byte instruction matrix with ALT1/ALT2/ALT3 variants. Families include STOP/NOP/CACHE; branches; TO/FROM/MOVE register transfers; WITH; ALT prefixes; STW/STB/LDW/LDB/SBK; LOOP/LINK/JMP/LJMP; PLOT/RPIX/COLOR/GETC; ADD/ADC/SUB/SBC/CMP; AND/BIC/OR/XOR; shifts/rotates; MULT/UMULT/LMULT/FMULT; MERGE; IBT/IWT; INC/DEC; GETB/GETBH/GETBL/GETBS; SEX/SWAP/NOT/LOB/HIB. Also requires GSU cache, ROM/RAM arbitration, register MMIO, IRQ, and timing. | **Partial:** complete native opcode-family decode, including the hardware `$06`/`$07` signed-branch ordering; GSU register/cache/ROM state and `$60-$7f` RAM banks; S-CPU mapping; IRQ/STOP jobs; and PLOT/RPIX bitplanes. Yoshi's Island reaches recognizable GSU-rendered intro graphics. Jobs are still atomic rather than cycle-interleaved, and active workload throughput remains below 60 FPS. |
 
 ### Remaining commercial enhancement chips
 
@@ -402,8 +403,8 @@ FFIII after 600, and 37.29/37.27 FPS for Super Metroid after 600. All runs had
 active PCM, no SPC error, and rendered every frame. Each native/Nx pair produced
 identical video, audio, and canonical hardware-state SHA-256 hashes. The
 benchmark now also reports p50/p95/max latency and offers `--profile` for opt-in
-BEAM call instrumentation. The 60 FPS target therefore remains open. These
-figures remain directional rather than portable.
+BEAM call-time and allocation instrumentation. The 60 FPS target therefore
+remains open. These figures remain directional rather than portable.
 
 ## References
 

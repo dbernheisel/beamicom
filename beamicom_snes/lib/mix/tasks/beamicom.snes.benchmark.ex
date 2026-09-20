@@ -5,7 +5,8 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
   @shortdoc "Benchmarks the SNES core with a local ROM"
   @default_roms ["roms/Final Fantasy III.sfc", "roms/Final Fantasy 3.sfc"]
-  @runtime_heap_words 200_000
+  @default_heap_words 200_000
+  @default_binary_heap_words 65_536
   @profile_mfas [
     {Beamicom.SNES.CPU, :run_until_frame, 4},
     {Beamicom.SNES.CPU, :run_deferred_until_frame, 4},
@@ -63,15 +64,41 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     {Beamicom.SNES.DSP.Echo, :process_sample_transition, 6},
     {Beamicom.SNES.DSP.BRR, :decode, 3},
     {Beamicom.SNES.DSP.BRR, :decode_state, 6},
-    {Beamicom.SNES.DSP.BRR, :decode_values, 8}
+    {Beamicom.SNES.DSP.BRR, :decode_values, 8},
+    {Beamicom.SNES.Cx4, :read, 2},
+    {Beamicom.SNES.Cx4, :write, 4},
+    {Beamicom.SNES.Cx4, :load_memory, 2},
+    {Beamicom.SNES.Cx4, :execute, 3},
+    {Beamicom.SNES.Cx4, :execute_command, 2},
+    {Beamicom.SNES.Cx4, :build_oam, 2},
+    {Beamicom.SNES.Cx4, :process_objects, 6},
+    {Beamicom.SNES.Cx4, :process_parts, 8},
+    {Beamicom.SNES.Cx4, :scale_rotate, 2},
+    {Beamicom.SNES.Cx4, :packed_pixel, 5},
+    {Beamicom.SNES.Cx4, :put_planar_pixel, 5},
+    {Beamicom.SNES.SuperFX, :peek, 3},
+    {Beamicom.SNES.SuperFX, :read, 3},
+    {Beamicom.SNES.SuperFX, :write, 4},
+    {Beamicom.SNES.SuperFX, :write_io, 4},
+    {Beamicom.SNES.SuperFX, :run_job, 2},
+    {Beamicom.SNES.SuperFX, :run_loop, 4},
+    {Beamicom.SNES.SuperFX, :fast_plot_loop, 3},
+    {Beamicom.SNES.SuperFX, :run_fast_plot_loop, 13},
+    {Beamicom.SNES.SuperFX, :run_fast_add_plot_loop, 13},
+    {Beamicom.SNES.SuperFX, :fast_plot_pixel, 5},
+    {Beamicom.SNES.SuperFX, :step_instruction, 2},
+    {Beamicom.SNES.SuperFX, :opcode_sequence?, 4},
+    {Beamicom.SNES.SuperFX, :opcode_at, 3},
+    {Beamicom.SNES.SuperFX, :read_opcode, 3},
+    {Beamicom.SNES.SuperFX, :execute, 3},
+    {Beamicom.SNES.SuperFX, :gsu_read, 3},
+    {Beamicom.SNES.SuperFX, :plot_pixel, 3},
+    {Beamicom.SNES.SuperFX, :flush_pixel_cache, 2},
+    {Beamicom.SNES.SuperFX, :flush_pixel_planes, 6}
   ]
 
   @impl Mix.Task
   def run(args) do
-    :erlang.process_flag(:min_heap_size, @runtime_heap_words)
-
-    Mix.Task.run("app.start")
-
     {opts, paths, invalid} =
       OptionParser.parse(args,
         strict: [
@@ -81,11 +108,20 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
           renderer: :string,
           apu_renderer: :string,
           async_dsp: :boolean,
-          profile: :boolean
+          profile: :boolean,
+          heap_words: :integer,
+          binary_heap_words: :integer
         ]
       )
 
     if invalid != [], do: Mix.raise("invalid benchmark options: #{inspect(invalid)}")
+
+    heap_words = positive_option!(opts, :heap_words, @default_heap_words)
+    binary_heap_words = positive_option!(opts, :binary_heap_words, @default_binary_heap_words)
+    :erlang.process_flag(:min_heap_size, heap_words)
+    :erlang.process_flag(:min_bin_vheap_size, binary_heap_words)
+
+    Mix.Task.run("app.start")
 
     path = List.first(paths) || default_rom!()
     warmup = positive_option!(opts, :warmup, 300)
@@ -112,9 +148,11 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
 
     renders_before = machine.bus.ppu.rendered_frames
     reuses_before = machine.bus.ppu.reused_frames
+    gc_before = :erlang.statistics(:garbage_collection)
     profile_mfas = if profile?, do: start_profile(), else: []
     {machine, frame, audio_frames, pcm, measurements} = run_measured_frames!(machine, frames)
     profile = if profile?, do: finish_profile(profile_mfas), else: []
+    {garbage_collections, reclaimed_words} = gc_delta(gc_before)
     elapsed_seconds = measurements.elapsed_microseconds / 1_000_000
     fps = frames / elapsed_seconds
 
@@ -122,7 +160,14 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     Mix.shell().info("Renderer: #{renderer}")
     Mix.shell().info("APU renderer: #{inspect(apu_renderer)}")
     Mix.shell().info("APU RAM: atomics")
-    Mix.shell().info("Runtime minimum heap: #{@runtime_heap_words} words")
+    Mix.shell().info("Runtime minimum heap: #{heap_words} words")
+    Mix.shell().info("Runtime minimum binary heap: #{binary_heap_words} words")
+
+    Mix.shell().info(
+      "GC during measurement: #{garbage_collections} collections, " <>
+        "#{reclaimed_words} words reclaimed"
+    )
+
     Mix.shell().info("Async DSP requested: #{async_dsp?}")
     Mix.shell().info("DSP scalar features active: #{dsp_scalar_required?(machine)}")
     Mix.shell().info("Frames: #{frames} after #{warmup} warmup frames")
@@ -155,13 +200,16 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
         "hardware=#{hardware_state_hash(machine)} snapshot=#{state_hash(machine)}"
     )
 
-    if profile? do
-      Mix.shell().info("Profile (instrumented call time; nested rows overlap):")
+    report_coprocessor(machine.bus.coprocessor)
 
-      Enum.each(profile, fn {microseconds, calls, {module, function, arity}} ->
+    if profile? do
+      Mix.shell().info("Profile (call time overlaps; allocation stops at nested profiled calls):")
+
+      Enum.each(profile, fn {microseconds, words, calls, {module, function, arity}} ->
         Mix.shell().info(
-          :io_lib.format("  ~.2f ms  ~B calls  ~s.~s/~B", [
+          :io_lib.format("  ~.2f ms  ~B words  ~B calls  ~s.~s/~B", [
             microseconds / 1_000,
+            words,
             calls,
             inspect(module),
             Atom.to_string(function),
@@ -255,6 +303,26 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     |> Base.encode16(case: :lower)
   end
 
+  defp gc_delta({collections_before, words_before, _unused}) do
+    {collections, words, _unused} = :erlang.statistics(:garbage_collection)
+    {collections - collections_before, words - words_before}
+  end
+
+  defp report_coprocessor(%Beamicom.SNES.Cx4{} = cx4) do
+    Mix.shell().info(
+      "Cx4: #{cx4.load_count} loads, commands=#{inspect(cx4.command_counts, charlists: :as_lists)}"
+    )
+  end
+
+  defp report_coprocessor(%Beamicom.SNES.SuperFX{} = super_fx) do
+    Mix.shell().info(
+      "SuperFX: #{super_fx.job_count} jobs, #{super_fx.instruction_count} instructions, " <>
+        "last job=#{super_fx.last_job_instructions}, halted=#{inspect(super_fx.halted_reason)}"
+    )
+  end
+
+  defp report_coprocessor(_coprocessor), do: :ok
+
   defp state_hash(machine) do
     {state, rom} = SaveState.split(machine)
 
@@ -283,7 +351,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
   defp start_profile do
     mfas =
       Enum.filter(@profile_mfas, fn mfa ->
-        :erlang.trace_pattern(mfa, true, [:local, :call_time]) > 0
+        :erlang.trace_pattern(mfa, true, [:local, :call_time, :call_memory]) > 0
       end)
 
     :erlang.trace(:all, true, [:call])
@@ -307,10 +375,23 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
             {calls + count, elapsed + seconds * 1_000_000 + microseconds}
           end)
 
-        {microseconds, calls, mfa}
+        memory_entries =
+          case :erlang.trace_info(mfa, :call_memory) do
+            {:call_memory, entries} when is_list(entries) -> entries
+            _other -> []
+          end
+
+        words =
+          Enum.reduce(memory_entries, 0, fn {_pid, _count, words}, total -> total + words end)
+
+        {microseconds, words, calls, mfa}
       end)
 
-    Enum.each(mfas, &:erlang.trace_pattern(&1, false, [:local, :call_time]))
+    Enum.each(
+      mfas,
+      &:erlang.trace_pattern(&1, false, [:local, :call_time, :call_memory])
+    )
+
     Enum.sort(profile, :desc)
   end
 

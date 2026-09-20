@@ -123,6 +123,78 @@ defmodule Beamicom.SNES.SuperFXTest do
     assert (Bus.peek(bus, 0x003030) &&& 0x1E) == 0x1E
   end
 
+  test "branch opcodes $06 and $07 use the hardware signed-comparison ordering" do
+    branch_program = fn opcode ->
+      <<opcode, 0x05, 0x01, 0xF0, 0x11, 0x11, 0x00, 0xF0, 0x22, 0x22, 0x00>>
+    end
+
+    signed_greater_or_equal = run_superfx_program(branch_program.(0x06))
+    signed_less_than = run_superfx_program(branch_program.(0x07))
+
+    assert Bus.peek(signed_greater_or_equal, 0x003000) == 0x22
+    assert Bus.peek(signed_greater_or_equal, 0x003001) == 0x22
+    assert Bus.peek(signed_less_than, 0x003000) == 0x11
+    assert Bus.peek(signed_less_than, 0x003001) == 0x11
+  end
+
+  test "GSU banks $60-$7F read expansion RAM" do
+    # IWT R1,#$0060; FROM R1; ALT3; ROMB; IWT R14,#$0042; GETB; STOP
+    program = <<0xF1, 0x60, 0x00, 0xB1, 0x3F, 0xDF, 0xFE, 0x42, 0x00, 0xEF, 0x00>>
+    bus = superfx_bus(program)
+    {bus, 8} = Bus.cpu_write(bus, 0x700042, 0xA5)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301E, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301F, 0x90)
+
+    assert Bus.peek(bus, 0x003000) == 0xA5
+  end
+
+  test "LOOP decrements R12 and branches through R13 until zero" do
+    program = <<0xFC, 0x02, 0x00, 0xFD, 0x06, 0x90, 0x3C, 0x01, 0x00>>
+    bus = run_superfx_program(program)
+
+    assert Bus.peek(bus, 0x003018) == 0
+    assert Bus.peek(bus, 0x003019) == 0
+    assert (Bus.peek(bus, 0x003030) &&& 0x02) != 0
+    assert bus.coprocessor.last_job_instructions == 8
+  end
+
+  test "WITH and FROM move a register and preserve FROM flag semantics" do
+    bus = run_superfx_program(<<0xF1, 0x80, 0x00, 0x22, 0xB1, 0x00>>)
+
+    assert Bus.peek(bus, 0x003004) == 0x80
+    assert Bus.peek(bus, 0x003005) == 0
+    assert (Bus.peek(bus, 0x003030) &&& 0x1A) == 0x10
+  end
+
+  test "consecutive INC R10 instructions preserve register and instruction accounting" do
+    bus = run_superfx_program(<<0xDA, 0xDA, 0x00>>)
+
+    assert Bus.peek(bus, 0x003014) == 2
+    assert Bus.peek(bus, 0x003015) == 0
+    assert bus.coprocessor.last_job_instructions == 4
+  end
+
+  test "increment, indexed load, and subtract sequence preserves GSU state" do
+    bus = superfx_bus(<<0xDA, 0xB1, 0x5A, 0x40, 0x6B, 0x00>>)
+    {bus, 6} = Bus.cpu_write(bus, 0x003002, 0x40)
+    {bus, 6} = Bus.cpu_write(bus, 0x003003, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x003014, 0x01)
+    {bus, 6} = Bus.cpu_write(bus, 0x003015, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x003016, 0x02)
+    {bus, 6} = Bus.cpu_write(bus, 0x003017, 0x00)
+    {bus, 8} = Bus.cpu_write(bus, 0x700042, 0x34)
+    {bus, 8} = Bus.cpu_write(bus, 0x700043, 0x12)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301E, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301F, 0x90)
+
+    assert Bus.peek(bus, 0x003000) == 0x32
+    assert Bus.peek(bus, 0x003001) == 0x12
+    assert Bus.peek(bus, 0x003014) == 2
+    assert (Bus.peek(bus, 0x003030) &&& 0x1E) == 0x04
+    assert bus.coprocessor.ramaddr == 0x42
+    assert bus.coprocessor.last_job_instructions == 7
+  end
+
   test "PLOT addresses screen RAM independently of the LD/ST RAM bank" do
     bus = superfx_bus(<<0x00>>, expansion_ram_size_code: 7)
     {bus, 8} = Bus.cpu_write(bus, 0x700000, 0)
