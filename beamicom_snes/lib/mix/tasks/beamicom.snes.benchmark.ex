@@ -83,6 +83,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     {Beamicom.SNES.SuperFX, :run_job, 2},
     {Beamicom.SNES.SuperFX, :run_loop, 4},
     {Beamicom.SNES.SuperFX, :fast_plot_loop, 3},
+    {Beamicom.SNES.SuperFX, :run_fast_masked_plot_loop, 12},
     {Beamicom.SNES.SuperFX, :run_fast_ram_plot_loop, 10},
     {Beamicom.SNES.SuperFX, :run_fast_plot_loop, 13},
     {Beamicom.SNES.SuperFX, :run_fast_add_plot_loop, 13},

@@ -365,6 +365,36 @@ defmodule Beamicom.SNES.SuperFX do
     pc = reg(sfx, 15)
 
     cond do
+      remaining >= 15 and not flag?(sfx, @flag_alt1) and reg(sfx, 12) > 1 and
+        reg(sfx, 13) == u16(pc - 10) and
+        (u16(reg(sfx, 1) + 1) &&& reg(sfx, 4)) != 0 and
+        opcode_sequence?(
+          sfx,
+          cartridge,
+          pc - 10,
+          <<0xA0, 0x00, 0x2B, 0x04, 0x04, 0x2A, 0x04, 0x04, 0x4E, 0x4C>>
+        ) and
+          opcode_sequence?(
+            sfx,
+            cartridge,
+            pc,
+            <<0x21, 0x74, 0x08, 0x05, 0x01, 0xA0, 0x20, 0x12, 0x52, 0x3C, 0x01>>
+          ) ->
+        run_fast_masked_plot_loop(
+          sfx,
+          pc,
+          remaining,
+          0,
+          reg(sfx, 0),
+          reg(sfx, 1),
+          reg(sfx, 10),
+          reg(sfx, 11),
+          reg(sfx, 12),
+          sfx.sfr,
+          sfx.colr,
+          sfx.pixel_cache
+        )
+
       not flag?(sfx, @flag_alt1) and reg(sfx, 12) > 0 and reg(sfx, 13) == pc and
           opcode_sequence?(sfx, cartridge, pc, <<0x3D, 0x41, 0x4E, 0x3C, 0x4C>>) ->
         run_fast_ram_plot_loop(
@@ -431,6 +461,136 @@ defmodule Beamicom.SNES.SuperFX do
   end
 
   defp fast_plot_loop(_sfx, _cartridge, _remaining), do: :no
+
+  defp run_fast_masked_plot_loop(
+         sfx,
+         pc,
+         remaining,
+         executed,
+         r0,
+         r1,
+         r10,
+         r11,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       )
+       when remaining < 15 or r12 <= 1 do
+    {:ok,
+     finish_fast_masked_plot_loop(
+       sfx,
+       pc,
+       executed,
+       r0,
+       r1,
+       r10,
+       r11,
+       r12,
+       sfr,
+       colr,
+       pixel_cache
+     ), executed}
+  end
+
+  defp run_fast_masked_plot_loop(
+         sfx,
+         pc,
+         remaining,
+         executed,
+         r0,
+         r1,
+         r10,
+         r11,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ) do
+    next_r1 = u16(r1 + 1) &&& reg(sfx, 4)
+
+    if next_r1 == 0 do
+      {:ok,
+       finish_fast_masked_plot_loop(
+         sfx,
+         pc,
+         executed,
+         r0,
+         r1,
+         r10,
+         r11,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ), executed}
+    else
+      pixel_cache = fast_plot_pixel(sfx, pixel_cache, r1, reg(sfx, 2), colr)
+      r12 = u16(r12 - 1)
+
+      {r11, sfr} = fast_rotate_left(sfr, r11)
+      {r0, sfr} = fast_rotate_left(sfr, 0)
+      {r10, sfr} = fast_rotate_left(sfr, r10)
+      {r0, sfr} = fast_rotate_left(sfr, r0)
+      colr = fast_color(sfx.por, colr, r0)
+
+      run_fast_masked_plot_loop(
+        sfx,
+        pc,
+        remaining - 15,
+        executed + 15,
+        r0,
+        next_r1,
+        r10,
+        r11,
+        r12,
+        sfr,
+        colr,
+        pixel_cache
+      )
+    end
+  end
+
+  defp finish_fast_masked_plot_loop(
+         sfx,
+         pc,
+         executed,
+         r0,
+         r1,
+         r10,
+         r11,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ) do
+    memory_put(sfx.regs, 0, r0)
+    memory_put(sfx.regs, 1, r1)
+    memory_put(sfx.regs, 10, r10)
+    memory_put(sfx.regs, 11, r11)
+    memory_put(sfx.regs, 12, r12)
+    memory_put(sfx.regs, 15, pc)
+
+    %{
+      sfx
+      | sfr: sfr,
+        colr: colr,
+        pipeline: 0x4C,
+        pixel_cache: pixel_cache,
+        sreg: 0,
+        dreg: 0,
+        r14_modified?: false,
+        r15_modified?: false,
+        batched_plot_spans: sfx.batched_plot_spans + 1,
+        batched_plot_pixels: sfx.batched_plot_pixels + div(executed, 15)
+    }
+  end
+
+  defp fast_rotate_left(sfr, source) do
+    value = u16(source <<< 1 ||| if((sfr &&& @flag_cy) != 0, do: 1, else: 0))
+    sfr = if (source &&& 0x8000) != 0, do: sfr ||| @flag_cy, else: sfr &&& bnot(@flag_cy)
+    {value, logic_sfr(sfr, value, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2)}
+  end
 
   defp run_fast_ram_plot_loop(
          sfx,

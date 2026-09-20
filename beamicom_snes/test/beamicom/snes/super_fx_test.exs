@@ -244,6 +244,39 @@ defmodule Beamicom.SNES.SuperFXTest do
     assert bus.coprocessor.last_job_instructions == 46
   end
 
+  test "batches the masked horizontal PLOT loop without consuming its terminal iteration" do
+    program =
+      <<0xF1, 0x00, 0x00, 0xF2, 0x00, 0x00, 0xF4, 0xFF, 0x00, 0xFA, 0x00, 0x80, 0xFB, 0x00, 0x80,
+        0xFC, 0x04, 0x00, 0xFD, 0x15, 0x90, 0xA0, 0x00, 0x2B, 0x04, 0x04, 0x2A, 0x04, 0x04, 0x4E,
+        0x4C, 0x21, 0x74, 0x08, 0x05, 0x01, 0xA0, 0x20, 0x12, 0x52, 0x3C, 0x01, 0xF0, 0x01, 0x00,
+        0x4E, 0xF1, 0x08, 0x00, 0x4C, 0xF1, 0x10, 0x00, 0x4C, 0x00>>
+
+    # This byte is skipped by the taken BNE. Changing it preserves scalar
+    # behavior while deliberately defeating the kernel's opcode guard.
+    <<prefix::binary-size(39), _guarded, suffix::binary>> = program
+    scalar_program = prefix <> <<0x53>> <> suffix
+
+    bus = superfx_bus(program)
+    scalar_bus = superfx_bus(scalar_program)
+
+    {bus, 8} = Bus.cpu_write(bus, 0x700000, 0)
+    {bus, 8} = Bus.cpu_write(bus, 0x700001, 0)
+    {scalar_bus, 8} = Bus.cpu_write(scalar_bus, 0x700000, 0)
+    {scalar_bus, 8} = Bus.cpu_write(scalar_bus, 0x700001, 0)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301E, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301F, 0x90)
+    {scalar_bus, 6} = Bus.cpu_write(scalar_bus, 0x00301E, 0x00)
+    {scalar_bus, 6} = Bus.cpu_write(scalar_bus, 0x00301F, 0x90)
+
+    assert bus.coprocessor.batched_plot_spans == 1
+    assert bus.coprocessor.batched_plot_pixels == 3
+    assert scalar_bus.coprocessor.batched_plot_spans == 0
+
+    assert superfx_registers(bus) == superfx_registers(scalar_bus)
+    assert superfx_ram(bus, 64) == superfx_ram(scalar_bus, 64)
+    assert comparable_superfx_state(bus) == comparable_superfx_state(scalar_bus)
+  end
+
   defp superfx_bus(program, opts \\ []) do
     media =
       :lorom
@@ -259,5 +292,21 @@ defmodule Beamicom.SNES.SuperFXTest do
     {bus, 6} = Bus.cpu_write(bus, 0x00301E, 0x00)
     {bus, 6} = Bus.cpu_write(bus, 0x00301F, 0x90)
     bus
+  end
+
+  defp superfx_registers(bus) do
+    Enum.map(0..15, fn register ->
+      low = Bus.peek(bus, 0x003000 + register * 2)
+      high = Bus.peek(bus, 0x003001 + register * 2)
+      low ||| high <<< 8
+    end)
+  end
+
+  defp superfx_ram(bus, size), do: Enum.map(0..(size - 1), &Bus.peek(bus, 0x700000 + &1))
+
+  defp comparable_superfx_state(bus) do
+    bus.coprocessor
+    |> Map.from_struct()
+    |> Map.drop([:regs, :ram, :bram, :cache, :batched_plot_spans, :batched_plot_pixels])
   end
 end
