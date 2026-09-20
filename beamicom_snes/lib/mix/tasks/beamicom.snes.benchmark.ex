@@ -83,6 +83,7 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
     {Beamicom.SNES.SuperFX, :run_job, 2},
     {Beamicom.SNES.SuperFX, :run_loop, 4},
     {Beamicom.SNES.SuperFX, :fast_plot_loop, 3},
+    {Beamicom.SNES.SuperFX, :run_fast_ram_plot_loop, 10},
     {Beamicom.SNES.SuperFX, :run_fast_plot_loop, 13},
     {Beamicom.SNES.SuperFX, :run_fast_add_plot_loop, 13},
     {Beamicom.SNES.SuperFX, :fast_plot_pixel, 5},
@@ -317,7 +318,9 @@ defmodule Mix.Tasks.Beamicom.Snes.Benchmark do
   defp report_coprocessor(%Beamicom.SNES.SuperFX{} = super_fx) do
     Mix.shell().info(
       "SuperFX: #{super_fx.job_count} jobs, #{super_fx.instruction_count} instructions, " <>
-        "last job=#{super_fx.last_job_instructions}, halted=#{inspect(super_fx.halted_reason)}"
+        "last job=#{super_fx.last_job_instructions}, " <>
+        "batched plots=#{super_fx.batched_plot_pixels} pixels/" <>
+        "#{super_fx.batched_plot_spans} spans, halted=#{inspect(super_fx.halted_reason)}"
     )
   end
 

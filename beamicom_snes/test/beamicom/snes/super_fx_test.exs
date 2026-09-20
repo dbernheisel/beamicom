@@ -221,6 +221,29 @@ defmodule Beamicom.SNES.SuperFXTest do
     assert Bus.peek(bus, 0x710000) == 0xFF
   end
 
+  test "batches the RAM-fed horizontal PLOT loop without changing pixel or instruction state" do
+    program =
+      <<0xF1, 0x00, 0x00, 0xF2, 0x00, 0x00, 0xFC, 0x07, 0x00, 0xFD, 0x11, 0x90, 0xF0, 0x01, 0x00,
+        0x4E, 0x4C, 0x3D, 0x41, 0x4E, 0x3C, 0x4C, 0xF1, 0x08, 0x00, 0x4C, 0x00>>
+
+    bus = superfx_bus(program)
+
+    bus =
+      Enum.reduce(1..7, bus, fn address, bus ->
+        {bus, 8} = Bus.cpu_write(bus, 0x700000 + address, address + 1)
+        bus
+      end)
+
+    {bus, 6} = Bus.cpu_write(bus, 0x00301E, 0x00)
+    {bus, 6} = Bus.cpu_write(bus, 0x00301F, 0x90)
+
+    assert Bus.peek(bus, 0x700000) == 0xAA
+    assert Bus.peek(bus, 0x700001) == 0x66
+    assert bus.coprocessor.batched_plot_spans == 1
+    assert bus.coprocessor.batched_plot_pixels == 7
+    assert bus.coprocessor.last_job_instructions == 46
+  end
+
   defp superfx_bus(program, opts \\ []) do
     media =
       :lorom

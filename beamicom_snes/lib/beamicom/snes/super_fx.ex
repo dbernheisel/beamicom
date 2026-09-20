@@ -59,6 +59,8 @@ defmodule Beamicom.SNES.SuperFX do
             instruction_count: 0,
             job_count: 0,
             last_job_instructions: 0,
+            batched_plot_spans: 0,
+            batched_plot_pixels: 0,
             halted_reason: nil
 
   @type t :: %__MODULE__{}
@@ -363,6 +365,21 @@ defmodule Beamicom.SNES.SuperFX do
     pc = reg(sfx, 15)
 
     cond do
+      not flag?(sfx, @flag_alt1) and reg(sfx, 12) > 0 and reg(sfx, 13) == pc and
+          opcode_sequence?(sfx, cartridge, pc, <<0x3D, 0x41, 0x4E, 0x3C, 0x4C>>) ->
+        run_fast_ram_plot_loop(
+          sfx,
+          pc,
+          remaining,
+          0,
+          reg(sfx, 0),
+          reg(sfx, 1),
+          reg(sfx, 12),
+          sfx.sfr,
+          sfx.colr,
+          sfx.pixel_cache
+        )
+
       opcode_sequence?(
         sfx,
         cartridge,
@@ -414,6 +431,114 @@ defmodule Beamicom.SNES.SuperFX do
   end
 
   defp fast_plot_loop(_sfx, _cartridge, _remaining), do: :no
+
+  defp run_fast_ram_plot_loop(
+         sfx,
+         pc,
+         remaining,
+         executed,
+         r0,
+         r1,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       )
+       when remaining < 5 do
+    {:ok,
+     finish_fast_ram_plot_loop(
+       sfx,
+       pc,
+       executed,
+       r0,
+       r1,
+       r12,
+       sfr,
+       colr,
+       pixel_cache
+     ), executed}
+  end
+
+  defp run_fast_ram_plot_loop(
+         sfx,
+         pc,
+         remaining,
+         executed,
+         _r0,
+         r1,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ) do
+    pixel_cache = fast_plot_pixel(sfx, pixel_cache, r1, reg(sfx, 2), colr)
+    r1 = u16(r1 + 1)
+    r0 = ram_read(sfx, r1)
+    colr = fast_color(sfx.por, colr, r0)
+    r12 = u16(r12 - 1)
+    sfr = logic_sfr(sfr, r12, 0x8000) &&& bnot(@flag_b ||| @flag_alt1 ||| @flag_alt2)
+    executed = executed + 5
+
+    if r12 == 0 do
+      {:ok,
+       finish_fast_ram_plot_loop(
+         sfx,
+         pc + 5,
+         executed,
+         r0,
+         r1,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ), executed}
+    else
+      run_fast_ram_plot_loop(
+        sfx,
+        pc,
+        remaining - 5,
+        executed,
+        r0,
+        r1,
+        r12,
+        sfr,
+        colr,
+        pixel_cache
+      )
+    end
+  end
+
+  defp finish_fast_ram_plot_loop(
+         sfx,
+         pc,
+         executed,
+         r0,
+         r1,
+         r12,
+         sfr,
+         colr,
+         pixel_cache
+       ) do
+    memory_put(sfx.regs, 0, r0)
+    memory_put(sfx.regs, 1, r1)
+    memory_put(sfx.regs, 12, r12)
+    memory_put(sfx.regs, 15, u16(pc))
+
+    %{
+      sfx
+      | sfr: sfr,
+        colr: colr,
+        pipeline: 0x4C,
+        pixel_cache: pixel_cache,
+        ramaddr: r1,
+        sreg: 0,
+        dreg: 0,
+        r14_modified?: false,
+        r15_modified?: false,
+        batched_plot_spans: sfx.batched_plot_spans + 1,
+        batched_plot_pixels: sfx.batched_plot_pixels + div(executed, 5)
+    }
+  end
 
   defp run_fast_plot_loop(
          sfx,
