@@ -1,6 +1,7 @@
 /_build/
 /cover/
 /deps/
+/priv/native/
 /doc/
 /tmp/
 erl_crash.dump

@@ -3,6 +3,9 @@ defmodule Beamicom.Scenic.Player do
 
   use GenServer
 
+  require Logger
+
+  alias Beamicom.EI.Gamepad
   alias Beamicom.Host.{Input, Output, VideoFrame}
   alias Beamicom.GB.ShareImage, as: GBShareImage
   alias Beamicom.NES.{PPU, ShareImage}
@@ -90,6 +93,7 @@ defmodule Beamicom.Scenic.Player do
          {:ok, audio} <- start_audio(core, output, speed, player_options),
          {:ok, runtime} <- start_runtime(core, machine, output, speed, player_options),
          {:ok, input_server, input_client} <- start_input(core, self()),
+         gamepad_input = start_gamepad(core, input_server, player_options),
          scene_options =
            scene_options(core, runtime, output, prepared.scale, prepared.video_filter) do
       {:ok,
@@ -110,6 +114,7 @@ defmodule Beamicom.Scenic.Player do
          runtime: runtime,
          input_server: input_server,
          input_client: input_client,
+         gamepad_input: gamepad_input,
          scene_options: scene_options,
          paused: false,
          controller_buttons: %{}
@@ -290,7 +295,7 @@ defmodule Beamicom.Scenic.Player do
 
   @impl true
   def handle_cast({:controller_input, port, buttons}, state) do
-    buttons = MapSet.new(buttons)
+    buttons = supported_buttons(state.core, port, buttons)
     previous = Map.get(state.controller_buttons, port, MapSet.new())
 
     if state.paused do
@@ -307,6 +312,15 @@ defmodule Beamicom.Scenic.Player do
   @impl true
   def handle_info({:EXIT, audio, _reason}, %{audio: audio} = state) when is_pid(audio),
     do: {:noreply, %{state | audio: nil}}
+
+  def handle_info({:EXIT, gamepad_input, reason}, %{gamepad_input: gamepad_input} = state)
+      when is_pid(gamepad_input) do
+    if reason not in [:normal, :shutdown] do
+      Logger.warning("native gamepad input stopped: #{inspect(reason)}")
+    end
+
+    {:noreply, %{state | gamepad_input: nil}}
+  end
 
   def handle_info({:EXIT, child, reason}, state) when reason in [:normal, :shutdown] do
     if child in children(state),
@@ -336,7 +350,8 @@ defmodule Beamicom.Scenic.Player do
       state.audio,
       state.runtime,
       state.input_server,
-      state.input_client
+      state.input_client,
+      state.gamepad_input
     ]
     |> Enum.filter(&is_pid/1)
   end
@@ -771,6 +786,45 @@ defmodule Beamicom.Scenic.Player do
          :ok <- Beamicom.EI.Client.await_ready(client) do
       {:ok, server, client}
     end
+  end
+
+  defp start_gamepad(core, input_server, options) do
+    enabled =
+      Keyword.get(
+        options,
+        :gamepad,
+        Application.get_env(:beamicom_scenic, :gamepad, true)
+      )
+
+    if enabled do
+      gamepad_options = [
+        path: Beamicom.EI.Server.path(input_server),
+        ports: core.capabilities.input.ports |> Map.keys() |> Enum.sort()
+      ]
+
+      gamepad_options =
+        case Keyword.fetch(options, :gamepad_command) do
+          {:ok, command} -> Keyword.put(gamepad_options, :command, command)
+          :error -> gamepad_options
+        end
+
+      case Gamepad.start_link(gamepad_options) do
+        {:ok, gamepad_input} ->
+          gamepad_input
+
+        :ignore ->
+          nil
+
+        {:error, reason} ->
+          Logger.warning("native gamepad input unavailable: #{inspect(reason)}")
+          nil
+      end
+    end
+  end
+
+  defp supported_buttons(core, port, buttons) do
+    supported = Map.get(core.capabilities.input.ports, port, MapSet.new())
+    buttons |> MapSet.new() |> MapSet.intersection(supported)
   end
 
   defp dispatch_input(%Core{runtime: :nes}, runtime, port, buttons),

@@ -3,6 +3,7 @@ defmodule Beamicom.Scenic.PlayerTest do
 
   import Bitwise
 
+  alias Beamicom.EI.Gamepad
   alias Beamicom.Scenic.{Host, Player, SaveState, Settings, Shell, Shutdown}
 
   @discard_audio_command ["sh", "-c", "cat >/dev/null"]
@@ -178,6 +179,24 @@ defmodule Beamicom.Scenic.PlayerTest do
     end
 
     assert {:error, :not_running} = Beamicom.Scenic.status()
+  end
+
+  test "routes standardized native gamepad state through the EI input union", %{path: path} do
+    assert :ok =
+             Beamicom.Scenic.play(path,
+               audio: false,
+               speed: 0.01,
+               gamepad: true,
+               gamepad_command: false
+             )
+
+    state = Player |> Process.whereis() |> :sys.get_state()
+    assert is_pid(state.gamepad_input)
+
+    Gamepad.feed(state.gamepad_input, <<1, 7::unsigned-big-32, "Test pad">>)
+    Gamepad.feed(state.gamepad_input, <<2, 7::unsigned-big-32, 0x0018::unsigned-big-16>>)
+
+    assert await_buttons(state.runtime, 0x11)
   end
 
   test "applies volume to the active system-neutral audio sink", %{path: path} do
@@ -738,7 +757,8 @@ defmodule Beamicom.Scenic.PlayerTest do
       state.audio,
       state.runtime,
       state.input_server,
-      state.input_client
+      state.input_client,
+      state.gamepad_input
     ]
     |> Enum.filter(&is_pid/1)
   end
