@@ -318,6 +318,22 @@ share Scenic's Config-menu volume slider.
 
 ### Controls (player 1)
 
+Scenic starts `Beamicom.EI.Gamepad`, the shared SDL-compatible USB and Bluetooth
+gamepad adapter. The D-pad and left stick control direction; the standardized
+A/B/X/Y, shoulder, Back, and Start controls map to the matching emulated
+buttons. Controllers are assigned in connection order: the first uses port 1
+and, for systems with a second port, the second uses port 2. One-port handheld
+systems keep additional controllers waiting until the active controller
+disconnects. Keyboard, remote EI, and physical gamepad states are unioned, so
+releasing one input source does not release a button still held on another.
+
+SDL's mapping database supplies the device-specific layouts. The 8BitDo Ultimate
+2C has been verified over Bluetooth in its Switch-compatible mode; SDL exposes
+it as a standardized Nintendo Switch Pro Controller. Xbox, PlayStation,
+Nintendo, and third-party pads present through the same API when SDL recognizes
+their mapping. Set `gamepad: false` in `play/2` or `replace/2` to disable the
+native reader for a session.
+
 | Key | Button |
 |-----|--------|
 | Arrow keys | D-pad |

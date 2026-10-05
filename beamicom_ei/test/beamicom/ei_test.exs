@@ -22,8 +22,8 @@ defmodule Beamicom.EITest do
   end
 
   @tag :tmp_dir
-  test "commits buttons", %{tmp_dir: tmp_dir} do
-    path = Path.join(tmp_dir, "beamicom-ei.sock")
+  test "commits", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "s")
     owner = self()
 
     server =
@@ -42,8 +42,8 @@ defmodule Beamicom.EITest do
   end
 
   @tag :tmp_dir
-  test "releases on disconnect", %{tmp_dir: tmp_dir} do
-    path = Path.join(tmp_dir, "beamicom-ei.sock")
+  test "disconnect", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "s")
     owner = self()
     start_supervised!({Server, path: path, on_buttons: fn p, b -> send(owner, {p, b}) end})
     client = start_supervised!({Client, path: path})
@@ -54,9 +54,9 @@ defmodule Beamicom.EITest do
     assert_receive {2, []}
   end
 
-  test "can advertise only handheld port one" do
-    path = Path.join(System.tmp_dir!(), "bei-#{System.unique_integer([:positive])}.sock")
-    on_exit(fn -> File.rm(path) end)
+  @tag :tmp_dir
+  test "handheld", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "s")
     owner = self()
 
     start_supervised!(

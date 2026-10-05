@@ -22,6 +22,10 @@ end
 # Static asset library (fonts/images) — needed by Scenic text/button components.
 config :scenic, :assets, module: Beamicom.Scenic.Assets
 
+# Tests inject hardware readers explicitly.
+# The suite does not depend on connected USB or Bluetooth controllers.
+config :beamicom_scenic, gamepad: config_env() != :test
+
 # Long-lived Scenic viewport. Replaceable emulator sessions are rendered by a
 # child component without recreating the root scene or native window.
 # The local driver needs native GLFW — see the README.
