@@ -5,10 +5,11 @@ import Config
 # changes the renderer default when the core is hosted by this application;
 # the standalone SNES package remains native-first.
 config :beamicom_snes, ppu_renderer: :nx
+config :beamicom_gba, ppu_renderer: Beamicom.GBA.Nx.PPURenderer
 
-# Opt the NES and Game Boy render boundaries into their Nx implementations at compile
-# time. Keep this environment variable set for every Mix invocation so Mix's
-# compile-env validation sees the same configuration at build and launch.
+# Opt the NES and Game Boy render boundaries into their Nx implementations at
+# compile time. GBA and SNES always use Nx under Scenic because their scalar
+# renderers are reference paths rather than realtime presentation paths.
 if System.get_env("BEAMICOM_SCENIC_NX") in ["1", "true", "yes", "on"] do
   config :beamicom_nes,
     ppu_renderer: Beamicom.NES.Nx.PPURenderer,

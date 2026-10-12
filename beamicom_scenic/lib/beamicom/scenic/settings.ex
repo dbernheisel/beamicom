@@ -95,7 +95,7 @@ defmodule Beamicom.Scenic.Settings do
     %{settings | recent_roms: recent_roms}
   end
 
-  @spec player_options(:nes | :gbc | :snes, keyword(), t()) :: keyword()
+  @spec player_options(:nes | :gbc | :gba | :snes, keyword(), t()) :: keyword()
   def player_options(system, options, settings \\ load_or_defaults())
 
   def player_options(system, options, settings)
@@ -128,6 +128,12 @@ defmodule Beamicom.Scenic.Settings do
     do:
       options
       |> Keyword.put_new(:video_filter, filter_option(settings.snes_video_filter))
+      |> Keyword.put_new(:audio, settings.audio)
+      |> Keyword.put_new(:volume, settings.volume)
+
+  def player_options(:gba, options, settings) when is_list(options) and is_map(settings),
+    do:
+      options
       |> Keyword.put_new(:audio, settings.audio)
       |> Keyword.put_new(:volume, settings.volume)
 

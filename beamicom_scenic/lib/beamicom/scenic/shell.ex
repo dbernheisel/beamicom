@@ -18,14 +18,15 @@ defmodule Beamicom.Scenic.Shell do
   alias Scenic.{Graph, Primitive}
 
   @media_filters [
-    {"Beamicom media", ["nes", "gb", "gbc", "sfc", "smc", "png"]},
+    {"Beamicom media", ["nes", "gb", "gbc", "gba", "sfc", "smc", "png"]},
     {"NES ROMs", ["nes"]},
     {"Game Boy ROMs", ["gb", "gbc"]},
+    {"Game Boy Advance ROMs", ["gba"]},
     {"SNES ROMs", ["sfc", "smc"]},
     {"Beamicom saves", ["png"]}
   ]
   @save_filters [{"Beamicom save image", ["png"]}]
-  @rom_extensions [".nes", ".gb", ".gbc", ".sfc", ".smc"]
+  @rom_extensions [".nes", ".gb", ".gbc", ".gba", ".sfc", ".smc"]
 
   @impl true
   def init(scene, _params, _opts) do
@@ -437,7 +438,8 @@ defmodule Beamicom.Scenic.Shell do
   end
 
   def handle_info({:session_mode, mode}, scene) when mode in [:running, :menu_paused] do
-    session = clear_fps(scene.assigns.session)
+    session =
+      if mode == :running, do: clear_fps(scene.assigns.session), else: scene.assigns.session
 
     graph =
       build_graph(
@@ -454,7 +456,7 @@ defmodule Beamicom.Scenic.Shell do
       |> assign(graph: graph, mode: mode, session: session, message: nil)
       |> push_graph(graph)
 
-    :ok = put_child(scene, :game_surface, :reset_fps)
+    if mode == :running, do: put_child(scene, :game_surface, :reset_fps)
 
     if mode == :menu_paused do
       :ok = put_child(scene, :menu_bar, {:open, :game})
@@ -771,7 +773,9 @@ defmodule Beamicom.Scenic.Shell do
 
     case Settings.save(settings) do
       :ok ->
-        assign(scene, settings: settings, load_ref: nil, pending_rom_path: nil)
+        scene
+        |> assign(settings: settings, load_ref: nil, pending_rom_path: nil)
+        |> refresh_menu()
 
       {:error, reason} ->
         scene
@@ -788,6 +792,14 @@ defmodule Beamicom.Scenic.Shell do
   end
 
   defp recent_rom_path(_path, :skip_history), do: nil
+
+  defp refresh_menu(scene) do
+    update_child(
+      scene,
+      :menu_bar,
+      menu_data(scene.assigns.width, scene.assigns.session, scene.assigns.settings)
+    )
+  end
 
   defp start_save(scene, path) do
     owner = self()
@@ -976,7 +988,9 @@ defmodule Beamicom.Scenic.Shell do
 
   defp menu_data(width, session, settings) do
     session? = session == true or is_map(session)
-    state_actions? = session == true or get_in(session, [:status, :system]) in [:nes, :gbc, :snes]
+
+    state_actions? =
+      session == true or get_in(session, [:status, :system]) in [:nes, :gbc, :gba, :snes]
 
     %{
       width: width - 88,

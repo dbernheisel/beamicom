@@ -242,6 +242,7 @@ defmodule Beamicom.Scenic.Component.GameSurface do
 
   defp capabilities(:nes), do: Beamicom.NES.System.capabilities()
   defp capabilities(:gbc), do: Beamicom.GB.System.capabilities()
+  defp capabilities(:gba), do: Beamicom.GBA.System.capabilities()
   defp capabilities(:snes), do: Beamicom.Scenic.SNESSystem.capabilities()
 
   defp runtime_action(%{assigns: %{runtime_kind: :nes, runtime: runtime}}, action),

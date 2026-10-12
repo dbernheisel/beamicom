@@ -5,14 +5,17 @@ defmodule Beamicom.Scenic.Player do
 
   require Logger
 
-  alias Beamicom.EI.Gamepad
   alias Beamicom.Host.{Input, Output, VideoFrame}
+  alias Beamicom.EI.Gamepad
   alias Beamicom.GB.ShareImage, as: GBShareImage
+  alias Beamicom.GBA.ShareImage, as: GBAShareImage
   alias Beamicom.NES.{PPU, ShareImage}
   alias Beamicom.NES.Output, as: NESOutput
   alias Beamicom.Scenic.{AudioSink, Core, Runtime, SaveState, Settings}
   alias Beamicom.SNES.PPU, as: SNESPPU
   alias Beamicom.SNES.ShareImage, as: SNESShareImage
+
+  @gba_heap_words 800_000
 
   def start(options), do: GenServer.start(__MODULE__, options, name: __MODULE__)
   def start_link(options), do: GenServer.start_link(__MODULE__, options, name: __MODULE__)
@@ -259,6 +262,17 @@ defmodule Beamicom.Scenic.Player do
     end
   end
 
+  def handle_call(:snapshot, _from, %{core: %Core{id: :gba}} = state) do
+    case Output.latest_video(state.output) do
+      %VideoFrame{data: frame} ->
+        machine = Runtime.snapshot(state.runtime)
+        {:reply, {:ok, {:gba, machine, frame}}, state}
+
+      nil ->
+        {:reply, {:error, :no_frame}, state}
+    end
+  end
+
   def handle_call(:snapshot, _from, %{core: %Core{id: :snes}} = state) do
     case Output.latest_video(state.output) do
       %VideoFrame{} ->
@@ -422,6 +436,18 @@ defmodule Beamicom.Scenic.Player do
   end
 
   defp load(
+         %Core{id: :gba},
+         _path,
+         <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png,
+         _options
+       ) do
+    case GBAShareImage.load_image(png) do
+      {:ok, machine} -> {:ok, machine}
+      {:error, reason} -> {:error, {:save_load_failed, reason}}
+    end
+  end
+
+  defp load(
          %Core{id: :snes},
          path,
          <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = png,
@@ -460,6 +486,24 @@ defmodule Beamicom.Scenic.Player do
   defp resolve_core(path, media), do: Core.resolve(path, media)
 
   defp resolve_non_gb_png(path, png) do
+    case GBAShareImage.classify(png) do
+      :gba ->
+        system = Beamicom.GBA.System
+
+        {:ok,
+         %Core{
+           id: system.id(),
+           system: system,
+           runtime: :host,
+           capabilities: system.capabilities()
+         }}
+
+      _not_gba ->
+        resolve_non_gba_png(path, png)
+    end
+  end
+
+  defp resolve_non_gba_png(path, png) do
     case SNESShareImage.classify(png) do
       :snes ->
         system = Beamicom.Scenic.SNESSystem
@@ -528,6 +572,16 @@ defmodule Beamicom.Scenic.Player do
           {:ok, Keyword.merge(base, Beamicom.SNES.Nx.video_options(preset, filter_options)),
            preset}
       end
+    end
+  end
+
+  defp load_options(%Core{id: :gba}, options) do
+    load_options = Keyword.get(options, :load_options, [])
+    filter = Keyword.get(options, :video_filter)
+
+    with :ok <- validate_keyword(load_options, :load_options),
+         true <- filter in [nil, :native] || {:error, {:invalid_option, :video_filter}} do
+      {:ok, load_options, filter}
     end
   end
 
@@ -648,6 +702,9 @@ defmodule Beamicom.Scenic.Player do
   defp snapshot_machine(%{core: %Core{id: :gbc}, runtime: runtime}, _load_options),
     do: {:ok, Runtime.snapshot(runtime)}
 
+  defp snapshot_machine(%{core: %Core{id: :gba}, runtime: runtime}, _load_options),
+    do: {:ok, Runtime.snapshot(runtime)}
+
   defp snapshot_machine(%{core: %Core{id: :snes}, runtime: runtime}, load_options) do
     state = Runtime.snapshot(runtime)
     filter = Keyword.get(load_options, :video_filter, :native)
@@ -731,6 +788,16 @@ defmodule Beamicom.Scenic.Player do
     end
   end
 
+  defp warm_core(%Core{id: :gba}) do
+    if Application.get_env(:beamicom_gba, :ppu_renderer, :scalar) ==
+         Beamicom.GBA.Nx.PPURenderer and
+         Code.ensure_loaded?(Beamicom.GBA.Nx.PPURenderer) do
+      Beamicom.GBA.Nx.PPURenderer.warmup()
+    else
+      :ok
+    end
+  end
+
   defp warm_core(%Core{}), do: :ok
 
   defp pause_audio(nil), do: :ok
@@ -753,15 +820,28 @@ defmodule Beamicom.Scenic.Player do
     )
   end
 
-  defp start_runtime(%Core{runtime: :host, system: system}, machine, output, speed, options) do
-    Runtime.start_link(
+  defp start_runtime(
+         %Core{runtime: :host, id: id, system: system},
+         machine,
+         output,
+         speed,
+         options
+       ) do
+    runtime_options = [
       system: system,
       machine: machine,
       output: output,
       speed: speed,
       pace: Keyword.get(options, :pace, true),
       name: Keyword.get(options, :runtime_name)
-    )
+    ]
+
+    runtime_options =
+      if id == :gba,
+        do: Keyword.put(runtime_options, :min_heap_size, @gba_heap_words),
+        else: runtime_options
+
+    Runtime.start_link(runtime_options)
   end
 
   defp start_input(core, owner) do

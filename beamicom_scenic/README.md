@@ -1,6 +1,7 @@
 # BeamicomScenic
 
-Local-verification client for the NES, Game Boy / Game Boy Color, and SNES cores.
+Local-verification client for the NES, Game Boy / Game Boy Color, Game Boy Advance,
+and SNES cores.
 A [Scenic](https://hexdocs.pm/scenic) window renders each core's native video
 output and a host-owned audio sink plays PCM. Keeping this host separate means
 no emulator core takes a Scenic, OpenGL, or platform audio dependency.
@@ -48,6 +49,7 @@ This project and its core path dependencies are included in the same repository:
 ```
 beamicom/          # core emulator
 beamicom_gbc/      # Game Boy / Game Boy Color core
+beamicom_gba/      # Game Boy Advance core
 beamicom_host/     # shared host contracts
 beamicom_scenic/   # this project
 ```
@@ -62,9 +64,10 @@ mix compile
 
 ## Compile-time Nx acceleration
 
-The NES PPU and APU renderer choices are compile-time settings. Scenic provides
-one opt-in flag that selects both `Beamicom.NES.Nx.PPURenderer` and
-`Beamicom.NES.Nx.APUBlockRenderer`. The PPU renderer is atlas-first and
+The renderer choices are compile-time settings. Scenic selects the GBA and SNES
+Nx renderers by default so those systems can sustain their realtime audio
+streams. One opt-in flag selects the NES and Game Boy Nx implementations. The
+NES PPU renderer is atlas-first and
 automatically uses its internal byte/hybrid fallback where a cartridge requires
 it.
 
@@ -95,6 +98,9 @@ Beamicom.GB.PPU.configured_renderer()
 
 Beamicom.GB.APU.configured_renderer()
 #=> Beamicom.GB.Nx.APUSynthRenderer
+
+Beamicom.GBA.Nx.backends()
+#=> %{ppu: Beamicom.GBA.Nx.PPURenderer}
 ```
 
 Normal atlas-first Nx video with the Nx block APU then needs no per-game renderer
@@ -118,8 +124,8 @@ same BEAM instance reuse the compiled programs. Game Boy slices are paced from
 their actual PCM duration, including longer intervals while a ROM disables the
 LCD.
 
-To return to the native renderer defaults, unset the flag and rebuild the same
-dependencies:
+To return NES and Game Boy to their native renderer defaults, unset the flag and
+rebuild those dependencies. GBA remains Nx-backed under Scenic:
 
 ```sh
 unset BEAMICOM_SCENIC_NX
@@ -149,8 +155,17 @@ Beamicom.Scenic.play("/path/to/open-source-game.gbc")
 Beamicom.Scenic.play("/path/to/game.gbc", video_filter: :pixel_transparency, scale: 3)
 Beamicom.Scenic.play("/path/to/game.gb", scale: 4)   # integer scale, default 3
 Beamicom.Scenic.play("/path/to/game.gbc", speed: 0.5) # half speed, default 1.0
+Beamicom.Scenic.play("/path/to/game.gba", scale: 3)
 Beamicom.Scenic.play("../beamicom_snes/roms/Super Mario World.sfc")
 ```
+
+GBA sessions use the same host runtime, 240x160 RGB24 display path, integer
+scaling, keyboard/controller input, stereo sink, and recent-ROM history as the
+other cores. Scenic uses the GBA Nx renderer and a larger emulator-process heap
+by default; the scalar renderer remains the standalone reference path. The core
+is still at a diagnostic compatibility stage. GBA sessions support the same
+self-contained PNG save states, quick slots, and preview browser as the other
+cores.
 
 `.sfc` and `.smc` files can be loaded through a temporary Scenic adapter for
 checking the progress of the in-development SNES core. Its current frame and
@@ -355,8 +370,9 @@ keys and Enter navigate an open menu. During gameplay, `.` requests a
 debug step and `g` toggles the NES raw palette-address grayscale view. `F5`
 quick-saves and `F8` quick-loads while running or paused. The quick slot is
 `<rom-sha256>.png` in the configured save-state folder; NES hashes its parsed
-PRG+CHR data, while Game Boy and SNES hash the cartridge ROM. Save and load state
-actions appear in the Game menu only while a game is loaded. The Game menu also
-lists the five most recently loaded ROMs by filename. Load State opens a horizontal,
-ROM-specific preview browser; use Left/Right or the scroll wheel, Enter to load,
-`O` or Open... for the native picker, and Escape to close it.
+PRG+CHR data, while Game Boy, GBA, and SNES hash the cartridge ROM. Save and
+load state actions appear in the Game menu only while a game is loaded. The
+Game menu also lists the five most recently loaded ROMs by filename. Load State
+opens a horizontal, ROM-specific preview browser; use Left/Right or the scroll
+wheel, Enter to load, `O` or Open... for the native picker, and Escape to close
+it.

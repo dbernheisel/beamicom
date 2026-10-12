@@ -22,6 +22,7 @@ defmodule BeamicomScenic.MixProject do
     [
       {:beamicom_nes, path: "../beamicom_nes"},
       {:beamicom_gbc, path: "../beamicom_gbc"},
+      {:beamicom_gba, path: "../beamicom_gba"},
       {:beamicom_snes, path: "../beamicom_snes"},
       {:nx, "~> 1.0"},
       {:exla, "~> 1.0"},

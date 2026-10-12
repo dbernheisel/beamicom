@@ -119,6 +119,11 @@ defmodule Beamicom.Scenic.SettingsTest do
     assert snes_options[:volume] == 40
 
     assert Settings.player_options(:snes, [video_filter: :rgb], settings)[:video_filter] == :rgb
+
+    gba_options = Settings.player_options(:gba, [], settings)
+    assert gba_options[:audio] == false
+    assert gba_options[:volume] == 40
+    refute Keyword.has_key?(gba_options, :video_filter)
   end
 
   test "volume must be an integer percentage" do

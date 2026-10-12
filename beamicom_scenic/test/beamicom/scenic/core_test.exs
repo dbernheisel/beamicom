@@ -3,7 +3,7 @@ defmodule Beamicom.Scenic.CoreTest do
 
   alias Beamicom.Scenic.Core
 
-  test "selects NES and Game Boy cores without loading Scenic" do
+  test "selects registered cores without loading Scenic" do
     assert {:ok, %Core{id: :nes, runtime: :nes, system: Beamicom.NES.System}} =
              Core.resolve("GAME.NES")
 
@@ -11,6 +11,11 @@ defmodule Beamicom.Scenic.CoreTest do
 
     for extension <- ["gb", "gbc", "GBC"] do
       assert {:ok, %Core{id: :gbc, runtime: :host, system: Beamicom.GB.System}} =
+               Core.resolve("game.#{extension}")
+    end
+
+    for extension <- ["gba", "GBA"] do
+      assert {:ok, %Core{id: :gba, runtime: :host, system: Beamicom.GBA.System}} =
                Core.resolve("game.#{extension}")
     end
 
@@ -25,6 +30,7 @@ defmodule Beamicom.Scenic.CoreTest do
   test "reports each core's native dimensions and audio layout" do
     {:ok, nes} = Core.resolve("game.nes")
     {:ok, gbc} = Core.resolve("game.gbc")
+    {:ok, gba} = Core.resolve("game.gba")
 
     assert nes.capabilities.video.width == 256
     assert nes.capabilities.video.height == 240
@@ -33,6 +39,10 @@ defmodule Beamicom.Scenic.CoreTest do
     assert gbc.capabilities.video.width == 160
     assert gbc.capabilities.video.height == 144
     assert gbc.capabilities.audio.channels == 2
+
+    assert gba.capabilities.video.width == 240
+    assert gba.capabilities.video.height == 160
+    assert gba.capabilities.audio.channels == 2
 
     {:ok, snes} = Core.resolve("game.sfc")
     assert snes.capabilities.video.width == 256

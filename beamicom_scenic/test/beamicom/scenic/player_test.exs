@@ -3,6 +3,7 @@ defmodule Beamicom.Scenic.PlayerTest do
 
   import Bitwise
 
+  alias Beamicom.GBA
   alias Beamicom.EI.Gamepad
   alias Beamicom.Scenic.{Host, Player, SaveState, Settings, Shell, Shutdown}
 
@@ -119,6 +120,17 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert saved_scene.assigns.settings.recent_roms == [path]
     assert {:ok, %{recent_roms: [^path]}} = Settings.load()
 
+    menu_data =
+      saved_scene.children
+      |> Map.values()
+      |> Enum.find_value(fn
+        {_top, _pid, :menu_bar, {Beamicom.Scenic.Component.MenuBar, data, _opts}} -> data
+        _child -> nil
+      end)
+
+    game_menu = Enum.find(menu_data.menus, &(&1.id == :game))
+    assert Enum.any?(game_menu.items, &match?(%{action: {:load_recent, ^path}}, &1))
+
     assert eventually(fn -> not is_nil(:sys.get_state(shell).assigns.session) end)
 
     assert eventually(fn ->
@@ -181,7 +193,63 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert {:error, :not_running} = Beamicom.Scenic.status()
   end
 
-  test "routes standardized native gamepad state through the EI input union", %{path: path} do
+  @tag :tmp_dir
+  test "loads and remembers GBA media through the Scenic menu", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "recent.gba")
+    File.write!(path, Beamicom.GBA.DiagnosticROM.loop())
+
+    assert :ok = Settings.save(%{Settings.defaults() | audio: false})
+    assert :ok = Beamicom.Scenic.start()
+    host = Process.whereis(Host)
+    assert eventually(fn -> is_pid(:sys.get_state(host).shell) end)
+    shell = :sys.get_state(host).shell
+
+    assert :ok = Scenic.Scene.send_event(shell, {:menu_action, {:load_recent, path}})
+
+    assert eventually(fn -> is_pid(Process.whereis(Player)) end, 6_000)
+    player = Process.whereis(Player)
+    assert :ok = Player.await_video(player, 5_000)
+
+    assert %{
+             system: :gba,
+             video: %{width: 240, height: 160, scaled_width: 720, scaled_height: 480}
+           } = Beamicom.Scenic.status()
+
+    assert eventually(fn ->
+             match?({:ok, %{recent_roms: [^path]}}, Settings.load())
+           end)
+
+    player_state = :sys.get_state(player)
+    assert player_state.core.runtime == :host
+    assert %Beamicom.GBA.Machine{} = Beamicom.Scenic.Runtime.snapshot(player_state.runtime)
+    assert Beamicom.GBA.Nx.backends() == %{ppu: Beamicom.GBA.Nx.PPURenderer}
+    assert {:min_heap_size, heap} = Process.info(player_state.runtime, :min_heap_size)
+    assert heap >= 800_000
+
+    assert eventually(fn ->
+             match?({:ok, [_surface]}, Scenic.Scene.child(:sys.get_state(shell), :game_surface))
+           end)
+
+    assert :ok = Beamicom.Scenic.pause()
+    assert eventually(fn -> :sys.get_state(shell).assigns.mode == :menu_paused end)
+    {:ok, [menu]} = Scenic.Scene.child(:sys.get_state(shell), :menu_bar)
+    game_menu = :sys.get_state(menu).assigns.data.menus |> Enum.find(&(&1.id == :game))
+
+    assert Enum.any?(game_menu.items, &match?(%{action: {:load_recent, ^path}}, &1))
+    assert Enum.find(game_menu.items, &match?(%{id: :save_state, enabled: true}, &1))
+    assert Enum.find(game_menu.items, &match?(%{id: :load_state, enabled: true}, &1))
+    assert :ok = Beamicom.Scenic.resume()
+
+    assert {:ok, reconfigured} = Player.prepare_reconfigure(player, scale: 3)
+    assert %Beamicom.GBA.Machine{} = reconfigured.machine
+    assert reconfigured.scale == 3
+  end
+
+  @tag :tmp_dir
+  test "routes every native gamepad direction into GBA KEYINPUT", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "directions.gba")
+    File.write!(path, GBA.DiagnosticROM.loop())
+
     assert :ok =
              Beamicom.Scenic.play(path,
                audio: false,
@@ -194,9 +262,19 @@ defmodule Beamicom.Scenic.PlayerTest do
     assert is_pid(state.gamepad_input)
 
     Gamepad.feed(state.gamepad_input, <<1, 7::unsigned-big-32, "Test pad">>)
-    Gamepad.feed(state.gamepad_input, <<2, 7::unsigned-big-32, 0x0018::unsigned-big-16>>)
 
-    assert await_buttons(state.runtime, 0x11)
+    for {native_mask, keyinput} <- [
+          {0x0001, 0x03BF},
+          {0x0002, 0x037F},
+          {0x0004, 0x03DF},
+          {0x0008, 0x03EF}
+        ] do
+      Gamepad.feed(state.gamepad_input, <<2, 7::unsigned-big-32, native_mask::unsigned-big-16>>)
+      assert await_keyinput(state.runtime, keyinput)
+    end
+
+    Gamepad.feed(state.gamepad_input, <<2, 7::unsigned-big-32, 0::unsigned-big-16>>)
+    assert await_keyinput(state.runtime, 0x03FF)
   end
 
   test "applies volume to the active system-neutral audio sink", %{path: path} do
@@ -411,6 +489,33 @@ defmodule Beamicom.Scenic.PlayerTest do
     refute second_port == first_port
   end
 
+  test "the paused status bar retains the last running FPS sample", %{path: path} do
+    assert :ok = Beamicom.Scenic.play(path, audio: false, pace: false)
+    host = Process.whereis(Host)
+    assert eventually(fn -> is_pid(:sys.get_state(host).shell) end)
+    shell = :sys.get_state(host).shell
+
+    assert eventually(
+             fn ->
+               case :sys.get_state(shell).assigns.session do
+                 %{status: %{fps: fps}} when is_number(fps) and fps > 0 -> true
+                 _session -> false
+               end
+             end,
+             1_000
+           )
+
+    running_fps = :sys.get_state(shell).assigns.session.status.fps
+    assert :ok = Beamicom.Scenic.pause()
+    assert eventually(fn -> :sys.get_state(shell).assigns.mode == :menu_paused end)
+
+    paused_scene = :sys.get_state(shell)
+    assert paused_scene.assigns.session.status.fps == running_fps
+    [status_bar] = Scenic.Graph.get(paused_scene.assigns.graph, :status_bar)
+    {_module, status, _name} = status_bar.data
+    assert status.fps == running_fps
+  end
+
   test "accepts the Game Boy Pixel Transparency presentation filter", %{path: path} do
     assert :ok =
              Beamicom.Scenic.play(path,
@@ -592,6 +697,47 @@ defmodule Beamicom.Scenic.PlayerTest do
 
     assert :ok = Beamicom.Scenic.replace(save_path, audio: false, speed: 0.01)
     assert %{state: :running, system: :gbc, path: ^save_path} = Beamicom.Scenic.status()
+  end
+
+  @tag :tmp_dir
+  test "prepares a GBA save PNG at its captured execution state", %{tmp_dir: tmp_dir} do
+    rom = GBA.DiagnosticROM.loop()
+    assert {:ok, machine} = GBA.Machine.load(rom)
+    {machine, [video, _audio]} = GBA.System.run_slice(machine)
+    path = Path.join(tmp_dir, "gba-state.png")
+    File.write!(path, GBA.ShareImage.to_png(machine, video.data))
+
+    assert {:ok, %{core: %{id: :gba}, machine: restored}} =
+             Player.prepare(path, audio: false)
+
+    assert restored.bus.cartridge.rom == rom
+
+    {_expected_machine, expected_outputs} = GBA.System.run_slice(machine)
+    {_actual_machine, actual_outputs} = GBA.System.run_slice(restored)
+    assert actual_outputs == expected_outputs
+  end
+
+  @tag :tmp_dir
+  test "snapshots and replaces a running GBA session from its PNG", %{tmp_dir: tmp_dir} do
+    rom_path = Path.join(tmp_dir, "diagnostic.gba")
+    save_path = Path.join(tmp_dir, "gba-state.png")
+    File.write!(rom_path, GBA.DiagnosticROM.loop())
+
+    assert :ok = Beamicom.Scenic.play(rom_path, audio: false, speed: 0.01)
+    assert {:ok, {:gba, machine, frame} = snapshot} = await_snapshot()
+    assert byte_size(frame) == 240 * 160 * 3
+    assert :ok = SaveState.write(snapshot, save_path)
+
+    assert :ok = Beamicom.Scenic.replace(save_path, audio: false, speed: 0.01)
+    assert %{state: :running, system: :gba, path: ^save_path} = Beamicom.Scenic.status()
+
+    restored =
+      Player
+      |> :sys.get_state()
+      |> Map.fetch!(:runtime)
+      |> Beamicom.Scenic.Runtime.snapshot()
+
+    assert restored.bus.cartridge.rom == machine.bus.cartridge.rom
   end
 
   @tag :tmp_dir
@@ -789,6 +935,18 @@ defmodule Beamicom.Scenic.PlayerTest do
     else
       Process.sleep(5)
       await_buttons(runtime, expected, attempts - 1)
+    end
+  end
+
+  defp await_keyinput(runtime, expected, attempts \\ 100)
+  defp await_keyinput(_runtime, _expected, 0), do: false
+
+  defp await_keyinput(runtime, expected, attempts) do
+    if :sys.get_state(runtime).machine.bus.keyinput == expected do
+      true
+    else
+      Process.sleep(5)
+      await_keyinput(runtime, expected, attempts - 1)
     end
   end
 

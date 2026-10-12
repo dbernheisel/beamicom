@@ -2,13 +2,15 @@ defmodule Beamicom.Scenic do
   @moduledoc """
   Local Scenic window, keyboard controls, and audio for Beamicom cores.
 
-  `.nes`, `.gb`, `.gbc`, `.sfc`, and `.smc` files are selected by extension. Existing NES save
-  PNGs are also accepted. The emulator cores remain independent of Scenic.
+  `.nes`, `.gb`, `.gbc`, `.gba`, `.sfc`, and `.smc` files are selected by extension. Existing
+  save PNGs for supported cores are also accepted. The emulator cores remain independent of
+  Scenic.
 
       Beamicom.Scenic.play("roms/game.nes")
       Beamicom.Scenic.play("roms/game.nes", video_filter: :composite, scale: 1)
       Beamicom.Scenic.play("roms/game.sfc", video_filter: :composite, scale: 1)
       Beamicom.Scenic.play("roms/game.gbc", video_filter: :pixel_transparency, scale: 4)
+      Beamicom.Scenic.play("roms/game.gba", scale: 3)
   """
 
   alias Beamicom.Scenic.Host
@@ -107,12 +109,12 @@ defmodule Beamicom.Scenic do
 
   defp format_error(path, {:unsupported_media_extension, extension}),
     do:
-      "#{path}: unsupported media extension #{inspect(extension)}; expected .nes, .gb, .gbc, .sfc, .smc, or a save .png"
+      "#{path}: unsupported media extension #{inspect(extension)}; expected .nes, .gb, .gbc, .gba, .sfc, .smc, or a save .png"
 
   defp format_error(path, {:invalid_option, option}), do: "#{path}: invalid #{option} option"
 
   defp format_error(path, {:save_load_failed, reason}),
-    do: "#{path}: could not load NES save (#{inspect(reason)})"
+    do: "#{path}: could not load save state (#{inspect(reason)})"
 
   defp format_error(path, reason), do: "#{path}: #{inspect(reason)}"
 end
