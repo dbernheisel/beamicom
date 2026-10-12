@@ -22,13 +22,6 @@ defmodule Beamicom.Host.Runtime do
   # scheduler stalls as discontinuities instead of publishing stale audio in a
   # wall-clock catch-up burst.
   @max_catchup_ns 50_000_000
-  @spawn_options [
-    spawn_opt: [
-      {:min_heap_size, @heap_words},
-      {:min_bin_vheap_size, @binary_heap_words}
-    ]
-  ]
-
   @enforce_keys [:system, :machine, :output, :period_ns, :epoch, :pace, :speed]
   defstruct @enforce_keys ++
               [
@@ -56,10 +49,15 @@ defmodule Beamicom.Host.Runtime do
   end
 
   def start_link(options) do
+    spawn_options = [
+      {:min_heap_size, Keyword.get(options, :min_heap_size, @heap_words)},
+      {:min_bin_vheap_size, Keyword.get(options, :min_bin_vheap_size, @binary_heap_words)}
+    ]
+
     server_options =
       case Keyword.get(options, :name) do
-        nil -> @spawn_options
-        name -> [{:name, name} | @spawn_options]
+        nil -> [spawn_opt: spawn_options]
+        name -> [name: name, spawn_opt: spawn_options]
       end
 
     GenServer.start_link(__MODULE__, options, server_options)
@@ -205,8 +203,8 @@ defmodule Beamicom.Host.Runtime do
   defp schedule(%__MODULE__{paused: true} = state), do: state
 
   defp schedule(%__MODULE__{pace: false} = state) do
-    timer = Process.send_after(self(), {:tick, state.generation}, 0)
-    %{state | timer: timer}
+    send(self(), {:tick, state.generation})
+    %{state | timer: nil}
   end
 
   defp schedule(state) do
@@ -221,7 +219,7 @@ defmodule Beamicom.Host.Runtime do
       # frame of work that the next system slice is expected to consume.
       work_budget = round(state.period_ns / state.speed)
       delay = max(0, next_period - work_budget)
-      timer = Process.send_after(self(), {:tick, state.generation}, div(delay, 1_000_000))
+      timer = schedule_tick(state.generation, delay)
 
       %{
         state
@@ -231,15 +229,19 @@ defmodule Beamicom.Host.Runtime do
           timer: timer
       }
     else
-      timer =
-        Process.send_after(
-          self(),
-          {:tick, state.generation},
-          max(0, div(deadline - current, 1_000_000))
-        )
+      timer = schedule_tick(state.generation, max(0, deadline - current))
 
       %{state | timer: timer}
     end
+  end
+
+  defp schedule_tick(generation, delay_ns) when delay_ns < 1_000_000 do
+    send(self(), {:tick, generation})
+    nil
+  end
+
+  defp schedule_tick(generation, delay_ns) do
+    Process.send_after(self(), {:tick, generation}, div(delay_ns, 1_000_000))
   end
 
   defp cancel_timer(nil), do: :ok

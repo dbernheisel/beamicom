@@ -93,6 +93,38 @@ defmodule Beamicom.Host.RuntimeTest do
     assert binary_heap >= @binary_heap_words
   end
 
+  test "accepts a larger heap profile for allocation-heavy systems" do
+    output = start_supervised!({Output, name: nil})
+
+    runtime =
+      start_supervised!(
+        {Runtime,
+         system: TestSystem,
+         machine: %{number: 0, input: nil, options: []},
+         output: output,
+         min_heap_size: 800_000}
+      )
+
+    assert {:min_heap_size, heap} = Process.info(runtime, :min_heap_size)
+    assert heap >= 800_000
+  end
+
+  test "runs unpaced slices without allocating zero-duration timers" do
+    output = start_supervised!({Output, name: nil})
+
+    runtime =
+      start_supervised!(
+        {Runtime,
+         system: TestSystem,
+         machine: %{number: 0, input: nil, options: []},
+         output: output,
+         pace: false}
+      )
+
+    assert %{machine: %{number: number}, timer: nil} = :sys.get_state(runtime)
+    assert number > 0
+  end
+
   test "pause, step, and resume retain one generation-tagged timer chain" do
     output = start_supervised!({Output, name: nil})
     :ok = Output.subscribe_video(output)
