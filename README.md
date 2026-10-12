@@ -2,9 +2,9 @@
 
 Beamicom is a multi-system emulator workspace written in Elixir. It contains
 separate headless NES and Game Boy/Game Boy Color cores, an early native SNES
-core, a small system-neutral
-host contract, NES desktop/Linux clients, and browser/local AV1/Opus clients
-that can run NES, Game Boy, and Game Boy Color ROMs.
+core, a new diagnostic-stage pure-Elixir GBA core, a small system-neutral
+host contract, a multi-system Scenic desktop client, an NES Linux client, and
+browser/local AV1/Opus clients that run NES, Game Boy, and Game Boy Color ROMs.
 
 ## In action
 
@@ -20,23 +20,27 @@ that can run NES, Game Boy, and Game Boy Color ROMs.
 | [`beamicom_ei`](./beamicom_ei/) | Shared pure-Elixir EI Unix-socket controller server and client | [EI documentation](./beamicom_ei/README.md) |
 | [`beamicom_nes`](./beamicom_nes/) | Headless NES core with native renderers and optional Nx/EXLA video and audio renderers | [Core documentation](./beamicom_nes/README.md) · [Mapper compatibility](./beamicom_nes/MAPPERS.md) |
 | [`beamicom_gbc`](./beamicom_gbc/) | Headless DMG/CGB core with native renderers and optional Nx/EXLA frame and audio renderers | [Game Boy core documentation](./beamicom_gbc/README.md) |
+| [`beamicom_gba`](./beamicom_gba/) | Diagnostic-stage pure-Elixir GBA core with scalar ARM/Thumb execution, tiled/bitmap video, and optional Nx acceleration | [GBA core status](./beamicom_gba/README.md) |
 | [`beamicom_snes`](./beamicom_snes/) | Early pure-Elixir SNES core: cartridge mapping, Mode 0/1 PPU, interrupts, audio timing, and a 65C816 interpreter seed | [SNES core status](./beamicom_snes/README.md) |
-| [`beamicom_scenic`](./beamicom_scenic/) | Desktop client using Scenic/OpenGL, with optional audio through `ffplay` | [Desktop setup and controls](./beamicom_scenic/README.md) |
+| [`beamicom_scenic`](./beamicom_scenic/) | Scenic/OpenGL desktop client for the NES, GB/GBC, GBA, and SNES cores | [Desktop setup and controls](./beamicom_scenic/README.md) |
 | [`beamicom_phx`](./beamicom_phx/) | Phoenix LiveView client with browser WebRTC and controls | [Web setup and modes](./beamicom_phx/README.md) |
 | [`beamicom_stream`](./beamicom_stream/) | Local AV1/Opus RTP client with terminal controls and optional ffplay launch | [Local streaming setup](./beamicom_stream/README.md) |
 | [`beamicom_v4l2`](./beamicom_v4l2/) | Linux framebuffer/V4L2 client with controller mapping | [Build and usage](./beamicom_v4l2/README.md) |
 
-Both cores depend on the sibling host contract and shared EI controller
-protocol. The client projects that use EI also declare it directly.
+The NES and GBC cores depend on the sibling host contract and shared EI
+controller protocol; the GBA core currently depends only on the host contract.
+The client projects that use EI also declare it directly.
 These are sibling path dependencies, so keep the directories together when
 working with an individual project.
 
 ```text
 beamicom_nes ─────> beamicom_host, beamicom_ei; optionally Nx and EXLA
 beamicom_gbc ─────> beamicom_host, beamicom_ei; optionally Nx and EXLA
+beamicom_gba ─────> beamicom_host; optionally Nx and EXLA
 beamicom_snes       native foundation; host integration follows PPU/APU output
 beamicom_stream ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
-beamicom_scenic ──> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
+beamicom_scenic ──> beamicom_nes, beamicom_gbc, beamicom_gba, beamicom_host,
+                    beamicom_ei
 beamicom_v4l2 ────> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei
 beamicom_phx ─────> beamicom_nes, beamicom_gbc, beamicom_host, beamicom_ei,
                     beamicom_stream
@@ -53,6 +57,9 @@ cd beamicom_nes
 mix test
 
 cd ../beamicom_gbc
+mix test
+
+cd ../beamicom_gba
 mix test
 
 cd ../beamicom_host

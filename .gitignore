@@ -1,7 +1,9 @@
 roms/
+*.gba
 *.sfc
 *.smc
 docs/
 .expert/
 .elixir_ls/
 .lexical/
+.reference/
