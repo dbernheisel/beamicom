@@ -6,6 +6,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   alias Beamicom.Scenic.{AudioSink, Screen}
 
   @discard_command ["sh", "-c", "cat >/dev/null"]
+  @unacknowledged_packet_command ["sh", "-c", "cat >/dev/null", "packet4"]
 
   test "streams the first PCM chunk without a startup delay" do
     pid =
@@ -100,7 +101,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     assert Process.alive?(pid)
   end
 
-  test "accepts typed stereo chunks from the Game Boy host output" do
+  test "retains every typed stereo chunk from a core-owned host output" do
     output = start_supervised!({Output, name: nil})
 
     pid =
@@ -122,12 +123,56 @@ defmodule Beamicom.Scenic.AudioSinkTest do
       data: <<1::signed-little-16, 2::signed-little-16, 3::signed-little-16, 4::signed-little-16>>
     }
 
-    Output.publish_audio(output, chunk)
+    :sys.suspend(pid)
+
+    for sample <- 1..100 do
+      Output.publish_audio(output, %{chunk | data: stereo_sample(sample)})
+    end
+
     :sys.get_state(output)
+
+    assert {:message_queue_len, 100} = Process.info(pid, :message_queue_len)
+
+    :sys.resume(pid)
     :sys.get_state(pid)
+
     assert Process.alive?(pid)
-    assert Map.has_key?(:sys.get_state(output).audio, pid)
-    refute MapSet.member?(:sys.get_state(output).latest_audio_subscribers, pid)
+
+    output_state = :sys.get_state(output)
+    assert output_state.audio[pid] == :envelope
+    refute MapSet.member?(output_state.latest_audio_subscribers, pid)
+    refute MapSet.member?(output_state.audio_notifications, pid)
+  end
+
+  test "bounds native audio waiting for a stalled player and retains the newest PCM" do
+    audio = %{sample_rate: 1_000, channels: 1, sample_format: :s16le}
+
+    pid =
+      start_supervised!(
+        {AudioSink,
+         command: @unacknowledged_packet_command,
+         name: :bounded_audio_sink,
+         audio: audio,
+         prebuffer_ms: 0}
+      )
+
+    chunks =
+      for sample <- 1..100 do
+        pcm = :binary.copy(<<sample::signed-little-16>>, 20)
+        send(pid, {:audio, 20, pcm})
+        pcm
+      end
+
+    state = :sys.get_state(pid)
+
+    assert state.in_flight?
+    assert state.max_outbox_bytes == 80
+    assert state.outbox_bytes == 80
+    assert state.dropped_audio_frames == 1_940
+
+    assert [{second_last, 40}, {last, 40}] = :queue.to_list(state.outbox)
+    assert second_last == Enum.at(chunks, -2)
+    assert last == List.last(chunks)
   end
 
   test "prebuffers typed 32 kHz stereo chunks from the SNES host output" do
@@ -166,7 +211,7 @@ defmodule Beamicom.Scenic.AudioSinkTest do
     native = Application.app_dir(:beamicom_scenic, "priv/native/audio_player")
 
     if File.regular?(native) do
-      assert command == [native, "44100", "1", "40"]
+      assert command == [native, "44100", "1", "40", "packet4"]
     else
       assert ["ffplay" | _args] = command
     end
@@ -226,5 +271,10 @@ defmodule Beamicom.Scenic.AudioSinkTest do
   test "legacy audio start retains its registered process name" do
     pid = start_supervised!({Beamicom.NES.AudioSink, command: @discard_command})
     assert Process.whereis(Beamicom.NES.AudioSink) == pid
+  end
+
+  defp stereo_sample(sample) do
+    <<sample::signed-little-16, -sample::signed-little-16, sample::signed-little-16,
+      -sample::signed-little-16>>
   end
 end

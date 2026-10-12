@@ -3,10 +3,11 @@ defmodule Beamicom.Scenic.AudioSink do
   System-aware audio sink for the Scenic host. It subscribes to either the NES
   compatibility output or a core-owned `Beamicom.Host.Output`, validates typed
   PCM chunks, and writes raw signed-16-bit little-endian audio to an external
-  player. This supports NES mono plus Game Boy and SNES stereo without changing
-  any emulator core. Audio chunks remain lossless and the external player
-  applies backpressure at its bounded device queue, preserving waveform
-  continuity without accumulating unbounded device latency.
+  player. This supports NES mono plus handheld and SNES stereo without changing
+  any emulator core. The native player acknowledges one framed PCM packet at a
+  time after placing it in its bounded device queue. Normal playback remains
+  lossless; if a stalled device falls behind, the sink discards only stale
+  queued packets so realtime audio cannot accumulate seconds of latency.
 
   At normal speed, macOS and Linux use a small SDL helper whose device queue is
   bounded by the device's consumed-byte clock. ffplay remains the fallback and
@@ -28,6 +29,8 @@ defmodule Beamicom.Scenic.AudioSink do
   @default_prebuffer_ms 40
   @demux_sample_rate 8_000
   @max_device_queue_ms 40
+  @max_outbox_ms 40
+  @native_protocol "packet4"
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -69,7 +72,8 @@ defmodule Beamicom.Scenic.AudioSink do
         :ignore
 
       path ->
-        port = open_player(path, args)
+        packetized? = List.last(args) == @native_protocol
+        port = open_player(path, args, packetized?)
         :ok = subscribe(output)
 
         {:ok,
@@ -79,6 +83,12 @@ defmodule Beamicom.Scenic.AudioSink do
            args: args,
            audio: audio,
            volume: volume,
+           packetized?: packetized?,
+           in_flight?: false,
+           outbox: :queue.new(),
+           outbox_bytes: 0,
+           max_outbox_bytes: audio_bytes(audio, @max_outbox_ms),
+           dropped_audio_frames: 0,
            ready?: prebuffer_frames == 0,
            pending: [],
            pending_frames: 0,
@@ -117,7 +127,8 @@ defmodule Beamicom.Scenic.AudioSink do
         path,
         Integer.to_string(audio.sample_rate),
         Integer.to_string(audio.channels),
-        Integer.to_string(@max_device_queue_ms)
+        Integer.to_string(@max_device_queue_ms),
+        @native_protocol
       ]
     end
   end
@@ -156,7 +167,7 @@ defmodule Beamicom.Scenic.AudioSink do
     do: {:reply, :ok, state}
 
   def handle_call(:resume, _from, state) do
-    port = open_player(state.executable, state.args)
+    port = open_player(state.executable, state.args, state.packetized?)
     {:reply, :ok, reset_playback(state, port)}
   end
 
@@ -186,6 +197,24 @@ defmodule Beamicom.Scenic.AudioSink do
 
   def handle_info({:frame, _number}, state), do: {:noreply, state}
 
+  def handle_info(
+        {port, {:data, <<1>>}},
+        %{port: port, packetized?: true, in_flight?: true} = state
+      ) do
+    case :queue.out(state.outbox) do
+      {{:value, {pcm, pcm_bytes}}, outbox} ->
+        state = %{state | outbox: outbox, outbox_bytes: state.outbox_bytes - pcm_bytes}
+
+        case send_pcm(state, pcm) do
+          {:ok, state} -> {:noreply, state}
+          {:error, state} -> {:stop, :audio_player_closed, state}
+        end
+
+      {:empty, _outbox} ->
+        {:noreply, %{state | in_flight?: false}}
+    end
+  end
+
   # The player exited (e.g. pipe closed or no audio device); shut down cleanly.
   def handle_info({port, {:exit_status, _}}, %{port: port} = state), do: {:stop, :normal, state}
   # Ignore video notifications and the player's own stdout.
@@ -214,12 +243,11 @@ defmodule Beamicom.Scenic.AudioSink do
   defp subscribe(NESOutput), do: NESOutput.subscribe_audio_chunks()
   defp subscribe(output), do: Output.subscribe_audio(output)
 
-  defp open_player(executable, args),
-    do:
-      Port.open(
-        {:spawn_executable, executable},
-        [:binary, :exit_status, {:parallelism, false}, args: args]
-      )
+  defp open_player(executable, args, packetized?) do
+    options = [:binary, :exit_status, {:parallelism, false}, args: args]
+    options = if packetized?, do: [{:packet, 4} | options], else: options
+    Port.open({:spawn_executable, executable}, options)
+  end
 
   defp close_player(nil), do: :ok
 
@@ -233,6 +261,9 @@ defmodule Beamicom.Scenic.AudioSink do
       state
       | port: port,
         ready?: state.prebuffer_frames == 0,
+        in_flight?: false,
+        outbox: :queue.new(),
+        outbox_bytes: 0,
         pending: [],
         pending_frames: 0
     }
@@ -275,8 +306,49 @@ defmodule Beamicom.Scenic.AudioSink do
   defp command_audio(state, pcm) do
     pcm = adjust_volume(pcm, state.volume)
 
+    if state.packetized? and state.in_flight? do
+      {:ok, enqueue_realtime_pcm(state, pcm)}
+    else
+      send_pcm(state, pcm)
+    end
+  end
+
+  defp enqueue_realtime_pcm(state, pcm) do
+    pcm_bytes = IO.iodata_length(pcm)
+    limit = max(state.max_outbox_bytes, pcm_bytes)
+    outbox = :queue.in({pcm, pcm_bytes}, state.outbox)
+
+    {outbox, outbox_bytes, dropped_bytes} =
+      trim_outbox(outbox, state.outbox_bytes + pcm_bytes, limit, 0)
+
+    frame_bytes = state.audio.channels * 2
+
+    %{
+      state
+      | outbox: outbox,
+        outbox_bytes: outbox_bytes,
+        dropped_audio_frames: state.dropped_audio_frames + div(dropped_bytes, frame_bytes)
+    }
+  end
+
+  defp trim_outbox(outbox, outbox_bytes, limit, dropped_bytes)
+       when outbox_bytes > limit do
+    {{:value, {_pcm, pcm_bytes}}, outbox} = :queue.out(outbox)
+
+    trim_outbox(
+      outbox,
+      outbox_bytes - pcm_bytes,
+      limit,
+      dropped_bytes + pcm_bytes
+    )
+  end
+
+  defp trim_outbox(outbox, outbox_bytes, _limit, dropped_bytes),
+    do: {outbox, outbox_bytes, dropped_bytes}
+
+  defp send_pcm(state, pcm) do
     if Port.command(state.port, pcm) do
-      {:ok, state}
+      {:ok, %{state | in_flight?: state.packetized?}}
     else
       restart_player(state, pcm)
     end
@@ -286,10 +358,12 @@ defmodule Beamicom.Scenic.AudioSink do
 
   defp restart_player(state, pcm) do
     close_player(state.port)
-    port = open_player(state.executable, state.args)
+    port = open_player(state.executable, state.args, state.packetized?)
     state = %{reset_playback(state, port) | ready?: true}
 
-    if Port.command(port, pcm), do: {:ok, state}, else: {:error, state}
+    if Port.command(port, pcm),
+      do: {:ok, %{state | in_flight?: state.packetized?}},
+      else: {:error, state}
   end
 
   defp adjust_volume(pcm, 100), do: pcm
@@ -307,6 +381,11 @@ defmodule Beamicom.Scenic.AudioSink do
     chunk.sample_rate == audio.sample_rate and chunk.channels == audio.channels and
       chunk.sample_format == audio.sample_format and
       byte_size(chunk.data) == chunk.frame_count * chunk.channels * 2
+  end
+
+  defp audio_bytes(audio, milliseconds) do
+    frames = div(audio.sample_rate * milliseconds + 999, 1_000)
+    frames * audio.channels * 2
   end
 
   defp format(:s16le), do: "s16le"
