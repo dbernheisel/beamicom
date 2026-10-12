@@ -4,14 +4,16 @@ defmodule Beamicom.Scenic.Component.PopupMenu do
   import Scenic.Primitives, only: [rect: 3]
 
   alias Beamicom.Scenic.Component.MenuItem
-  alias Beamicom.Scenic.Theme
+  alias Beamicom.Scenic.{Text, Theme}
 
   @minimum_width 286
   @maximum_width 760
   @font_size 23
   @horizontal_padding 38
 
-  def width(items) do
+  def width(items, maximum_width \\ @maximum_width)
+
+  def width(items, maximum_width) when is_number(maximum_width) and maximum_width > 0 do
     label_width =
       items
       |> Enum.reject(&(&1 == :separator))
@@ -25,18 +27,19 @@ defmodule Beamicom.Scenic.Component.PopupMenu do
         do: label_width + 210,
         else: @minimum_width
 
-    label_width |> max(minimum_width) |> min(@maximum_width)
+    label_width |> max(minimum_width) |> min(maximum_width)
   end
 
-  defp text_width(text) do
-    case Scenic.Assets.Static.meta(:beamicom_ui) do
-      {:ok, {Scenic.Assets.Static.Font, metrics}} -> FontMetrics.width(text, @font_size, metrics)
-      _error -> String.length(text) * @font_size
-    end
-  end
+  defp text_width(text), do: Text.width(text, @font_size)
 
-  def add_to_graph(graph, items, selected_item, id_prefix \\ :menu_item) do
-    width = width(items)
+  def add_to_graph(
+        graph,
+        items,
+        selected_item,
+        id_prefix \\ :menu_item,
+        maximum_width \\ @maximum_width
+      ) do
+    width = width(items, maximum_width)
     height = length(items) * MenuItem.height() + 12
 
     graph =

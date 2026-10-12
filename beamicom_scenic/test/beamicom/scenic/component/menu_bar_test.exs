@@ -2,7 +2,7 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
   use ExUnit.Case, async: true
 
   alias Beamicom.Scenic.Component.{MenuBar, MenuItem, PopupMenu}
-  alias Beamicom.Scenic.{Menu, Settings}
+  alias Beamicom.Scenic.{Menu, Settings, Text}
 
   test "the menu model derives session-only action availability" do
     settings = %{
@@ -163,6 +163,28 @@ defmodule Beamicom.Scenic.Component.MenuBarTest do
     assert MenuBar.next_enabled(items, 0, 1) == 3
     assert MenuBar.next_enabled(items, 3, 1) == 0
     assert MenuBar.next_enabled(items, 0, -1) == 3
+  end
+
+  test "long recent-ROM labels fit inside the capped popup" do
+    item = %{
+      id: :recent,
+      label: String.duplicate("A very long game title ", 12) <> ".gba",
+      action: :recent,
+      enabled: true
+    }
+
+    width = PopupMenu.width([item])
+    label = MenuItem.fitted_label(item, width)
+
+    assert width == 760
+    assert String.ends_with?(label, "…")
+    assert Text.width(label, 23) <= width - 30
+
+    narrow_width = PopupMenu.width([item], 320)
+    narrow_label = MenuItem.fitted_label(item, narrow_width)
+
+    assert narrow_width == 320
+    assert Text.width(narrow_label, 23) <= narrow_width - 30
   end
 
   test "unfinished systems can reset while showing disabled save-state actions" do

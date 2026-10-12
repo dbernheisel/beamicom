@@ -5,7 +5,7 @@ defmodule Beamicom.Scenic.Component.StatusBar do
 
   import Scenic.Primitives, only: [rect: 3, text: 3]
 
-  alias Beamicom.Scenic.Theme
+  alias Beamicom.Scenic.{Text, Theme}
   alias Scenic.Graph
 
   @height 48
@@ -30,27 +30,38 @@ defmodule Beamicom.Scenic.Component.StatusBar do
 
   def height, do: @height
 
-  defp build_graph(width, data) do
+  @doc false
+  def build_graph(width, data) do
     fps = Map.get(data, :fps)
     rom = Map.get(data, :rom)
     controller = Map.get(data, :controller, "pad 1: --")
     message = Map.get(data, :message)
+    fps_text = if(fps, do: "FPS #{format_fps(fps)}", else: "FPS --")
+    rom_text = if(rom, do: "ROM: #{rom}", else: "ROM: none")
+    right_text = message || controller
+
+    fps_text = Text.fit(fps_text, max(width * 0.23 - 18, 0), 18)
+    rom_text = Text.fit(rom_text, max(width * 0.41, 0), 18)
+    right_text = Text.fit(right_text, max(width * 0.29 - 18, 0), 18)
 
     Graph.build()
     |> rect({width, @height}, fill: {7, 28, 72, 235}, stroke: {2, Theme.cyan()})
-    |> text(if(fps, do: "FPS #{format_fps(fps)}", else: "FPS --"),
+    |> text(fps_text,
+      id: :fps,
       fill: Theme.white(),
       font: :beamicom_ui,
       font_size: 18,
       t: {18, 31}
     )
-    |> text(if(rom, do: "ROM: #{rom}", else: "ROM: none"),
+    |> text(rom_text,
+      id: :rom,
       fill: Theme.muted(),
       font: :beamicom_ui,
       font_size: 18,
       t: {width * 0.27, 31}
     )
-    |> text(message || controller,
+    |> text(right_text,
+      id: :right,
       fill: if(message, do: Theme.white(), else: Theme.cyan()),
       font: :beamicom_ui,
       font_size: 18,

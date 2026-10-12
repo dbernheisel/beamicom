@@ -3,12 +3,13 @@ defmodule Beamicom.Scenic.Component.MenuItem do
 
   import Scenic.Primitives, only: [circle: 3, line: 3, rect: 3, text: 3]
 
-  alias Beamicom.Scenic.Theme
+  alias Beamicom.Scenic.{Text, Theme}
 
   @height 42
   @font_size 23
   @slider_gap 30
   @slider_end_padding 28
+  @slider_minimum_width 140
 
   def height, do: @height
 
@@ -30,6 +31,16 @@ defmodule Beamicom.Scenic.Component.MenuItem do
     do: item |> put_in([:slider, :value], slider.max) |> display_label()
 
   def layout_label(item), do: display_label(item)
+
+  @doc false
+  def fitted_label(item, width) do
+    maximum_width =
+      if slider?(item),
+        do: slider_label_width(width),
+        else: max(width - 30, 0)
+
+    Text.fit(display_label(item), maximum_width, @font_size)
+  end
 
   @doc false
   def slider?(%{slider: %{min: min, max: max, value: value}})
@@ -71,7 +82,7 @@ defmodule Beamicom.Scenic.Component.MenuItem do
       )
 
     graph =
-      text(graph, display_label(item),
+      text(graph, fitted_label(item, width),
         fill: if(enabled, do: Theme.white(), else: Theme.muted()),
         font: :beamicom_ui,
         font_size: @font_size,
@@ -96,14 +107,13 @@ defmodule Beamicom.Scenic.Component.MenuItem do
   end
 
   defp slider_track(item, width) do
-    label_end = 15 + text_width(layout_label(item))
+    label = Text.fit(layout_label(item), slider_label_width(width), @font_size)
+    label_end = 15 + text_width(label)
     {label_end + @slider_gap, width - @slider_end_padding}
   end
 
-  defp text_width(text) do
-    case Scenic.Assets.Static.meta(:beamicom_ui) do
-      {:ok, {Scenic.Assets.Static.Font, metrics}} -> FontMetrics.width(text, @font_size, metrics)
-      _error -> String.length(text) * @font_size
-    end
-  end
+  defp slider_label_width(width),
+    do: max(width - 15 - @slider_gap - @slider_end_padding - @slider_minimum_width, 0)
+
+  defp text_width(text), do: Text.width(text, @font_size)
 end

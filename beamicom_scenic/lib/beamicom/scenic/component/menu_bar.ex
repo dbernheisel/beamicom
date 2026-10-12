@@ -186,7 +186,15 @@ defmodule Beamicom.Scenic.Component.MenuBar do
         {x, _width} = Enum.at(positions, index)
 
         graph =
-          group(graph, &PopupMenu.add_to_graph(&1, menu.items, state.selected_item),
+          group(
+            graph,
+            &PopupMenu.add_to_graph(
+              &1,
+              menu.items,
+              state.selected_item,
+              :menu_item,
+              max(data.width - x, 1)
+            ),
             t: {x, @height + 8}
           )
 
@@ -198,8 +206,8 @@ defmodule Beamicom.Scenic.Component.MenuBar do
        when is_integer(index) do
     case Enum.at(items, index) do
       %{submenu: submenu} when is_list(submenu) and submenu != [] ->
-        parent_width = PopupMenu.width(items)
-        submenu_width = PopupMenu.width(submenu)
+        parent_width = PopupMenu.width(items, max(available_width - x, 1))
+        submenu_width = PopupMenu.width(submenu, max(available_width, 1))
         right = x + parent_width + 4
         left = x - submenu_width - 4
 
@@ -212,7 +220,13 @@ defmodule Beamicom.Scenic.Component.MenuBar do
 
         group(
           graph,
-          &PopupMenu.add_to_graph(&1, submenu, state.selected_subitem, :submenu_item),
+          &PopupMenu.add_to_graph(
+            &1,
+            submenu,
+            state.selected_subitem,
+            :submenu_item,
+            max(available_width, 1)
+          ),
           t: {submenu_x, @height + 14 + index * MenuItem.height()}
         )
 
