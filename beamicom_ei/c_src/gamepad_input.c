@@ -11,7 +11,7 @@
 
 #define MAX_CONTROLLERS 16
 #define MAX_NAME_BYTES 240
-#define STICK_DEAD_ZONE 16384
+#define STICK_DEAD_ZONE 8192
 
 #define MESSAGE_CONNECTED 1
 #define MESSAGE_STATE 2
@@ -181,6 +181,34 @@ static uint16_t digital_buttons(SDL_GameController *controller) {
   return buttons;
 }
 
+static uint16_t directional_hat_buttons(SDL_GameController *controller) {
+  SDL_Joystick *joystick = SDL_GameControllerGetJoystick(controller);
+  uint16_t buttons = 0;
+  int hat_count = SDL_JoystickNumHats(joystick);
+
+  for (int index = 0; index < hat_count; index++) {
+    Uint8 hat = SDL_JoystickGetHat(joystick, index);
+
+    if ((hat & SDL_HAT_UP) != 0) {
+      buttons |= BUTTON_UP;
+    }
+
+    if ((hat & SDL_HAT_DOWN) != 0) {
+      buttons |= BUTTON_DOWN;
+    }
+
+    if ((hat & SDL_HAT_LEFT) != 0) {
+      buttons |= BUTTON_LEFT;
+    }
+
+    if ((hat & SDL_HAT_RIGHT) != 0) {
+      buttons |= BUTTON_RIGHT;
+    }
+  }
+
+  return buttons;
+}
+
 static uint16_t controller_buttons(const controller_slot_t *slot) {
   uint16_t buttons = slot->digital_buttons;
 
@@ -215,7 +243,8 @@ static int publish_controller(controller_slot_t *slot, int force) {
 }
 
 static int refresh_controller(controller_slot_t *slot, int force) {
-  slot->digital_buttons = digital_buttons(slot->controller);
+  slot->digital_buttons = digital_buttons(slot->controller) |
+                          directional_hat_buttons(slot->controller);
   slot->left_x =
       SDL_GameControllerGetAxis(slot->controller, SDL_CONTROLLER_AXIS_LEFTX);
   slot->left_y =
